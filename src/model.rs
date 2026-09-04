@@ -357,6 +357,220 @@ pub struct FileOperation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstructionScope {
+    Global,
+    ProjectRoot,
+    ProjectNested,
+}
+
+impl InstructionScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::ProjectRoot => "project_root",
+            Self::ProjectNested => "project_nested",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstructionFileKind {
+    Override,
+    Standard,
+    Fallback(String),
+    Observed,
+}
+
+impl InstructionFileKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Override => "override",
+            Self::Standard => "standard",
+            Self::Fallback(_) => "fallback",
+            Self::Observed => "observed",
+        }
+    }
+
+    pub fn fallback_name(&self) -> Option<&str> {
+        match self {
+            Self::Fallback(name) => Some(name),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstructionFileState {
+    Selected,
+    Empty,
+    Missing,
+    Unreadable,
+    Truncated,
+}
+
+impl InstructionFileState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Selected => "selected",
+            Self::Empty => "empty",
+            Self::Missing => "missing",
+            Self::Unreadable => "unreadable",
+            Self::Truncated => "truncated",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionFile {
+    pub path: PathBuf,
+    pub scope: InstructionScope,
+    pub kind: InstructionFileKind,
+    pub state: InstructionFileState,
+    pub chain_position: Option<usize>,
+    pub content: Option<String>,
+    pub content_hash: Option<String>,
+    pub byte_count: usize,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProjectRootStatus {
+    Known,
+    Missing,
+    Conflict,
+    Unavailable,
+}
+
+impl ProjectRootStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Known => "known",
+            Self::Missing => "missing",
+            Self::Conflict => "conflict",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstructionDiagnosticKind {
+    GlobalScopeUnavailable,
+    MissingProjectRoot,
+    ProjectRootNotDirectory,
+    CwdOutsideProjectRoot,
+    RelativePath,
+    Unreadable,
+    Truncated,
+}
+
+impl InstructionDiagnosticKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GlobalScopeUnavailable => "global_scope_unavailable",
+            Self::MissingProjectRoot => "missing_project_root",
+            Self::ProjectRootNotDirectory => "project_root_not_directory",
+            Self::CwdOutsideProjectRoot => "cwd_outside_project_root",
+            Self::RelativePath => "relative_path",
+            Self::Unreadable => "unreadable",
+            Self::Truncated => "truncated",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionDiagnostic {
+    pub path: Option<PathBuf>,
+    pub kind: InstructionDiagnosticKind,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionResolution {
+    pub project_root: Option<PathBuf>,
+    pub cwd: Option<PathBuf>,
+    pub project_root_status: ProjectRootStatus,
+    pub files: Vec<InstructionFile>,
+    pub chain: Vec<InstructionFile>,
+    pub effective_content: Option<String>,
+    pub effective_chain_hash: Option<String>,
+    pub byte_count: usize,
+    pub truncated: bool,
+    pub diagnostics: Vec<InstructionDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstructionSnapshotSource {
+    Rollout,
+    FilesystemAtIngest,
+    Unavailable,
+}
+
+impl InstructionSnapshotSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rollout => "rollout",
+            Self::FilesystemAtIngest => "filesystem_at_ingest",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstructionSnapshotAccuracy {
+    Observed,
+    Reconstructed,
+    Unavailable,
+}
+
+impl InstructionSnapshotAccuracy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+            Self::Reconstructed => "reconstructed",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionSnapshotEntry {
+    pub path: PathBuf,
+    pub scope: Option<InstructionScope>,
+    pub kind: InstructionFileKind,
+    pub state: InstructionFileState,
+    pub chain_position: usize,
+    pub content_hash: Option<String>,
+    pub byte_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionSnapshot {
+    pub session_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub source: InstructionSnapshotSource,
+    pub accuracy: InstructionSnapshotAccuracy,
+    pub content: Option<String>,
+    pub content_hash: Option<String>,
+    pub byte_count: usize,
+    pub chain: Vec<InstructionSnapshotEntry>,
+    pub effective_chain_hash: Option<String>,
+    pub truncated: bool,
+    pub provenance: SourceRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionJoin {
+    pub session_id: String,
+    pub cwd: Option<PathBuf>,
+    pub project_root: Option<PathBuf>,
+    pub project_root_status: ProjectRootStatus,
+    pub resolution: InstructionResolution,
+    pub nearest_path: Option<PathBuf>,
+    pub nearest_scope: Option<InstructionScope>,
+    pub provenance: SourceRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiagnosticKind {
     MalformedJson,
     OversizedLine,
@@ -399,4 +613,6 @@ pub struct CanonicalData {
     pub file_operations: Vec<FileOperation>,
     pub token_usage: Vec<TokenUsage>,
     pub diagnostics: Vec<CanonicalDiagnostic>,
+    pub instruction_snapshots: Vec<InstructionSnapshot>,
+    pub instruction_joins: Vec<InstructionJoin>,
 }

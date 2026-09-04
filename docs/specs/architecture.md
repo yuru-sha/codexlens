@@ -194,9 +194,19 @@ The resolver must record:
 - whether the snapshot came from the rollout, the filesystem at ingest time,
   or was unavailable.
 
+Rollout-provided instruction text is marked observed; a filesystem chain is
+marked reconstructed at ingest time; unavailable snapshots carry no content or
+hash and are inconclusive for later comparisons.
+
 Historical analysis must never silently compare an old session with only
 today's files. If an exact historical snapshot is unavailable, the finding
 must say so.
+
+The instruction-related `config.toml` subset is intentionally small:
+`project_doc_fallback_filenames` defaults to an empty list and
+`project_doc_max_bytes` defaults to 32 KiB. An explicit config path wins over
+`$CODEX_HOME/config.toml`; malformed or unreadable input keeps these defaults
+and produces a bounded diagnostic. Unknown settings are ignored.
 
 When a rollout and state index provide the same session, rollout
 `session_meta` values are authoritative because they belong to the event
