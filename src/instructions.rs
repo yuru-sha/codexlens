@@ -536,7 +536,7 @@ fn read_candidate(
             return unreadable("instruction file is not valid UTF-8".to_owned(), byte_count);
         }
     };
-    if content.trim().is_empty() {
+    if !truncated && content.trim().is_empty() {
         return base(InstructionFileState::Empty, None, None, byte_count, None);
     }
     let hash = content_hash(&bytes);
@@ -894,6 +894,37 @@ mod tests {
         assert!(result.files.iter().any(|file| {
             file.path.ends_with("AGENTS.override.md") && file.state == InstructionFileState::Empty
         }));
+    }
+
+    #[test]
+    fn truncated_whitespace_consumes_project_budget() {
+        let temp = TempDir::new();
+        let root = temp.0.join("project");
+        let nested = root.join("src");
+        fs::create_dir_all(&nested).unwrap();
+        write(&root.join("AGENTS.md"), "    ");
+        write(&nested.join("AGENTS.md"), "later");
+        let resolver = InstructionResolver::new(
+            None,
+            InstructionConfig {
+                project_doc_fallback_filenames: Vec::new(),
+                project_doc_max_bytes: 3,
+            },
+        );
+
+        let result = resolver.resolve(Some(&root), Some(&nested));
+
+        assert_eq!(result.chain.len(), 1);
+        assert_eq!(result.chain[0].state, InstructionFileState::Truncated);
+        assert_eq!(result.chain[0].content.as_deref(), Some("   "));
+        assert_eq!(result.byte_count, 3);
+        assert!(result.truncated);
+        assert!(
+            !result
+                .files
+                .iter()
+                .any(|file| file.path == nested.join("AGENTS.md"))
+        );
     }
 
     #[test]
