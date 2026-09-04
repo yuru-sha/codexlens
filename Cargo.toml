@@ -1,0 +1,17 @@
+[package]
+name = "codexlens"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Analyze Codex sessions and turn recurring friction into actionable AGENTS.md improvements."
+repository = "https://github.com/yuru-sha/codexlens"
+readme = "README.md"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
