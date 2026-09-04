@@ -8,10 +8,10 @@ use crate::instructions::{
     unavailable_snapshot,
 };
 use crate::model::{
-    CanonicalData, CanonicalDiagnostic, DiagnosticKind, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES,
-    MAX_TOOL_SUMMARY_BYTES, Message, MessageRole, OutcomeSource, Record, RecordKind, Session,
-    SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn, TurnLifecycleEvent,
-    merge_session_fields,
+    CanonicalData, CanonicalDiagnostic, DiagnosticKind, FileOperation, MAX_MESSAGE_BYTES,
+    MAX_TOOL_OUTPUT_BYTES, MAX_TOOL_SUMMARY_BYTES, Message, MessageRole, OutcomeSource, Record,
+    RecordKind, Session, SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn,
+    TurnLifecycleEvent, merge_session_fields,
 };
 use crate::rollout::{
     KnownRecordType, ParseDiagnostic, RolloutInstructionContext, RolloutParseResult, RolloutRecord,
@@ -286,7 +286,196 @@ fn normalize_records_with_resolver(
     deduplicate_token_usage(&mut data.token_usage);
     mark_tool_results(&mut data.tool_calls, &mut data.tool_results);
     mark_duplicate_tool_results(&mut data.tool_results);
+    extract_file_operations(&mut data);
     data
+}
+
+fn extract_file_operations(data: &mut CanonicalData) {
+    let calls = data.tool_calls.clone();
+    for call in &calls {
+        let command = call
+            .command
+            .as_deref()
+            .or(call.input_summary.as_deref())
+            .unwrap_or_default();
+        let timestamp = record_timestamp(data, &call.provenance);
+        append_observed_file_operations(
+            &mut data.file_operations,
+            call.session_id.clone(),
+            call.turn_id.clone(),
+            call.tool_name.as_deref().unwrap_or_default(),
+            command,
+            &call.provenance,
+            timestamp,
+        );
+    }
+    for result in &data.tool_results {
+        if result.matched_call || result.is_duplicate {
+            continue;
+        }
+        let command = result.command.as_deref().unwrap_or_default();
+        let timestamp = record_timestamp(data, &result.provenance);
+        append_observed_file_operations(
+            &mut data.file_operations,
+            result.session_id.clone(),
+            result.turn_id.clone(),
+            "",
+            command,
+            &result.provenance,
+            timestamp,
+        );
+    }
+    data.file_operations.sort_by(|left, right| {
+        left.session_id
+            .cmp(&right.session_id)
+            .then_with(|| left.timestamp.cmp(&right.timestamp))
+            .then_with(|| left.provenance.path.cmp(&right.provenance.path))
+            .then_with(|| left.provenance.line.cmp(&right.provenance.line))
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.operation.cmp(&right.operation))
+    });
+    data.file_operations.dedup_by(|right, left| {
+        right.session_id == left.session_id
+            && right.turn_id == left.turn_id
+            && right.path == left.path
+            && right.operation == left.operation
+            && right.provenance.path == left.provenance.path
+            && right.provenance.line == left.provenance.line
+    });
+}
+
+fn append_observed_file_operations(
+    operations: &mut Vec<FileOperation>,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    tool_name: &str,
+    command: &str,
+    provenance: &SourceRef,
+    timestamp: Option<String>,
+) {
+    if session_id.is_none() {
+        return;
+    }
+    let text = command_payload_text(command);
+    let tool = normalize_token(tool_name).to_ascii_lowercase();
+    let explicit_tool = matches!(
+        tool.as_str(),
+        "apply_patch" | "edit_file" | "write_file" | "create_file" | "replace_file"
+    );
+    let mut observed = Vec::new();
+    let mut patch_operation = None;
+    for line in text.lines() {
+        let Some((operation, path)) = [
+            ("*** Update File:", "edit"),
+            ("*** Add File:", "create"),
+            ("*** Delete File:", "delete"),
+        ]
+        .iter()
+        .find_map(|(marker, operation)| {
+            line.trim()
+                .strip_prefix(marker)
+                .map(|path| (*operation, path.trim().to_owned()))
+        }) else {
+            continue;
+        };
+        patch_operation = Some(operation);
+        if !path.is_empty() {
+            observed.push((operation.to_owned(), path));
+        }
+    }
+    if observed.is_empty() && explicit_tool {
+        if let Some(path) = json_string_field(command, &["path", "file_path", "filename"]) {
+            observed.push((
+                if tool == "create_file" {
+                    "create".to_owned()
+                } else {
+                    patch_operation.unwrap_or("edit").to_owned()
+                },
+                path,
+            ));
+        }
+    }
+    if observed.is_empty() {
+        let tokens = text.split_whitespace().collect::<Vec<_>>();
+        for (index, token) in tokens.iter().enumerate() {
+            let operation = token.starts_with('>').then_some("write");
+            let Some(operation) = operation else {
+                continue;
+            };
+            let path = if *token == ">" || *token == ">>" {
+                tokens.get(index + 1).copied()
+            } else {
+                token.strip_prefix('>')
+            };
+            if let Some(path) = path.filter(|path| !path.is_empty()) {
+                observed.push((
+                    operation.to_owned(),
+                    path.trim_matches(|c| c == '\'' || c == '"').to_owned(),
+                ));
+            }
+        }
+    }
+    for (operation, path) in observed {
+        operations.push(FileOperation {
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            path,
+            operation,
+            timestamp: timestamp.clone(),
+            provenance: provenance.clone(),
+        });
+    }
+}
+
+fn command_payload_text(command: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(command) else {
+        return command.to_owned();
+    };
+    if let Some(value) = value.as_str() {
+        return value.to_owned();
+    }
+    if let Some(values) = value.as_array() {
+        return values
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    if let Some(object) = value.as_object() {
+        for key in ["cmd", "command", "patch", "path", "file_path", "filename"] {
+            if let Some(value) = object.get(key) {
+                let text = if let Some(value) = value.as_str() {
+                    value.to_owned()
+                } else {
+                    command_payload_text(&value.to_string())
+                };
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+        }
+    }
+    command.to_owned()
+}
+
+fn json_string_field(command: &str, names: &[&str]) -> Option<String> {
+    let value = serde_json::from_str::<Value>(command).ok()?;
+    if let Some(nested) = value.as_str() {
+        return json_string_field(nested, names);
+    }
+    let object = value.as_object()?;
+    names
+        .iter()
+        .find_map(|name| object.get(*name).and_then(Value::as_str).map(str::to_owned))
+}
+
+fn record_timestamp(data: &CanonicalData, provenance: &SourceRef) -> Option<String> {
+    data.records
+        .iter()
+        .find(|record| {
+            record.provenance.path == provenance.path && record.provenance.line == provenance.line
+        })
+        .and_then(|record| record.timestamp.clone())
 }
 
 fn turn_context_snapshot(
