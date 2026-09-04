@@ -103,7 +103,7 @@ fn normalize_records_with_resolver(
         let explicit_turn_id = payload
             .and_then(Value::as_object)
             .and_then(|payload| string_field(payload, &["turn_id"]));
-        let record_turn_id = explicit_turn_id.clone().or_else(|| current_turn_id.clone());
+        let mut record_turn_id = explicit_turn_id.clone().or_else(|| current_turn_id.clone());
 
         match &record.kind {
             crate::rollout::RolloutRecordKind::Known {
@@ -157,8 +157,9 @@ fn normalize_records_with_resolver(
                 payload,
                 ..
             } => {
-                if let Some(turn_id) = explicit_turn_id.clone() {
-                    current_turn_id = Some(turn_id.clone());
+                current_turn_id = explicit_turn_id.clone();
+                record_turn_id = current_turn_id.clone();
+                if let Some(turn_id) = current_turn_id.clone() {
                     add_or_update_turn(
                         &mut data,
                         turn_id,
@@ -324,16 +325,15 @@ fn extract_file_operations(data: &mut CanonicalData) {
             timestamp,
         );
         for operation in extracted {
-            let Some(call_id) = call.call_id.as_ref() else {
-                data.file_operations.push(operation);
-                continue;
-            };
             let Some(session_id) = operation.session_id.as_ref() else {
                 continue;
             };
+            let call_identity = call.call_id.clone().unwrap_or_else(|| {
+                format!("missing-call-id:{}", call.turn_id.as_deref().unwrap_or(""))
+            });
             if call_operations.insert((
                 session_id.clone(),
-                call_id.clone(),
+                call_identity,
                 operation_identity_path(&operation.path, cwd.as_deref()),
                 operation.operation.clone(),
             )) {
@@ -350,8 +350,14 @@ fn extract_file_operations(data: &mut CanonicalData) {
         let matched_call = result.call_id.as_ref().and_then(|call_id| {
             calls.iter().find(|call| {
                 call.call_id.as_ref() == Some(call_id)
-                    && context_matches(call.session_id.as_deref(), result.session_id.as_deref())
-                    && context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
+                    && call_result_context_matches(
+                        call.session_id.as_deref(),
+                        result.session_id.as_deref(),
+                    )
+                    && call_result_context_matches(
+                        call.turn_id.as_deref(),
+                        result.turn_id.as_deref(),
+                    )
             })
         });
         if matched_call.is_some_and(|call| call_is_failed(&data.tool_results, call)) {
@@ -383,16 +389,18 @@ fn extract_file_operations(data: &mut CanonicalData) {
             timestamp,
         );
         for operation in extracted {
-            let Some(call_id) = result.call_id.as_ref() else {
-                data.file_operations.push(operation);
-                continue;
-            };
             let Some(session_id) = operation.session_id.as_ref() else {
                 continue;
             };
+            let result_identity = result.call_id.clone().unwrap_or_else(|| {
+                format!(
+                    "missing-call-id:{}",
+                    result.turn_id.as_deref().unwrap_or("")
+                )
+            });
             if call_operations.insert((
                 session_id.clone(),
-                call_id.clone(),
+                result_identity,
                 operation_identity_path(&operation.path, cwd.as_deref()),
                 operation.operation.clone(),
             )) {
@@ -1030,8 +1038,14 @@ fn mark_tool_results(calls: &mut [ToolCall], results: &mut [ToolResult]) {
         result.matched_call = result.call_id.as_ref().is_some_and(|call_id| {
             calls.iter().any(|call| {
                 call.call_id.as_ref() == Some(call_id)
-                    && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
-                    && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
+                    && call_result_context_matches(
+                        result.session_id.as_deref(),
+                        call.session_id.as_deref(),
+                    )
+                    && call_result_context_matches(
+                        result.turn_id.as_deref(),
+                        call.turn_id.as_deref(),
+                    )
             })
         });
     }
@@ -1045,17 +1059,49 @@ fn context_matches(left: Option<&str>, right: Option<&str>) -> bool {
     }
 }
 
+fn call_result_context_matches(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
+}
+
+fn matching_results<'a>(results: &'a [ToolResult], call: &ToolCall) -> Vec<&'a ToolResult> {
+    let mut matched = if let Some(call_id) = call.call_id.as_ref() {
+        results
+            .iter()
+            .filter(|result| {
+                !result.is_duplicate
+                    && result.call_id.as_ref() == Some(call_id)
+                    && call_result_context_matches(
+                        result.session_id.as_deref(),
+                        call.session_id.as_deref(),
+                    )
+                    && call_result_context_matches(
+                        result.turn_id.as_deref(),
+                        call.turn_id.as_deref(),
+                    )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        results
+            .iter()
+            .filter(|result| {
+                !result.is_duplicate
+                    && result.call_id.is_none()
+                    && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
+                    && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
+            })
+            .collect::<Vec<_>>()
+    };
+    if call.call_id.is_none() && matched.len() != 1 {
+        matched.clear();
+    }
+    matched
+}
+
 fn call_is_failed(results: &[ToolResult], call: &ToolCall) -> bool {
-    let matched = results
-        .iter()
-        .filter(|result| {
-            !result.is_duplicate
-                && result.call_id == call.call_id
-                && result.call_id.is_some()
-                && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
-                && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
-        })
-        .collect::<Vec<_>>();
+    let matched = matching_results(results, call);
     if matched.iter().any(|result| result.exit_code.is_some()) {
         return matched
             .iter()
@@ -1076,14 +1122,9 @@ fn result_is_failed(result: &ToolResult) -> bool {
 }
 
 fn call_has_failed_result(results: &[ToolResult], call: &ToolCall) -> bool {
-    results.iter().any(|result| {
-        !result.is_duplicate
-            && result.call_id == call.call_id
-            && result.call_id.is_some()
-            && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
-            && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
-            && result_is_failed(result)
-    })
+    matching_results(results, call)
+        .into_iter()
+        .any(result_is_failed)
 }
 
 fn mark_duplicate_tool_results(results: &mut [ToolResult]) {
@@ -1142,8 +1183,8 @@ fn equivalent_results(left: &ToolResult, right: &ToolResult) -> bool {
     if left_call != right_call {
         return false;
     }
-    if !context_matches(left.session_id.as_deref(), right.session_id.as_deref())
-        || !context_matches(left.turn_id.as_deref(), right.turn_id.as_deref())
+    if !call_result_context_matches(left.session_id.as_deref(), right.session_id.as_deref())
+        || !call_result_context_matches(left.turn_id.as_deref(), right.turn_id.as_deref())
     {
         return false;
     }
@@ -1570,6 +1611,43 @@ mod tests {
     }
 
     #[test]
+    fn missing_call_id_file_operations_are_deduplicated_and_failed_edits_ignored() {
+        let succeeded = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-no-id-session","cwd":"/fixture/project"}}
+{"type":"turn_context","payload":{"turn_id":"fixture-no-id-turn","cwd":"/fixture/project"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"edit_file","input":{"path":"src/lib.rs"}}}
+{"type":"event_msg","payload":{"type":"patch_apply_end","patch":"*** Update File: src/lib.rs\n@@\n-old\n+new\n","exit_code":0,"status":"completed"}}"#,
+        );
+        assert_eq!(succeeded.file_operations.len(), 1);
+
+        let failed = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-no-id-failed-session","cwd":"/fixture/project"}}
+{"type":"turn_context","payload":{"turn_id":"fixture-no-id-failed-turn","cwd":"/fixture/project"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"edit_file","input":{"path":"src/lib.rs"}}}
+{"type":"event_msg","payload":{"type":"patch_apply_end","patch":"*** Update File: src/lib.rs\n@@\n-old\n+new\n","exit_code":1,"status":"failed"}}"#,
+        );
+        assert!(failed.file_operations.is_empty());
+    }
+
+    #[test]
+    fn turn_context_without_id_clears_the_previous_turn() {
+        let data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-turn-session"}}
+{"type":"turn_context","payload":{"turn_id":"fixture-first-turn"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-first-call","name":"exec_command","input":{"cmd":"cargo test"}}}
+{"type":"turn_context","payload":{}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-second-call","name":"exec_command","input":{"cmd":"cargo test"}}}"#,
+        );
+
+        assert_eq!(data.tool_calls.len(), 2);
+        assert_eq!(
+            data.tool_calls[0].turn_id.as_deref(),
+            Some("fixture-first-turn")
+        );
+        assert_eq!(data.tool_calls[1].turn_id, None);
+    }
+
+    #[test]
     fn patch_events_are_canonicalized_once_and_failed_edits_are_ignored() {
         let mut data = parse(
             r#"{"type":"session_meta","payload":{"id":"fixture-patch-session","cwd":"/fixture/project","project":"/fixture/project"}}
@@ -1591,6 +1669,13 @@ mod tests {
         assert_eq!(data.file_operations.len(), 1);
 
         data.tool_calls[0].turn_id = None;
+        data.file_operations.clear();
+        extract_file_operations(&mut data);
+        assert_eq!(data.file_operations.len(), 1);
+
+        for result in &mut data.tool_results {
+            result.turn_id = None;
+        }
         data.file_operations.clear();
         extract_file_operations(&mut data);
         assert_eq!(data.file_operations.len(), 1);

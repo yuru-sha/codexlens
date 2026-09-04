@@ -1106,8 +1106,8 @@ fn matching_call<'a>(data: &'a CanonicalData, result: &ToolResult) -> Option<&'a
     data.tool_calls.iter().find(|call| {
         call.call_id == result.call_id
             && call.call_id.is_some()
-            && context_matches(call.session_id.as_deref(), result.session_id.as_deref())
-            && context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
+            && call_result_context_matches(call.session_id.as_deref(), result.session_id.as_deref())
+            && call_result_context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
     })
 }
 
@@ -1116,6 +1116,13 @@ fn context_matches(left: Option<&str>, right: Option<&str>) -> bool {
         (Some(left), Some(right)) => left == right,
         (None, None) => true,
         _ => false,
+    }
+}
+
+fn call_result_context_matches(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
     }
 }
 
@@ -1400,7 +1407,7 @@ fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
         let Some(session_id) = call.session_id.clone() else {
             continue;
         };
-        if call.call_id.is_some() && !call_has_observed_result(data, call) {
+        if !call_has_observed_result(data, call) {
             continue;
         }
         let command = call
@@ -1412,7 +1419,7 @@ fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
             continue;
         };
         if let Some(call_id) = call.call_id.as_ref() {
-            call_ids.insert((session_id.clone(), call_id.clone()));
+            call_ids.insert((session_id.clone(), call.turn_id.clone(), call_id.clone()));
         }
         events.push(VerificationEvent {
             session_id,
@@ -1427,11 +1434,18 @@ fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
         let Some(session_id) = result.session_id.clone() else {
             continue;
         };
-        if result
-            .call_id
-            .as_ref()
-            .is_some_and(|call_id| call_ids.contains(&(session_id.clone(), call_id.clone())))
-        {
+        if result.call_id.as_ref().is_some_and(|call_id| {
+            call_ids
+                .iter()
+                .any(|(call_session, call_turn, known_call_id)| {
+                    call_session == &session_id
+                        && known_call_id == call_id
+                        && call_result_context_matches(
+                            call_turn.as_deref(),
+                            result.turn_id.as_deref(),
+                        )
+                })
+        }) {
             continue;
         }
         let command = result.command.as_deref().unwrap_or_default();
@@ -1502,15 +1516,40 @@ fn verification_kind(command: &str) -> Option<String> {
 }
 
 fn call_has_observed_result(data: &CanonicalData, call: &ToolCall) -> bool {
-    let Some(call_id) = call.call_id.as_ref() else {
+    if let Some(call_id) = call.call_id.as_ref() {
+        return data.tool_results.iter().any(|result| {
+            !result.is_duplicate
+                && result.call_id.as_ref() == Some(call_id)
+                && call_result_context_matches(
+                    result.session_id.as_deref(),
+                    call.session_id.as_deref(),
+                )
+                && call_result_context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
+        });
+    }
+
+    let no_id_calls = data
+        .tool_calls
+        .iter()
+        .filter(|candidate| {
+            candidate.call_id.is_none()
+                && context_matches(candidate.session_id.as_deref(), call.session_id.as_deref())
+                && context_matches(candidate.turn_id.as_deref(), call.turn_id.as_deref())
+        })
+        .count();
+    if no_id_calls != 1 {
         return false;
-    };
-    data.tool_results.iter().any(|result| {
-        !result.is_duplicate
-            && result.call_id.as_ref() == Some(call_id)
-            && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
-            && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
-    })
+    }
+    data.tool_results
+        .iter()
+        .filter(|result| {
+            !result.is_duplicate
+                && result.call_id.is_none()
+                && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
+                && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
+        })
+        .count()
+        == 1
 }
 
 pub fn classify_verification_command(command: &str) -> Option<String> {
@@ -2173,6 +2212,7 @@ fn resolve_instruction_path(join: &InstructionJoin, path: &str) -> Option<PathBu
 }
 
 fn guidance_matches(finding: &Finding, content: &str) -> bool {
+    let raw_content = content;
     let content = normalize_guidance(content);
     if content.is_empty() {
         return false;
@@ -2180,6 +2220,9 @@ fn guidance_matches(finding: &Finding, content: &str) -> bool {
     let key = normalize_guidance(&finding.key);
     if key.is_empty() {
         return false;
+    }
+    if guidance_fact_matches(&key, raw_content) {
+        return true;
     }
     let parts = key.split('|').collect::<Vec<_>>();
     if let Some(phrase) = parts
@@ -2215,6 +2258,21 @@ fn guidance_matches(finding: &Finding, content: &str) -> bool {
         .collect::<Vec<_>>();
     terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
     terms.iter().any(|term| content.contains(term))
+}
+
+fn guidance_fact_matches(key: &str, content: &str) -> bool {
+    content.lines().map(normalize_fact).any(|line| {
+        CORRECTION_MARKERS
+            .iter()
+            .chain(DISCOVERY_MARKERS)
+            .any(|marker| {
+                let Some(rest) = line.strip_prefix(marker) else {
+                    return false;
+                };
+                let rest = rest.strip_suffix(" instead").unwrap_or(rest).trim();
+                !rest.is_empty() && bounded_fingerprint(rest) == key
+            })
+    })
 }
 
 fn snapshot_is_unavailable(snapshot: &InstructionSnapshot) -> bool {
@@ -2298,10 +2356,22 @@ where
 
 fn instruction_scope(data: &CanonicalData, finding: &Finding, sessions: &[String]) -> FindingScope {
     let session_ids = sessions.iter().map(String::as_str).collect::<Vec<_>>();
-    finding.affected_paths.first().map_or_else(
-        || finding.scope.clone(),
-        |path| path_scope(data, &session_ids, path),
-    )
+    if let Some(path) = finding.affected_paths.first() {
+        return path_scope(data, &session_ids, path);
+    }
+    let nearest = sessions
+        .iter()
+        .filter_map(|session_id| {
+            data.instruction_joins
+                .iter()
+                .find(|join| join.session_id == *session_id)
+                .and_then(|join| join.nearest_path.as_ref())
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    majority_path(nearest)
+        .map(FindingScope::Instruction)
+        .unwrap_or_else(|| finding.scope.clone())
 }
 
 fn path_scope(data: &CanonicalData, sessions: &[&str], path: &str) -> FindingScope {
@@ -3188,6 +3258,14 @@ mod tests {
             &finding,
             "This project uses /fixture/project/src/lib.rs."
         ));
+        let long_finding = Finding {
+            key: first,
+            ..finding
+        };
+        assert!(guidance_matches(
+            &long_finding,
+            &format!("Use {common}alpha")
+        ));
         assert_eq!(correction_fact("The repo uses cargo test."), None);
         assert_eq!(
             classify_verification_command("env cargo test"),
@@ -3368,6 +3446,26 @@ mod tests {
                 cwd: None,
                 status: None,
                 provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 1),
+            }],
+            tool_results: vec![ToolResult {
+                id: None,
+                call_id: None,
+                session_id: Some("fixture-session".to_owned()),
+                turn_id: Some("fixture-turn".to_owned()),
+                command: None,
+                cwd: None,
+                stdout: None,
+                stderr: None,
+                duration_ms: None,
+                exit_code: Some(0),
+                status: Some("completed".to_owned()),
+                outcome: ToolOutcome::Succeeded,
+                outcome_source: OutcomeSource::ExitCode,
+                matched_call: false,
+                deduplication_key: None,
+                equivalent_to: None,
+                is_duplicate: false,
+                provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 2),
             }],
             ..CanonicalData::default()
         };
