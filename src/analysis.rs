@@ -1957,14 +1957,14 @@ fn instruction_duplicate_findings(data: &CanonicalData, options: &AnalysisOption
             };
             let normalized = normalize_guidance(content);
             if !normalized.is_empty() {
-                contents.entry(normalized).or_default().push(file);
+                let fingerprint = crate::instructions::content_hash(normalized.as_bytes());
+                contents.entry(fingerprint).or_default().push(file);
             }
         }
-        for (normalized, files) in contents {
+        for (fingerprint, files) in contents {
             if files.len() < 2 {
                 continue;
             }
-            let fingerprint = crate::instructions::content_hash(normalized.as_bytes());
             let mut evidence = Vec::new();
             for file in &files {
                 push_evidence(
