@@ -1,4 +1,6 @@
+pub mod config;
 pub mod discovery;
+pub mod instructions;
 pub mod model;
 pub mod normalize;
 pub mod rollout;

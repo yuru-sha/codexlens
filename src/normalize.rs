@@ -1,14 +1,21 @@
 use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 
 use serde_json::{Map, Value};
 
+use crate::instructions::{
+    InstructionResolver, join_sessions, snapshot_from_resolution, snapshot_from_rollout,
+    unavailable_snapshot,
+};
 use crate::model::{
     CanonicalData, CanonicalDiagnostic, DiagnosticKind, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES,
     MAX_TOOL_SUMMARY_BYTES, Message, MessageRole, OutcomeSource, Record, RecordKind, Session,
     SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn, TurnLifecycleEvent,
     merge_session_fields,
 };
-use crate::rollout::{KnownRecordType, ParseDiagnostic, RolloutParseResult, RolloutRecord};
+use crate::rollout::{
+    KnownRecordType, ParseDiagnostic, RolloutInstructionContext, RolloutParseResult, RolloutRecord,
+};
 use crate::state::StateReadResult;
 
 pub fn normalize_rollout(result: &RolloutParseResult) -> CanonicalData {
@@ -19,7 +26,23 @@ pub fn normalize_rollout_with_state(
     result: &RolloutParseResult,
     state: &[Session],
 ) -> CanonicalData {
-    let mut data = normalize_records(&result.records, state);
+    normalize_rollout_with_resolver(result, state, None)
+}
+
+pub fn normalize_rollout_with_instructions(
+    result: &RolloutParseResult,
+    state: &[Session],
+    resolver: &InstructionResolver,
+) -> CanonicalData {
+    normalize_rollout_with_resolver(result, state, Some(resolver))
+}
+
+fn normalize_rollout_with_resolver(
+    result: &RolloutParseResult,
+    state: &[Session],
+    resolver: Option<&InstructionResolver>,
+) -> CanonicalData {
+    let mut data = normalize_records_with_resolver(&result.records, state, resolver);
     data.diagnostics
         .extend(result.diagnostics.iter().map(canonical_parse_diagnostic));
     data.diagnostics.sort_by(|left, right| {
@@ -51,6 +74,14 @@ pub fn normalize_rollout_result(
 }
 
 pub fn normalize_records(records: &[RolloutRecord], state: &[Session]) -> CanonicalData {
+    normalize_records_with_resolver(records, state, None)
+}
+
+fn normalize_records_with_resolver(
+    records: &[RolloutRecord],
+    state: &[Session],
+    resolver: Option<&InstructionResolver>,
+) -> CanonicalData {
     let mut data = CanonicalData::default();
     let mut sessions = BTreeMap::new();
     let source_path = records.first().map(|record| record.source.path.clone());
@@ -99,6 +130,23 @@ pub fn normalize_records(records: &[RolloutRecord], state: &[Session]) -> Canoni
                             )),
                         });
                     }
+                    if let Some(state_session) =
+                        state.iter().find(|session| session.id == candidate.id)
+                    {
+                        if state_session
+                            .rollout_path
+                            .as_deref()
+                            .is_some_and(|path| !same_path(Path::new(path), &source.path))
+                        {
+                            data.diagnostics.push(CanonicalDiagnostic {
+                                kind: DiagnosticKind::MetadataConflict,
+                                source: source.clone(),
+                                message: bounded(
+                                    "state and rollout session paths differ; state metadata was retained as enrichment",
+                                ),
+                            });
+                        }
+                    }
                     current_session_id = Some(candidate.id.clone());
                     current_turn_id = None;
                     merge_rollout_session(&mut sessions, candidate, state, &mut data.diagnostics);
@@ -121,6 +169,14 @@ pub fn normalize_records(records: &[RolloutRecord], state: &[Session]) -> Canoni
                         source.clone(),
                     );
                 }
+                data.instruction_snapshots.push(turn_context_snapshot(
+                    record.instruction_context.as_ref(),
+                    current_session_id.clone(),
+                    record_turn_id.clone(),
+                    &sessions,
+                    resolver,
+                    source.clone(),
+                ));
             }
             crate::rollout::RolloutRecordKind::Known {
                 record_type: KnownRecordType::ResponseItem,
@@ -224,10 +280,39 @@ pub fn normalize_records(records: &[RolloutRecord], state: &[Session]) -> Canoni
     }
 
     data.sessions = sessions.into_values().collect();
+    if let Some(resolver) = resolver {
+        data.instruction_joins = join_sessions(&data.sessions, resolver);
+    }
     deduplicate_token_usage(&mut data.token_usage);
     mark_tool_results(&mut data.tool_calls, &mut data.tool_results);
     mark_duplicate_tool_results(&mut data.tool_results);
     data
+}
+
+fn turn_context_snapshot(
+    context: Option<&RolloutInstructionContext>,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    sessions: &BTreeMap<String, Session>,
+    resolver: Option<&InstructionResolver>,
+    provenance: SourceRef,
+) -> crate::model::InstructionSnapshot {
+    let rollout_instructions = context.and_then(|context| context.instruction_text.as_deref());
+    if let Some(content) = rollout_instructions {
+        return snapshot_from_rollout(session_id, turn_id, Some(content), provenance);
+    }
+    let Some(resolver) = resolver else {
+        return unavailable_snapshot(session_id, turn_id, provenance);
+    };
+    let session = session_id.as_deref().and_then(|id| sessions.get(id));
+    let project_root = context
+        .and_then(|context| context.project_root.as_deref())
+        .or_else(|| session.and_then(|session| session.project.as_deref()));
+    let cwd = context
+        .and_then(|context| context.cwd.as_deref())
+        .or_else(|| session.and_then(|session| session.cwd.as_deref()));
+    let resolution = resolver.resolve(project_root.map(Path::new), cwd.map(Path::new));
+    snapshot_from_resolution(session_id, turn_id, &resolution, provenance)
 }
 
 fn canonical_parse_diagnostic(diagnostic: &ParseDiagnostic) -> CanonicalDiagnostic {
@@ -250,12 +335,23 @@ fn matching_state_session<'a>(
     state.iter().find(|session| {
         session.rollout_path.as_deref().is_some_and(|rollout_path| {
             let rollout_path = std::path::Path::new(rollout_path);
-            rollout_path == path
-                || std::fs::canonicalize(rollout_path)
-                    .ok()
-                    .is_some_and(|resolved| resolved == path)
+            same_path(rollout_path, path)
         })
     })
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    left == right
+        || (left.is_absolute()
+            && right.is_absolute()
+            && std::fs::canonicalize(left)
+                .ok()
+                .is_some_and(|resolved| resolved == right))
+        || (left.is_absolute()
+            && right.is_absolute()
+            && std::fs::canonicalize(right)
+                .ok()
+                .is_some_and(|resolved| resolved == left))
 }
 
 fn merge_rollout_session(
@@ -996,6 +1092,38 @@ mod tests {
     }
 
     #[test]
+    fn captures_observed_instruction_payloads_without_claiming_filesystem_history() {
+        let instruction_text = "synthetic observed instruction";
+        let input = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-instruction-session\",\"cwd\":\"/fixture/project\",\"project\":\"/fixture\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-instruction-turn-001\",\"cwd\":\"/fixture/project\",\"user_instructions\":\"{}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-instruction-turn-002\",\"cwd\":\"/fixture/project\",\"user_instructions\":\"{}\"}}}}\n",
+            instruction_text, instruction_text
+        );
+        let parsed = parse_rollout_reader(
+            Path::new("fixture.jsonl"),
+            PlainJsonlReader::new(Cursor::new(input.as_bytes())),
+        );
+        let data = normalize_rollout_with_instructions(
+            &parsed,
+            &[],
+            &crate::instructions::InstructionResolver::default(),
+        );
+
+        assert_eq!(data.instruction_snapshots.len(), 2);
+        assert!(data.instruction_snapshots.iter().all(|snapshot| {
+            snapshot.source == crate::model::InstructionSnapshotSource::Rollout
+                && snapshot.accuracy == crate::model::InstructionSnapshotAccuracy::Observed
+                && snapshot.content_hash.is_some()
+                && snapshot.effective_chain_hash.is_some()
+                && snapshot.chain[0].chain_position == 0
+        }));
+        assert_eq!(data.instruction_joins.len(), 1);
+        assert_eq!(
+            data.instruction_joins[0].project_root_status,
+            crate::model::ProjectRootStatus::Missing
+        );
+    }
+
+    #[test]
     fn structured_outcome_beats_error_text() {
         let data = parse(include_str!(
             "../tests/fixtures/rollout/structured-outcome.jsonl"
@@ -1115,6 +1243,44 @@ mod tests {
         assert!(data.diagnostics.iter().any(|diagnostic| {
             diagnostic.kind == DiagnosticKind::MetadataConflict
                 && diagnostic.message.contains("identities differ")
+        }));
+    }
+
+    #[test]
+    fn stale_state_rollout_path_is_explicitly_reported() {
+        let parsed = parse_rollout_reader(
+            Path::new("current.jsonl"),
+            PlainJsonlReader::new(Cursor::new(
+                br#"{"type":"session_meta","payload":{"id":"fixture-stale-session"}}"#,
+            )),
+        );
+        let state = Session {
+            id: "fixture-stale-session".to_owned(),
+            created_at: None,
+            updated_at: None,
+            cwd: None,
+            project: None,
+            model: None,
+            provider: None,
+            source: None,
+            thread_source: None,
+            rollout_path: Some("old.jsonl".to_owned()),
+            archive_state: None,
+            title: None,
+            preview: None,
+            parent_id: None,
+            cli_version: None,
+            originator: None,
+            history_mode: None,
+            reasoning_effort: None,
+            provenance: SourceRef::state(PathBuf::from("state.sqlite")),
+        };
+
+        let data = normalize_rollout_with_state(&parsed, &[state]);
+
+        assert!(data.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == DiagnosticKind::MetadataConflict
+                && diagnostic.message.contains("session paths differ")
         }));
     }
 }

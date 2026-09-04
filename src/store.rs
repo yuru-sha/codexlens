@@ -6,18 +6,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use crate::discovery::{DiscoveredInput, InputKind, ReaderKind};
-use crate::model::{
-    CanonicalData, CanonicalDiagnostic, DiagnosticKind, FileOperation, Message, Record, RecordKind,
-    Session, SourceKind, SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn,
+use crate::discovery::{DiscoveredInput, InputKind, ReaderKind, codex_home_for_source};
+use crate::instructions::{
+    InstructionCaptureOptions, InstructionResolver, join_sessions, snapshot_entries,
+    snapshot_from_resolution,
 };
-use crate::normalize::{normalize_rollout, normalize_rollout_with_state};
+use crate::model::{
+    CanonicalData, CanonicalDiagnostic, DiagnosticKind, FileOperation, InstructionFile,
+    InstructionJoin, InstructionScope, InstructionSnapshot, Message, Record, RecordKind, Session,
+    SourceKind, SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn,
+};
+use crate::normalize::{normalize_rollout, normalize_rollout_with_instructions};
 use crate::rollout::{ParseDiagnosticKind, RolloutParseOptions, parse_rollout};
 use crate::state::{
     StateDiagnostic, StateDiagnosticKind, StateReadResult, merge_state_results, read_state_database,
 };
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 const STATE_STORAGE_STANDALONE: &str = "standalone";
 const STATE_STORAGE_ENRICHMENT: &str = "enrichment";
@@ -55,6 +60,12 @@ pub struct IngestSummary {
     pub diagnostics: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IngestBatchOptions<'a> {
+    storage_mode: Option<&'a str>,
+    preserve_instruction_snapshots: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestReport {
     pub files: Vec<IngestSummary>,
@@ -90,11 +101,46 @@ impl Store {
         path: &Path,
         options: &RolloutParseOptions,
     ) -> Result<IngestSummary> {
+        self.ingest_rollout_file_with_resolver(path, options, &resolver_for_source(path))
+    }
+
+    pub fn ingest_rollout_file_with_instructions(
+        &mut self,
+        path: &Path,
+        options: &RolloutParseOptions,
+        capture: &InstructionCaptureOptions,
+    ) -> Result<IngestSummary> {
+        self.ingest_rollout_file_with_resolver(path, options, &capture.resolver())
+    }
+
+    fn ingest_rollout_file_with_resolver(
+        &mut self,
+        path: &Path,
+        options: &RolloutParseOptions,
+        resolver: &InstructionResolver,
+    ) -> Result<IngestSummary> {
         let identity = canonical_identity(path).unwrap_or_else(|_| path.to_path_buf());
-        self.ingest_rollout_at(path, &identity, options, &[], false)
+        self.ingest_rollout_at(path, &identity, options, &[], false, resolver)
     }
 
     pub fn ingest_state_database(&mut self, path: &Path) -> Result<IngestSummary> {
+        self.ingest_state_database_with_resolver(path, &resolver_for_source(path))
+    }
+
+    pub fn ingest_state_database_with_instructions(
+        &mut self,
+        path: &Path,
+        capture: &InstructionCaptureOptions,
+    ) -> Result<IngestSummary> {
+        let resolver = capture.resolver();
+        self.ingest_state_database_with_resolver(path, &resolver)
+    }
+
+    fn ingest_state_database_with_resolver(
+        &mut self,
+        path: &Path,
+        resolver: &InstructionResolver,
+    ) -> Result<IngestSummary> {
         let identity = canonical_identity(path).unwrap_or_else(|_| path.to_path_buf());
         let fingerprint = match fingerprint(path) {
             Ok(fingerprint) => fingerprint,
@@ -115,13 +161,32 @@ impl Store {
         }
 
         let read = read_state_database(path);
-        self.ingest_state_read(path, &identity, &fingerprint, read, true)
+        self.ingest_state_read(path, &identity, &fingerprint, read, true, resolver)
     }
 
     pub fn ingest_inputs(
         &mut self,
         inputs: &[DiscoveredInput],
         options: &IngestOptions,
+    ) -> Result<IngestReport> {
+        self.ingest_inputs_with_resolver(inputs, options, &resolver_for_inputs(inputs))
+    }
+
+    pub fn ingest_inputs_with_instructions(
+        &mut self,
+        inputs: &[DiscoveredInput],
+        options: &IngestOptions,
+        capture: &InstructionCaptureOptions,
+    ) -> Result<IngestReport> {
+        let resolver = capture.resolver();
+        self.ingest_inputs_with_resolver(inputs, options, &resolver)
+    }
+
+    fn ingest_inputs_with_resolver(
+        &mut self,
+        inputs: &[DiscoveredInput],
+        options: &IngestOptions,
+        resolver: &InstructionResolver,
     ) -> Result<IngestReport> {
         let mut report = IngestReport::default();
         let mut state_reads = Vec::new();
@@ -189,6 +254,7 @@ impl Store {
                     &fingerprint,
                     read,
                     !has_plain_rollout,
+                    resolver,
                 )?);
             }
         }
@@ -221,6 +287,7 @@ impl Store {
                     &options.rollout,
                     &state_sessions,
                     state_changed && !state_refresh_blocked,
+                    resolver,
                 )?),
                 Some(ReaderKind::ZstdJsonl) => report.files.push(self.ingest_unsupported(
                     &input.path,
@@ -253,7 +320,10 @@ impl Store {
             kind,
             &fingerprint,
             data,
-            (kind == IngestInputKind::State).then_some(STATE_STORAGE_STANDALONE),
+            IngestBatchOptions {
+                storage_mode: (kind == IngestInputKind::State).then_some(STATE_STORAGE_STANDALONE),
+                preserve_instruction_snapshots: false,
+            },
         )
     }
 
@@ -264,6 +334,7 @@ impl Store {
         options: &RolloutParseOptions,
         state_sessions: &[Session],
         force_refresh: bool,
+        resolver: &InstructionResolver,
     ) -> Result<IngestSummary> {
         let fingerprint = match fingerprint(path) {
             Ok(fingerprint) => fingerprint,
@@ -273,9 +344,9 @@ impl Store {
                 return Ok(summary_from_data(path.to_path_buf(), &data, false));
             }
         };
-        if !force_refresh
-            && self.is_unchanged(identity, &fingerprint, IngestInputKind::Rollout, None)?
-        {
+        let unchanged =
+            self.is_unchanged(identity, &fingerprint, IngestInputKind::Rollout, None)?;
+        if !force_refresh && unchanged {
             return Ok(skipped_summary(path.to_path_buf()));
         }
         let parsed = parse_rollout(path, options);
@@ -288,14 +359,17 @@ impl Store {
             self.persist_diagnostics(identity, &data.diagnostics)?;
             return Ok(summary_from_data(path.to_path_buf(), &data, false));
         }
-        let data = normalize_rollout_with_state(&parsed, state_sessions);
+        let data = normalize_rollout_with_instructions(&parsed, state_sessions, resolver);
         self.ingest_batch(
             path,
             identity,
             IngestInputKind::Rollout,
             &fingerprint,
             &data,
-            None,
+            IngestBatchOptions {
+                storage_mode: None,
+                preserve_instruction_snapshots: force_refresh && unchanged,
+            },
         )
     }
 
@@ -306,6 +380,7 @@ impl Store {
         fingerprint: &Fingerprint,
         read: StateReadResult,
         persist_sessions: bool,
+        resolver: &InstructionResolver,
     ) -> Result<IngestSummary> {
         if read.diagnostics.iter().any(|diagnostic| {
             matches!(
@@ -322,6 +397,20 @@ impl Store {
         let mut data = state_data(read);
         if !persist_sessions {
             data.sessions.clear();
+        } else {
+            data.instruction_joins = join_sessions(&data.sessions, resolver);
+            data.instruction_snapshots = data
+                .instruction_joins
+                .iter()
+                .map(|join| {
+                    snapshot_from_resolution(
+                        Some(join.session_id.clone()),
+                        None,
+                        &join.resolution,
+                        join.provenance.clone(),
+                    )
+                })
+                .collect();
         }
         self.ingest_batch(
             path,
@@ -329,11 +418,14 @@ impl Store {
             IngestInputKind::State,
             fingerprint,
             &data,
-            Some(if persist_sessions {
-                STATE_STORAGE_STANDALONE
-            } else {
-                STATE_STORAGE_ENRICHMENT
-            }),
+            IngestBatchOptions {
+                storage_mode: Some(if persist_sessions {
+                    STATE_STORAGE_STANDALONE
+                } else {
+                    STATE_STORAGE_ENRICHMENT
+                }),
+                preserve_instruction_snapshots: false,
+            },
         )
     }
 
@@ -363,7 +455,17 @@ impl Store {
             }],
             ..CanonicalData::default()
         };
-        self.ingest_batch(path, identity, kind, &fingerprint, &data, None)
+        self.ingest_batch(
+            path,
+            identity,
+            kind,
+            &fingerprint,
+            &data,
+            IngestBatchOptions {
+                storage_mode: None,
+                preserve_instruction_snapshots: false,
+            },
+        )
     }
 
     fn is_unchanged(
@@ -408,14 +510,23 @@ impl Store {
         kind: IngestInputKind,
         fingerprint: &Fingerprint,
         data: &CanonicalData,
-        storage_mode: Option<&str>,
+        options: IngestBatchOptions<'_>,
     ) -> Result<IngestSummary> {
         let identity = source_identity.to_string_lossy().into_owned();
         let mut stamped_data = data.clone();
         stamp_data(&mut stamped_data, &current_timestamp());
         let transaction = self.connection.transaction()?;
-        delete_source(&transaction, &identity)?;
-        insert_data(&transaction, &identity, &stamped_data)?;
+        delete_source(
+            &transaction,
+            &identity,
+            options.preserve_instruction_snapshots,
+        )?;
+        insert_data(
+            &transaction,
+            &identity,
+            &stamped_data,
+            options.preserve_instruction_snapshots,
+        )?;
         transaction.execute(
             "INSERT INTO ingested_files (identity, source_path, input_kind, size, modified_ns, digest, storage_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(identity) DO UPDATE SET source_path = excluded.source_path, input_kind = excluded.input_kind, size = excluded.size, modified_ns = excluded.modified_ns, digest = excluded.digest, storage_mode = excluded.storage_mode",
@@ -426,7 +537,7 @@ impl Store {
                 i64::try_from(fingerprint.size).unwrap_or(i64::MAX),
                 fingerprint.modified_ns.map(|value| value.to_string()),
                 fingerprint.digest.to_string(),
-                storage_mode,
+                options.storage_mode,
             ],
         )?;
         transaction.commit()?;
@@ -667,6 +778,81 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         )?;
         transaction.execute_batch("PRAGMA user_version = 3;")?;
     }
+    if current < 4 {
+        transaction.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS instruction_blobs (
+                blob_key TEXT PRIMARY KEY,
+                content_hash TEXT NOT NULL,
+                byte_count INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                UNIQUE(content_hash, byte_count)
+            );
+            CREATE TABLE IF NOT EXISTS instruction_snapshots (
+                snapshot_key TEXT PRIMARY KEY,
+                source_identity TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                source_line INTEGER,
+                source_kind TEXT NOT NULL,
+                ingested_at TEXT,
+                parser_schema_version INTEGER NOT NULL,
+                session_id TEXT,
+                turn_id TEXT,
+                snapshot_source TEXT NOT NULL,
+                accuracy TEXT NOT NULL,
+                blob_key TEXT,
+                content_hash TEXT,
+                byte_count INTEGER NOT NULL,
+                effective_chain_hash TEXT,
+                truncated INTEGER NOT NULL,
+                chain_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS instruction_files (
+                file_key TEXT PRIMARY KEY,
+                source_identity TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                source_line INTEGER,
+                source_kind TEXT NOT NULL,
+                ingested_at TEXT,
+                parser_schema_version INTEGER NOT NULL,
+                session_id TEXT,
+                path TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                file_kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                chain_position INTEGER,
+                blob_key TEXT,
+                content_hash TEXT,
+                byte_count INTEGER NOT NULL,
+                diagnostic TEXT
+            );
+            CREATE TABLE IF NOT EXISTS instruction_joins (
+                join_key TEXT PRIMARY KEY,
+                source_identity TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                source_line INTEGER,
+                source_kind TEXT NOT NULL,
+                ingested_at TEXT,
+                parser_schema_version INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                cwd TEXT,
+                project_root TEXT,
+                project_root_status TEXT NOT NULL,
+                nearest_path TEXT,
+                nearest_scope TEXT,
+                effective_chain_hash TEXT,
+                chain_json TEXT NOT NULL,
+                diagnostics_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_instruction_snapshots_session
+                ON instruction_snapshots(session_id);
+            CREATE INDEX IF NOT EXISTS idx_instruction_joins_session
+                ON instruction_joins(session_id);
+            INSERT OR IGNORE INTO schema_versions (version) VALUES (4);
+            PRAGMA user_version = 4;
+            "#,
+        )?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -769,6 +955,12 @@ fn stamp_data(data: &mut CanonicalData, timestamp: &str) {
     for diagnostic in &mut data.diagnostics {
         diagnostic.source.stamp_ingest_time(timestamp);
     }
+    for snapshot in &mut data.instruction_snapshots {
+        snapshot.provenance.stamp_ingest_time(timestamp);
+    }
+    for join in &mut data.instruction_joins {
+        join.provenance.stamp_ingest_time(timestamp);
+    }
 }
 
 fn current_timestamp() -> String {
@@ -805,7 +997,11 @@ fn canonical_state_diagnostic(diagnostic: &StateDiagnostic) -> CanonicalDiagnost
     }
 }
 
-fn delete_source(transaction: &Transaction<'_>, identity: &str) -> rusqlite::Result<()> {
+fn delete_source(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    preserve_instruction_snapshots: bool,
+) -> rusqlite::Result<()> {
     for table in [
         "sessions",
         "turns",
@@ -816,16 +1012,29 @@ fn delete_source(transaction: &Transaction<'_>, identity: &str) -> rusqlite::Res
         "file_operations",
         "token_usage",
         "diagnostics",
+        "instruction_files",
+        "instruction_joins",
     ] {
         transaction.execute(
             &format!("DELETE FROM {table} WHERE source_identity = ?1"),
             params![identity],
         )?;
     }
+    if !preserve_instruction_snapshots {
+        transaction.execute(
+            "DELETE FROM instruction_snapshots WHERE source_identity = ?1",
+            params![identity],
+        )?;
+    }
     Ok(())
 }
 
-fn insert_data(transaction: &Transaction<'_>, identity: &str, data: &CanonicalData) -> Result<()> {
+fn insert_data(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    data: &CanonicalData,
+    preserve_instruction_snapshots: bool,
+) -> Result<()> {
     for session in &data.sessions {
         insert_session(transaction, identity, session)?;
     }
@@ -852,6 +1061,14 @@ fn insert_data(transaction: &Transaction<'_>, identity: &str, data: &CanonicalDa
     }
     for (index, diagnostic) in data.diagnostics.iter().enumerate() {
         insert_diagnostic(transaction, identity, diagnostic, index)?;
+    }
+    if !preserve_instruction_snapshots {
+        for (index, snapshot) in data.instruction_snapshots.iter().enumerate() {
+            insert_instruction_snapshot(transaction, identity, snapshot, index)?;
+        }
+    }
+    for join in &data.instruction_joins {
+        insert_instruction_join(transaction, identity, join)?;
     }
     Ok(())
 }
@@ -1144,6 +1361,169 @@ fn insert_diagnostic(
     Ok(())
 }
 
+fn insert_instruction_snapshot(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    snapshot: &InstructionSnapshot,
+    index: usize,
+) -> Result<()> {
+    let key = row_key(
+        identity,
+        &snapshot.provenance,
+        &format!(
+            "snapshot:{index}:{}:{}",
+            snapshot.session_id.as_deref().unwrap_or(""),
+            snapshot.turn_id.as_deref().unwrap_or("")
+        ),
+    );
+    let blob_key = match (&snapshot.content_hash, &snapshot.content) {
+        (Some(content_hash), Some(content)) => Some(ensure_instruction_blob(
+            transaction,
+            content_hash,
+            snapshot.byte_count,
+            content,
+        )?),
+        _ => None,
+    };
+    let chain_json = serde_json::to_string(&snapshot.chain)?;
+    transaction.execute(
+        "INSERT OR REPLACE INTO instruction_snapshots (snapshot_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, turn_id, snapshot_source, accuracy, blob_key, content_hash, byte_count, effective_chain_hash, truncated, chain_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![
+            key,
+            identity,
+            snapshot.provenance.path.to_string_lossy().as_ref(),
+            db_line(snapshot.provenance.line),
+            source_kind_name(snapshot.provenance.kind),
+            snapshot.provenance.ingested_at,
+            i64::from(snapshot.provenance.parser_schema_version),
+            snapshot.session_id,
+            snapshot.turn_id,
+            snapshot.source.as_str(),
+            snapshot.accuracy.as_str(),
+            blob_key,
+            snapshot.content_hash,
+            i64::try_from(snapshot.byte_count).unwrap_or(i64::MAX),
+            snapshot.effective_chain_hash,
+            i64::from(snapshot.truncated),
+            chain_json,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_instruction_join(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    join: &InstructionJoin,
+) -> Result<()> {
+    for (index, file) in join.resolution.files.iter().enumerate() {
+        insert_instruction_file(transaction, identity, join, file, index)?;
+    }
+    let key = row_key(
+        identity,
+        &join.provenance,
+        &format!("join:{}", join.session_id),
+    );
+    let chain = snapshot_entries(&join.resolution.chain);
+    let chain_json = serde_json::to_string(&chain)?;
+    let diagnostics_json = serde_json::to_string(&join.resolution.diagnostics)?;
+    transaction.execute(
+        "INSERT OR REPLACE INTO instruction_joins (join_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, cwd, project_root, project_root_status, nearest_path, nearest_scope, effective_chain_hash, chain_json, diagnostics_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        params![
+            key,
+            identity,
+            join.provenance.path.to_string_lossy().as_ref(),
+            db_line(join.provenance.line),
+            source_kind_name(join.provenance.kind),
+            join.provenance.ingested_at,
+            i64::from(join.provenance.parser_schema_version),
+            join.session_id,
+            join.cwd.as_ref().map(|path| path.to_string_lossy().into_owned()),
+            join.project_root
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            join.project_root_status.as_str(),
+            join.nearest_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            join.nearest_scope.map(InstructionScope::as_str),
+            join.resolution.effective_chain_hash,
+            chain_json,
+            diagnostics_json,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_instruction_file(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    join: &InstructionJoin,
+    file: &InstructionFile,
+    index: usize,
+) -> Result<()> {
+    let blob_key = match (&file.content_hash, &file.content) {
+        (Some(content_hash), Some(content)) => Some(ensure_instruction_blob(
+            transaction,
+            content_hash,
+            content.len(),
+            content,
+        )?),
+        _ => None,
+    };
+    let key = row_key(
+        identity,
+        &join.provenance,
+        &format!(
+            "instruction-file:{index}:{}:{}",
+            join.session_id,
+            file.path.display()
+        ),
+    );
+    transaction.execute(
+        "INSERT OR REPLACE INTO instruction_files (file_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, path, scope, file_kind, state, chain_position, blob_key, content_hash, byte_count, diagnostic) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![
+            key,
+            identity,
+            join.provenance.path.to_string_lossy().as_ref(),
+            db_line(join.provenance.line),
+            source_kind_name(join.provenance.kind),
+            join.provenance.ingested_at,
+            i64::from(join.provenance.parser_schema_version),
+            join.session_id,
+            file.path.to_string_lossy().as_ref(),
+            file.scope.as_str(),
+            file.kind.as_str(),
+            file.state.as_str(),
+            file.chain_position.and_then(|position| i64::try_from(position).ok()),
+            blob_key,
+            file.content_hash,
+            i64::try_from(file.byte_count).unwrap_or(i64::MAX),
+            file.diagnostic,
+        ],
+    )?;
+    Ok(())
+}
+
+fn ensure_instruction_blob(
+    transaction: &Transaction<'_>,
+    content_hash: &str,
+    byte_count: usize,
+    content: &str,
+) -> Result<String> {
+    let key = format!("{content_hash}:{byte_count}");
+    transaction.execute(
+        "INSERT OR IGNORE INTO instruction_blobs (blob_key, content_hash, byte_count, content) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            key,
+            content_hash,
+            i64::try_from(byte_count).unwrap_or(i64::MAX),
+            content,
+        ],
+    )?;
+    Ok(key)
+}
+
 fn record_kind_values(record: &Record) -> (&'static str, Option<&str>, Option<&str>, Option<&str>) {
     match &record.kind {
         RecordKind::SessionMetadata => (
@@ -1247,6 +1627,27 @@ fn db_u64(value: Option<u64>) -> Option<i64> {
     value.and_then(|value| i64::try_from(value).ok())
 }
 
+fn capture_options_for_inputs(inputs: &[DiscoveredInput]) -> InstructionCaptureOptions {
+    inputs
+        .iter()
+        .find_map(|input| codex_home_for_source(&input.path))
+        .map_or_else(InstructionCaptureOptions::default, |codex_home| {
+            InstructionCaptureOptions::from_codex_home(&codex_home, None).0
+        })
+}
+
+fn resolver_for_source(path: &Path) -> InstructionResolver {
+    codex_home_for_source(path)
+        .map_or_else(InstructionCaptureOptions::default, |codex_home| {
+            InstructionCaptureOptions::from_codex_home(&codex_home, None).0
+        })
+        .resolver()
+}
+
+fn resolver_for_inputs(inputs: &[DiscoveredInput]) -> InstructionResolver {
+    capture_options_for_inputs(inputs).resolver()
+}
+
 fn canonical_identity(path: &Path) -> Result<PathBuf> {
     Ok(std::fs::canonicalize(path)?)
 }
@@ -1346,6 +1747,10 @@ mod tests {
             "token_usage",
             "diagnostics",
             "ingested_files",
+            "instruction_blobs",
+            "instruction_snapshots",
+            "instruction_files",
+            "instruction_joins",
         ] {
             assert_eq!(
                 store
@@ -1368,6 +1773,200 @@ mod tests {
                 .unwrap(),
             SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn instruction_snapshots_keep_turns_and_deduplicate_blobs() {
+        let source = temp_path("instructions.jsonl");
+        let instruction_text = "synthetic observed instruction";
+        let rollout = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-instruction-session\",\"cwd\":\"/fixture/project\",\"project\":\"/fixture\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-instruction-turn-001\",\"cwd\":\"/fixture/project\",\"user_instructions\":\"{}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-instruction-turn-002\",\"cwd\":\"/fixture/project\",\"user_instructions\":\"{}\"}}}}\n",
+            instruction_text, instruction_text
+        );
+        fs::write(&source, rollout).unwrap();
+        let mut store = Store::in_memory().unwrap();
+
+        store
+            .ingest_rollout_file(&source, &RolloutParseOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM instruction_snapshots", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM instruction_blobs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let snapshot = store
+            .connection()
+            .query_row(
+                "SELECT snapshot_source, accuracy, content_hash, byte_count, effective_chain_hash, chain_json FROM instruction_snapshots ORDER BY turn_id LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(snapshot.0, "rollout");
+        assert_eq!(snapshot.1, "observed");
+        assert_eq!(snapshot.3, i64::try_from(instruction_text.len()).unwrap());
+        assert_eq!(snapshot.2, snapshot.4);
+        assert!(snapshot.5.contains("Observed"));
+        let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn filesystem_instruction_join_is_stored_without_using_the_checkout() {
+        let root = temp_path("project");
+        let nested = root.join("src");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("AGENTS.md"), "root instruction").unwrap();
+        fs::write(nested.join("AGENTS.override.md"), "nested instruction").unwrap();
+        let source = temp_path("filesystem.jsonl");
+        let rollout = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-filesystem-session\",\"cwd\":\"{}\",\"project\":\"{}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-filesystem-turn\",\"cwd\":\"{}\"}}}}\n",
+            nested.display(),
+            root.display(),
+            nested.display(),
+        );
+        fs::write(&source, rollout).unwrap();
+        let mut store = Store::in_memory().unwrap();
+
+        store
+            .ingest_rollout_file(&source, &RolloutParseOptions::default())
+            .unwrap();
+
+        let join = store
+            .connection()
+            .query_row(
+                "SELECT project_root_status, nearest_path, nearest_scope, chain_json FROM instruction_joins WHERE session_id = ?1",
+                params!["fixture-filesystem-session"],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(join.0, "known");
+        assert!(join.1.ends_with("AGENTS.override.md"));
+        assert_eq!(join.2, "project_nested");
+        assert!(join.3.contains("AGENTS.md"));
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM instruction_files WHERE session_id = ?1",
+                    params!["fixture-filesystem-session"],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM instruction_blobs WHERE content IN ('root instruction', 'nested instruction')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        let snapshot = store
+            .connection()
+            .query_row(
+                "SELECT snapshot_source, accuracy, effective_chain_hash FROM instruction_snapshots WHERE session_id = ?1",
+                params!["fixture-filesystem-session"],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(snapshot.0, "filesystem_at_ingest");
+        assert_eq!(snapshot.1, "reconstructed");
+        assert!(!snapshot.2.is_empty());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn unchanged_rollout_keeps_snapshot_when_instruction_file_changes() {
+        let root = temp_path("stable-project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("AGENTS.md"), "before").unwrap();
+        let source = temp_path("stable.jsonl");
+        let rollout = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-stable-session\",\"cwd\":\"{}\",\"project\":\"{}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-stable-turn\",\"cwd\":\"{}\"}}}}\n",
+            root.display(),
+            root.display(),
+            root.display(),
+        );
+        fs::write(&source, rollout).unwrap();
+        let mut store = Store::in_memory().unwrap();
+        let capture = InstructionCaptureOptions::default();
+
+        let first = store
+            .ingest_rollout_file_with_instructions(
+                &source,
+                &RolloutParseOptions::default(),
+                &capture,
+            )
+            .unwrap();
+        assert!(!first.skipped);
+        let before: String = store
+            .connection()
+            .query_row("SELECT content FROM instruction_blobs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        fs::write(root.join("AGENTS.md"), "after").unwrap();
+        let second = store
+            .ingest_rollout_file_with_instructions(
+                &source,
+                &RolloutParseOptions::default(),
+                &capture,
+            )
+            .unwrap();
+
+        assert!(second.skipped);
+        let after: String = store
+            .connection()
+            .query_row("SELECT content FROM instruction_blobs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(before, "before");
+        assert_eq!(after, before);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(source);
     }
 
     #[test]
@@ -1698,6 +2297,98 @@ mod tests {
         );
         let _ = fs::remove_file(state_source);
         let _ = fs::remove_file(rollout_source);
+    }
+
+    #[test]
+    fn state_refresh_updates_join_without_replacing_rollout_snapshot() {
+        let state_source = temp_path("historical-state.sqlite");
+        let rollout_source = temp_path("historical-rollout.jsonl");
+        let project_root = temp_path("historical-project");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::write(project_root.join("AGENTS.md"), "before").unwrap();
+        create_database(
+            &state_source,
+            include_str!("../tests/fixtures/state/enrichment.sql"),
+        );
+        let connection = Connection::open(&state_source).unwrap();
+        connection
+            .execute(
+                "UPDATE threads SET rollout_path = ?1, project_path = ?2",
+                params![
+                    rollout_source.to_string_lossy().as_ref(),
+                    project_root.to_string_lossy().as_ref(),
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        fs::write(
+            &rollout_source,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-enrichment-session\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-enrichment-turn\",\"cwd\":\"{}\"}}}}\n",
+                project_root.display()
+            ),
+        )
+        .unwrap();
+        let inputs = vec![
+            DiscoveredInput {
+                path: state_source.clone(),
+                identity: fs::canonicalize(&state_source).unwrap(),
+                kind: InputKind::StateDatabase,
+                reader: None,
+            },
+            DiscoveredInput {
+                path: rollout_source.clone(),
+                identity: fs::canonicalize(&rollout_source).unwrap(),
+                kind: InputKind::Rollout { archived: false },
+                reader: Some(ReaderKind::PlainJsonl),
+            },
+        ];
+        let mut store = Store::in_memory().unwrap();
+        store
+            .ingest_inputs(&inputs, &IngestOptions::default())
+            .unwrap();
+        let before: String = store
+            .connection()
+            .query_row(
+                "SELECT b.content FROM instruction_snapshots AS s JOIN instruction_blobs AS b ON b.blob_key = s.blob_key WHERE s.session_id = ?1",
+                params!["fixture-enrichment-session"],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        fs::write(project_root.join("AGENTS.md"), "after").unwrap();
+        let connection = Connection::open(&state_source).unwrap();
+        connection
+            .execute("UPDATE threads SET model = 'state-model-v2'", [])
+            .unwrap();
+        drop(connection);
+
+        store
+            .ingest_inputs(&inputs, &IngestOptions::default())
+            .unwrap();
+        let snapshot: String = store
+            .connection()
+            .query_row(
+                "SELECT b.content FROM instruction_snapshots AS s JOIN instruction_blobs AS b ON b.blob_key = s.blob_key WHERE s.session_id = ?1",
+                params!["fixture-enrichment-session"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let current_file: String = store
+            .connection()
+            .query_row(
+                "SELECT b.content FROM instruction_files AS f JOIN instruction_blobs AS b ON b.blob_key = f.blob_key WHERE f.session_id = ?1 AND f.state = 'selected'",
+                params!["fixture-enrichment-session"],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(before, "before");
+        assert_eq!(snapshot, before);
+        assert_eq!(current_file, "after");
+        let _ = fs::remove_file(state_source);
+        let _ = fs::remove_file(rollout_source);
+        let _ = fs::remove_dir_all(project_root);
     }
 
     #[test]
