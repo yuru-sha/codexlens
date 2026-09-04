@@ -103,13 +103,7 @@ impl InstructionResolver {
 
         if let Some(codex_home) = self.codex_home.as_deref() {
             if codex_home.is_absolute() {
-                select_global(
-                    codex_home,
-                    max_bytes,
-                    &mut files,
-                    &mut chain,
-                    &mut diagnostics,
-                );
+                select_global(codex_home, &mut files, &mut chain, &mut diagnostics);
             } else {
                 diagnostics.push(InstructionDiagnostic {
                     path: Some(codex_home.to_path_buf()),
@@ -128,22 +122,32 @@ impl InstructionResolver {
 
         let (project_root, project_root_status) =
             project_root(project_root_hint, cwd, &mut diagnostics);
-        if project_root_status == ProjectRootStatus::Known {
-            if let Some(root) = project_root.as_deref() {
-                let directories = project_directories(root, cwd);
-                for directory in directories {
-                    select_project_directory(
-                        &directory,
-                        if directory.as_path() == root {
-                            InstructionScope::ProjectRoot
-                        } else {
-                            InstructionScope::ProjectNested
-                        },
-                        &self.config,
-                        &mut files,
-                        &mut chain,
-                        &mut diagnostics,
-                    );
+        let mut project_bytes = 0usize;
+        let project_walk_root = match project_root_status {
+            ProjectRootStatus::Known => project_root.as_deref(),
+            ProjectRootStatus::Unavailable if project_root_hint.is_none() => {
+                cwd.filter(|path| path.is_absolute() && path.is_dir())
+            }
+            _ => None,
+        };
+        if let Some(root) = project_walk_root {
+            let directories = project_directories(root, cwd);
+            for directory in directories {
+                select_project_directory(
+                    &directory,
+                    if directory.as_path() == root {
+                        InstructionScope::ProjectRoot
+                    } else {
+                        InstructionScope::ProjectNested
+                    },
+                    &self.config,
+                    &mut project_bytes,
+                    &mut files,
+                    &mut chain,
+                    &mut diagnostics,
+                );
+                if project_bytes >= max_bytes {
+                    break;
                 }
             }
         }
@@ -151,9 +155,7 @@ impl InstructionResolver {
         let truncated = chain
             .iter()
             .any(|file: &InstructionFile| file.state == InstructionFileState::Truncated);
-        let (effective_content, effective_chain_hash, byte_count, chain_truncated) =
-            effective_chain(&chain, max_bytes);
-        let truncated = truncated || chain_truncated;
+        let (effective_content, effective_chain_hash, byte_count) = effective_chain(&chain);
         if truncated
             && !diagnostics
                 .iter()
@@ -296,14 +298,8 @@ pub fn snapshot_from_resolution(
     resolution: &InstructionResolution,
     provenance: SourceRef,
 ) -> InstructionSnapshot {
-    if resolution.files.is_empty() {
+    let Some(content) = resolution.effective_content.as_ref() else {
         return unavailable_snapshot(session_id, turn_id, provenance);
-    }
-    let content = resolution.effective_content.clone().unwrap_or_default();
-    let chain = if resolution.chain.is_empty() {
-        snapshot_entries(&resolution.files)
-    } else {
-        snapshot_entries(&resolution.chain)
     };
     let content_hash = content_hash(content.as_bytes());
     let byte_count = content.len();
@@ -312,10 +308,10 @@ pub fn snapshot_from_resolution(
         turn_id,
         source: InstructionSnapshotSource::FilesystemAtIngest,
         accuracy: InstructionSnapshotAccuracy::Reconstructed,
-        content: Some(content),
+        content: Some(content.clone()),
+        chain: snapshot_entries(&resolution.chain),
         content_hash: Some(content_hash.clone()),
         byte_count,
-        chain,
         effective_chain_hash: resolution
             .effective_chain_hash
             .clone()
@@ -356,7 +352,6 @@ pub fn content_hash(bytes: &[u8]) -> String {
 
 fn select_global(
     codex_home: &Path,
-    max_bytes: usize,
     files: &mut Vec<InstructionFile>,
     chain: &mut Vec<InstructionFile>,
     diagnostics: &mut Vec<InstructionDiagnostic>,
@@ -369,7 +364,8 @@ fn select_global(
         .into_iter()
         .map(|(name, kind)| (codex_home.join(name), kind, InstructionScope::Global))
         .collect(),
-        max_bytes,
+        usize::MAX,
+        None,
         files,
         chain,
         diagnostics,
@@ -380,6 +376,7 @@ fn select_project_directory(
     directory: &Path,
     scope: InstructionScope,
     config: &InstructionConfig,
+    project_bytes: &mut usize,
     files: &mut Vec<InstructionFile>,
     chain: &mut Vec<InstructionFile>,
     diagnostics: &mut Vec<InstructionDiagnostic>,
@@ -412,6 +409,7 @@ fn select_project_directory(
     select_candidates(
         candidates,
         config.project_doc_max_bytes.max(1),
+        Some(project_bytes),
         files,
         chain,
         diagnostics,
@@ -421,18 +419,34 @@ fn select_project_directory(
 fn select_candidates(
     candidates: Vec<(PathBuf, InstructionFileKind, InstructionScope)>,
     max_bytes: usize,
+    project_bytes: Option<&mut usize>,
     files: &mut Vec<InstructionFile>,
     chain: &mut Vec<InstructionFile>,
     diagnostics: &mut Vec<InstructionDiagnostic>,
 ) {
+    let mut project_bytes = project_bytes;
     for (path, kind, scope) in candidates {
-        let mut file = read_candidate(&path, scope, kind, max_bytes, diagnostics);
+        let remaining = project_bytes
+            .as_deref()
+            .map_or(max_bytes, |used| max_bytes.saturating_sub(*used));
+        if remaining == 0 {
+            break;
+        }
+        let mut file = read_candidate(&path, scope, kind, remaining, diagnostics);
         let selected = matches!(
             file.state,
             InstructionFileState::Selected | InstructionFileState::Truncated
         );
         if selected {
             file.chain_position = Some(chain.len());
+            if let Some(used) = project_bytes.as_deref_mut() {
+                let consumed = if file.state == InstructionFileState::Truncated {
+                    remaining
+                } else {
+                    file.content.as_ref().map_or(0, String::len)
+                };
+                *used = used.saturating_add(consumed);
+            }
             if file.state == InstructionFileState::Truncated {
                 diagnostics.push(InstructionDiagnostic {
                     path: Some(file.path.clone()),
@@ -675,27 +689,18 @@ fn project_directories(root: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
     directories
 }
 
-fn effective_chain(
-    chain: &[InstructionFile],
-    max_bytes: usize,
-) -> (Option<String>, Option<String>, usize, bool) {
+fn effective_chain(chain: &[InstructionFile]) -> (Option<String>, Option<String>, usize) {
     let contents = chain
         .iter()
         .filter_map(|file| file.content.as_deref())
         .collect::<Vec<_>>();
     if contents.is_empty() {
-        return (None, None, 0, false);
+        return (None, None, 0);
     }
-    let merged = contents.join("\n\n");
-    let mut bytes = merged.into_bytes();
-    let truncated = bytes.len() > max_bytes;
-    if truncated {
-        truncate_utf8(&mut bytes, max_bytes).expect("merged instruction content is valid UTF-8");
-    }
-    let content = String::from_utf8(bytes).expect("instruction content is valid UTF-8");
+    let content = contents.join("\n\n");
     let hash = content_hash(content.as_bytes());
     let byte_count = content.len();
-    (Some(content), Some(hash), byte_count, truncated)
+    (Some(content), Some(hash), byte_count)
 }
 
 fn truncate_utf8(bytes: &mut Vec<u8>, max_bytes: usize) -> Result<(), ()> {
@@ -797,6 +802,72 @@ mod tests {
     }
 
     #[test]
+    fn project_budget_is_cumulative_and_global_guidance_is_separate() {
+        let temp = TempDir::new();
+        let home = temp.0.join("codex");
+        let root = temp.0.join("project");
+        let nested = root.join("src");
+        fs::create_dir_all(&nested).unwrap();
+        write(
+            &home.join("AGENTS.md"),
+            "global guidance longer than project budget",
+        );
+        write(&root.join("AGENTS.md"), "root");
+        write(&nested.join("AGENTS.md"), "nested");
+
+        let resolver = InstructionResolver::new(
+            Some(home),
+            InstructionConfig {
+                project_doc_fallback_filenames: Vec::new(),
+                project_doc_max_bytes: 4,
+            },
+        );
+        let result = resolver.resolve(Some(&root), Some(&nested));
+
+        assert_eq!(result.chain.len(), 2);
+        assert_eq!(result.chain[0].scope, InstructionScope::Global);
+        assert_eq!(
+            result.chain[0].content.as_deref(),
+            Some("global guidance longer than project budget")
+        );
+        assert_eq!(result.chain[1].path, root.join("AGENTS.md"));
+        assert_eq!(result.chain[1].content.as_deref(), Some("root"));
+        assert!(
+            !result
+                .chain
+                .iter()
+                .any(|file| file.path == nested.join("AGENTS.md"))
+        );
+        assert!(result.byte_count > 4);
+    }
+
+    #[test]
+    fn project_budget_truncates_the_first_file_that_exceeds_remaining_bytes() {
+        let temp = TempDir::new();
+        let root = temp.0.join("project");
+        let nested = root.join("src");
+        fs::create_dir_all(&nested).unwrap();
+        write(&root.join("AGENTS.md"), "abc");
+        write(&nested.join("AGENTS.md"), "nested");
+
+        let resolver = InstructionResolver::new(
+            None,
+            InstructionConfig {
+                project_doc_fallback_filenames: Vec::new(),
+                project_doc_max_bytes: 4,
+            },
+        );
+        let result = resolver.resolve(Some(&root), Some(&nested));
+
+        assert_eq!(result.chain.len(), 2);
+        assert_eq!(result.chain[1].state, InstructionFileState::Truncated);
+        assert_eq!(result.chain[1].content.as_deref(), Some("n"));
+        assert_eq!(result.byte_count, 6);
+        assert!(result.truncated);
+        assert_eq!(result.chain[1].path, nested.join("AGENTS.md"));
+    }
+
+    #[test]
     fn records_empty_missing_and_truncated_states() {
         let temp = TempDir::new();
         let root = temp.0.join("project");
@@ -855,6 +926,10 @@ mod tests {
 
         let rootless = resolver.resolve(None, Some(&root));
         assert_eq!(rootless.project_root_status, ProjectRootStatus::Unavailable);
+        write(&root.join("AGENTS.md"), "cwd instruction");
+        let rootless = resolver.resolve(None, Some(&root));
+        assert_eq!(rootless.chain.len(), 1);
+        assert_eq!(rootless.chain[0].path, root.join("AGENTS.md"));
 
         let conflict = resolver.resolve(Some(&root), Some(&outside));
         assert_eq!(conflict.project_root_status, ProjectRootStatus::Conflict);
@@ -921,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_filesystem_resolution_is_reconstructed() {
+    fn unresolved_filesystem_resolution_stays_unavailable() {
         let temp = TempDir::new();
         let root = temp.0.join("project");
         fs::create_dir_all(&root).unwrap();
@@ -935,23 +1010,10 @@ mod tests {
             SourceRef::rollout(PathBuf::from("rollout.jsonl"), 1),
         );
 
-        assert_eq!(
-            snapshot.source,
-            InstructionSnapshotSource::FilesystemAtIngest
-        );
-        assert_eq!(
-            snapshot.accuracy,
-            InstructionSnapshotAccuracy::Reconstructed
-        );
-        assert_eq!(snapshot.content.as_deref(), Some(""));
-        assert_eq!(snapshot.byte_count, 0);
-        assert!(snapshot.content_hash.is_some());
-        assert!(!snapshot.chain.is_empty());
-        assert!(
-            snapshot
-                .chain
-                .iter()
-                .all(|entry| entry.state == InstructionFileState::Missing)
-        );
+        assert_eq!(snapshot.source, InstructionSnapshotSource::Unavailable);
+        assert_eq!(snapshot.accuracy, InstructionSnapshotAccuracy::Unavailable);
+        assert!(snapshot.content.is_none());
+        assert!(snapshot.content_hash.is_none());
+        assert!(snapshot.chain.is_empty());
     }
 }

@@ -60,6 +60,12 @@ pub struct IngestSummary {
     pub diagnostics: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IngestBatchOptions<'a> {
+    storage_mode: Option<&'a str>,
+    preserve_instruction_snapshots: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestReport {
     pub files: Vec<IngestSummary>,
@@ -314,7 +320,10 @@ impl Store {
             kind,
             &fingerprint,
             data,
-            (kind == IngestInputKind::State).then_some(STATE_STORAGE_STANDALONE),
+            IngestBatchOptions {
+                storage_mode: (kind == IngestInputKind::State).then_some(STATE_STORAGE_STANDALONE),
+                preserve_instruction_snapshots: false,
+            },
         )
     }
 
@@ -335,9 +344,9 @@ impl Store {
                 return Ok(summary_from_data(path.to_path_buf(), &data, false));
             }
         };
-        if !force_refresh
-            && self.is_unchanged(identity, &fingerprint, IngestInputKind::Rollout, None)?
-        {
+        let unchanged =
+            self.is_unchanged(identity, &fingerprint, IngestInputKind::Rollout, None)?;
+        if !force_refresh && unchanged {
             return Ok(skipped_summary(path.to_path_buf()));
         }
         let parsed = parse_rollout(path, options);
@@ -357,7 +366,10 @@ impl Store {
             IngestInputKind::Rollout,
             &fingerprint,
             &data,
-            None,
+            IngestBatchOptions {
+                storage_mode: None,
+                preserve_instruction_snapshots: force_refresh && unchanged,
+            },
         )
     }
 
@@ -406,11 +418,14 @@ impl Store {
             IngestInputKind::State,
             fingerprint,
             &data,
-            Some(if persist_sessions {
-                STATE_STORAGE_STANDALONE
-            } else {
-                STATE_STORAGE_ENRICHMENT
-            }),
+            IngestBatchOptions {
+                storage_mode: Some(if persist_sessions {
+                    STATE_STORAGE_STANDALONE
+                } else {
+                    STATE_STORAGE_ENRICHMENT
+                }),
+                preserve_instruction_snapshots: false,
+            },
         )
     }
 
@@ -440,7 +455,17 @@ impl Store {
             }],
             ..CanonicalData::default()
         };
-        self.ingest_batch(path, identity, kind, &fingerprint, &data, None)
+        self.ingest_batch(
+            path,
+            identity,
+            kind,
+            &fingerprint,
+            &data,
+            IngestBatchOptions {
+                storage_mode: None,
+                preserve_instruction_snapshots: false,
+            },
+        )
     }
 
     fn is_unchanged(
@@ -485,14 +510,23 @@ impl Store {
         kind: IngestInputKind,
         fingerprint: &Fingerprint,
         data: &CanonicalData,
-        storage_mode: Option<&str>,
+        options: IngestBatchOptions<'_>,
     ) -> Result<IngestSummary> {
         let identity = source_identity.to_string_lossy().into_owned();
         let mut stamped_data = data.clone();
         stamp_data(&mut stamped_data, &current_timestamp());
         let transaction = self.connection.transaction()?;
-        delete_source(&transaction, &identity)?;
-        insert_data(&transaction, &identity, &stamped_data)?;
+        delete_source(
+            &transaction,
+            &identity,
+            options.preserve_instruction_snapshots,
+        )?;
+        insert_data(
+            &transaction,
+            &identity,
+            &stamped_data,
+            options.preserve_instruction_snapshots,
+        )?;
         transaction.execute(
             "INSERT INTO ingested_files (identity, source_path, input_kind, size, modified_ns, digest, storage_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(identity) DO UPDATE SET source_path = excluded.source_path, input_kind = excluded.input_kind, size = excluded.size, modified_ns = excluded.modified_ns, digest = excluded.digest, storage_mode = excluded.storage_mode",
@@ -503,7 +537,7 @@ impl Store {
                 i64::try_from(fingerprint.size).unwrap_or(i64::MAX),
                 fingerprint.modified_ns.map(|value| value.to_string()),
                 fingerprint.digest.to_string(),
-                storage_mode,
+                options.storage_mode,
             ],
         )?;
         transaction.commit()?;
@@ -963,7 +997,11 @@ fn canonical_state_diagnostic(diagnostic: &StateDiagnostic) -> CanonicalDiagnost
     }
 }
 
-fn delete_source(transaction: &Transaction<'_>, identity: &str) -> rusqlite::Result<()> {
+fn delete_source(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    preserve_instruction_snapshots: bool,
+) -> rusqlite::Result<()> {
     for table in [
         "sessions",
         "turns",
@@ -974,7 +1012,6 @@ fn delete_source(transaction: &Transaction<'_>, identity: &str) -> rusqlite::Res
         "file_operations",
         "token_usage",
         "diagnostics",
-        "instruction_snapshots",
         "instruction_files",
         "instruction_joins",
     ] {
@@ -983,10 +1020,21 @@ fn delete_source(transaction: &Transaction<'_>, identity: &str) -> rusqlite::Res
             params![identity],
         )?;
     }
+    if !preserve_instruction_snapshots {
+        transaction.execute(
+            "DELETE FROM instruction_snapshots WHERE source_identity = ?1",
+            params![identity],
+        )?;
+    }
     Ok(())
 }
 
-fn insert_data(transaction: &Transaction<'_>, identity: &str, data: &CanonicalData) -> Result<()> {
+fn insert_data(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    data: &CanonicalData,
+    preserve_instruction_snapshots: bool,
+) -> Result<()> {
     for session in &data.sessions {
         insert_session(transaction, identity, session)?;
     }
@@ -1014,8 +1062,10 @@ fn insert_data(transaction: &Transaction<'_>, identity: &str, data: &CanonicalDa
     for (index, diagnostic) in data.diagnostics.iter().enumerate() {
         insert_diagnostic(transaction, identity, diagnostic, index)?;
     }
-    for (index, snapshot) in data.instruction_snapshots.iter().enumerate() {
-        insert_instruction_snapshot(transaction, identity, snapshot, index)?;
+    if !preserve_instruction_snapshots {
+        for (index, snapshot) in data.instruction_snapshots.iter().enumerate() {
+            insert_instruction_snapshot(transaction, identity, snapshot, index)?;
+        }
     }
     for join in &data.instruction_joins {
         insert_instruction_join(transaction, identity, join)?;
@@ -2272,6 +2322,98 @@ mod tests {
         );
         let _ = fs::remove_file(state_source);
         let _ = fs::remove_file(rollout_source);
+    }
+
+    #[test]
+    fn state_refresh_updates_join_without_replacing_rollout_snapshot() {
+        let state_source = temp_path("historical-state.sqlite");
+        let rollout_source = temp_path("historical-rollout.jsonl");
+        let project_root = temp_path("historical-project");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::write(project_root.join("AGENTS.md"), "before").unwrap();
+        create_database(
+            &state_source,
+            include_str!("../tests/fixtures/state/enrichment.sql"),
+        );
+        let connection = Connection::open(&state_source).unwrap();
+        connection
+            .execute(
+                "UPDATE threads SET rollout_path = ?1, project_path = ?2",
+                params![
+                    rollout_source.to_string_lossy().as_ref(),
+                    project_root.to_string_lossy().as_ref(),
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        fs::write(
+            &rollout_source,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-enrichment-session\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-enrichment-turn\",\"cwd\":\"{}\"}}}}\n",
+                project_root.display()
+            ),
+        )
+        .unwrap();
+        let inputs = vec![
+            DiscoveredInput {
+                path: state_source.clone(),
+                identity: fs::canonicalize(&state_source).unwrap(),
+                kind: InputKind::StateDatabase,
+                reader: None,
+            },
+            DiscoveredInput {
+                path: rollout_source.clone(),
+                identity: fs::canonicalize(&rollout_source).unwrap(),
+                kind: InputKind::Rollout { archived: false },
+                reader: Some(ReaderKind::PlainJsonl),
+            },
+        ];
+        let mut store = Store::in_memory().unwrap();
+        store
+            .ingest_inputs(&inputs, &IngestOptions::default())
+            .unwrap();
+        let before: String = store
+            .connection()
+            .query_row(
+                "SELECT b.content FROM instruction_snapshots AS s JOIN instruction_blobs AS b ON b.blob_key = s.blob_key WHERE s.session_id = ?1",
+                params!["fixture-enrichment-session"],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        fs::write(project_root.join("AGENTS.md"), "after").unwrap();
+        let connection = Connection::open(&state_source).unwrap();
+        connection
+            .execute("UPDATE threads SET model = 'state-model-v2'", [])
+            .unwrap();
+        drop(connection);
+
+        store
+            .ingest_inputs(&inputs, &IngestOptions::default())
+            .unwrap();
+        let snapshot: String = store
+            .connection()
+            .query_row(
+                "SELECT b.content FROM instruction_snapshots AS s JOIN instruction_blobs AS b ON b.blob_key = s.blob_key WHERE s.session_id = ?1",
+                params!["fixture-enrichment-session"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let current_file: String = store
+            .connection()
+            .query_row(
+                "SELECT b.content FROM instruction_files AS f JOIN instruction_blobs AS b ON b.blob_key = f.blob_key WHERE f.session_id = ?1 AND f.state = 'selected'",
+                params!["fixture-enrichment-session"],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(before, "before");
+        assert_eq!(snapshot, before);
+        assert_eq!(current_file, "after");
+        let _ = fs::remove_file(state_source);
+        let _ = fs::remove_file(rollout_source);
+        let _ = fs::remove_dir_all(project_root);
     }
 
     #[test]

@@ -182,7 +182,9 @@ current root `AGENTS.md`:
    fallback filenames. Include at most one file per directory.
 3. Merge root-to-cwd with blank-line boundaries; later, deeper guidance has
    precedence.
-4. Respect `project_doc_max_bytes`, whose default is 32 KiB.
+4. Apply `project_doc_max_bytes` cumulatively to the project chain only,
+   starting at the project root. Global guidance is loaded independently and
+   is not charged against that project budget.
 
 The resolver must record:
 

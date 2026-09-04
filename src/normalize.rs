@@ -13,7 +13,9 @@ use crate::model::{
     SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn, TurnLifecycleEvent,
     merge_session_fields,
 };
-use crate::rollout::{KnownRecordType, ParseDiagnostic, RolloutParseResult, RolloutRecord};
+use crate::rollout::{
+    KnownRecordType, ParseDiagnostic, RolloutInstructionContext, RolloutParseResult, RolloutRecord,
+};
 use crate::state::StateReadResult;
 
 pub fn normalize_rollout(result: &RolloutParseResult) -> CanonicalData {
@@ -168,7 +170,7 @@ fn normalize_records_with_resolver(
                     );
                 }
                 data.instruction_snapshots.push(turn_context_snapshot(
-                    payload.as_ref(),
+                    record.instruction_context.as_ref(),
                     current_session_id.clone(),
                     record_turn_id.clone(),
                     &sessions,
@@ -288,17 +290,14 @@ fn normalize_records_with_resolver(
 }
 
 fn turn_context_snapshot(
-    payload: Option<&Value>,
+    context: Option<&RolloutInstructionContext>,
     session_id: Option<String>,
     turn_id: Option<String>,
     sessions: &BTreeMap<String, Session>,
     resolver: Option<&InstructionResolver>,
     provenance: SourceRef,
 ) -> crate::model::InstructionSnapshot {
-    let object = payload.and_then(Value::as_object);
-    let rollout_instructions = object
-        .and_then(|object| object.get("user_instructions"))
-        .and_then(Value::as_str);
+    let rollout_instructions = context.and_then(|context| context.instruction_text.as_deref());
     if let Some(content) = rollout_instructions {
         return snapshot_from_rollout(session_id, turn_id, Some(content), provenance);
     }
@@ -306,16 +305,13 @@ fn turn_context_snapshot(
         return unavailable_snapshot(session_id, turn_id, provenance);
     };
     let session = session_id.as_deref().and_then(|id| sessions.get(id));
-    let project_root = object
-        .and_then(|object| string_field(object, &["project", "project_root", "project_path"]))
-        .or_else(|| session.and_then(|session| session.project.clone()));
-    let cwd = object
-        .and_then(|object| string_field(object, &["cwd"]))
-        .or_else(|| session.and_then(|session| session.cwd.clone()));
-    let resolution = resolver.resolve(
-        project_root.as_deref().map(std::path::Path::new),
-        cwd.as_deref().map(std::path::Path::new),
-    );
+    let project_root = context
+        .and_then(|context| context.project_root.as_deref())
+        .or_else(|| session.and_then(|session| session.project.as_deref()));
+    let cwd = context
+        .and_then(|context| context.cwd.as_deref())
+        .or_else(|| session.and_then(|session| session.cwd.as_deref()));
+    let resolution = resolver.resolve(project_root.map(Path::new), cwd.map(Path::new));
     snapshot_from_resolution(session_id, turn_id, &resolution, provenance)
 }
 
