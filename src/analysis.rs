@@ -699,21 +699,41 @@ pub fn analyze_verification(data: &CanonicalData, options: &AnalysisOptions) -> 
     let edits = edit_events(data, options);
     let verifications = verification_events(data);
     let mut groups: BTreeMap<(String, Option<String>), Vec<EditEvent>> = BTreeMap::new();
-    for edit in edits {
+    for edit in &edits {
         groups
             .entry((edit.session_id.clone(), edit.turn_id.clone()))
             .or_default()
-            .push(edit);
+            .push(edit.clone());
     }
 
     let mut findings = Vec::new();
     for ((session_id, turn_id), mut changes) in groups {
         changes.sort_by(|left, right| compare_positions(&left.position, &right.position));
+        let last_change_position = changes.last().map(|change| &change.position);
+        let next_change_position = last_change_position.and_then(|last| {
+            edits
+                .iter()
+                .filter(|edit| edit.session_id == session_id)
+                .filter(|edit| compare_positions(&edit.position, last) == Ordering::Greater)
+                .map(|edit| edit.position.clone())
+                .min_by(compare_positions)
+        });
         let mut checks = verifications
             .iter()
             .filter(|check| {
-                check.session_id == session_id
-                    && context_matches(check.turn_id.as_deref(), turn_id.as_deref())
+                if check.session_id != session_id {
+                    return false;
+                }
+                if context_matches(check.turn_id.as_deref(), turn_id.as_deref()) {
+                    return true;
+                }
+                let Some(last) = last_change_position else {
+                    return false;
+                };
+                compare_positions(&check.position, last) == Ordering::Greater
+                    && next_change_position.as_ref().is_none_or(|next| {
+                        compare_positions(&check.position, next) == Ordering::Less
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -3358,6 +3378,77 @@ mod tests {
             analyze_verification(&data, &AnalysisOptions::default())
                 .iter()
                 .all(|finding| finding.verification_status == Some(VerificationStatus::Missing))
+        );
+
+        let mut cross_turn = fixture_data();
+        cross_turn.records.extend([
+            Record {
+                session_id: Some("fixture-analysis-session-a".to_owned()),
+                turn_id: Some("fixture-analysis-turn-a-2".to_owned()),
+                timestamp: Some("2026-01-03T00:06:00.000Z".to_owned()),
+                sequence: 17,
+                original_record_type: Some("response_item".to_owned()),
+                original_nested_type: Some("custom_tool_call".to_owned()),
+                error_category: None,
+                is_error: false,
+                is_terminal: false,
+                kind: RecordKind::ResponseItem,
+                provenance: SourceRef::rollout(PathBuf::from("fixture-analysis.jsonl"), 17),
+            },
+            Record {
+                session_id: Some("fixture-analysis-session-a".to_owned()),
+                turn_id: Some("fixture-analysis-turn-a-2".to_owned()),
+                timestamp: Some("2026-01-03T00:07:00.000Z".to_owned()),
+                sequence: 18,
+                original_record_type: Some("event_msg".to_owned()),
+                original_nested_type: Some("exec_command_end".to_owned()),
+                error_category: None,
+                is_error: false,
+                is_terminal: false,
+                kind: RecordKind::EventMessage,
+                provenance: SourceRef::rollout(PathBuf::from("fixture-analysis.jsonl"), 18),
+            },
+        ]);
+        cross_turn.tool_calls.push(ToolCall {
+            id: None,
+            call_id: Some("fixture-analysis-cross-turn-check".to_owned()),
+            session_id: Some("fixture-analysis-session-a".to_owned()),
+            turn_id: Some("fixture-analysis-turn-a-2".to_owned()),
+            tool_name: Some("exec_command".to_owned()),
+            input_summary: None,
+            command: Some("cargo test".to_owned()),
+            cwd: Some("/fixture/project".to_owned()),
+            status: None,
+            provenance: SourceRef::rollout(PathBuf::from("fixture-analysis.jsonl"), 17),
+        });
+        cross_turn.tool_results.push(ToolResult {
+            id: None,
+            call_id: Some("fixture-analysis-cross-turn-check".to_owned()),
+            session_id: Some("fixture-analysis-session-a".to_owned()),
+            turn_id: Some("fixture-analysis-turn-a-2".to_owned()),
+            command: Some("cargo test".to_owned()),
+            cwd: Some("/fixture/project".to_owned()),
+            stdout: None,
+            stderr: None,
+            duration_ms: None,
+            exit_code: Some(0),
+            status: Some("completed".to_owned()),
+            outcome: ToolOutcome::Succeeded,
+            outcome_source: OutcomeSource::ExitCode,
+            matched_call: true,
+            deduplication_key: None,
+            equivalent_to: None,
+            is_duplicate: false,
+            provenance: SourceRef::rollout(PathBuf::from("fixture-analysis.jsonl"), 18),
+        });
+        let cross_turn_findings = analyze_verification(&cross_turn, &AnalysisOptions::default());
+        assert!(
+            cross_turn_findings.iter().all(|finding| {
+                !finding.evidence.iter().any(|evidence| {
+                    evidence.session_id.as_deref() == Some("fixture-analysis-session-a")
+                })
+            }),
+            "a later-turn verification must cover the preceding edit batch"
         );
 
         data.tool_calls.push(ToolCall {
