@@ -130,18 +130,20 @@ fn normalize_records_with_resolver(
                     }
                     if let Some(state_session) =
                         state.iter().find(|session| session.id == candidate.id)
-                        && state_session
+                    {
+                        if state_session
                             .rollout_path
                             .as_deref()
                             .is_some_and(|path| !same_path(Path::new(path), &source.path))
-                    {
-                        data.diagnostics.push(CanonicalDiagnostic {
-                            kind: DiagnosticKind::MetadataConflict,
-                            source: source.clone(),
-                            message: bounded(
-                                "state and rollout session paths differ; state metadata was retained as enrichment",
-                            ),
-                        });
+                        {
+                            data.diagnostics.push(CanonicalDiagnostic {
+                                kind: DiagnosticKind::MetadataConflict,
+                                source: source.clone(),
+                                message: bounded(
+                                    "state and rollout session paths differ; state metadata was retained as enrichment",
+                                ),
+                            });
+                        }
                     }
                     current_session_id = Some(candidate.id.clone());
                     current_turn_id = None;
