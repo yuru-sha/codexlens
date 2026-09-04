@@ -1,0 +1,5 @@
+{"type":"session_meta","ignored_envelope_field":true}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[]},"ignored_envelope_field":true}
+{"type":"response_item","payload":{"type":"future_item","value":true}}
+{"type":"event_msg","payload":{"type":"future_event","value":true}}
+{malformed json

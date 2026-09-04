@@ -17,6 +17,9 @@ Rules:
 `rollout/basic.jsonl` is the smallest representative rollout. It includes an
 unknown record to ensure forward compatibility is tested from the beginning.
 
+`rollout/defensive.jsonl` covers optional envelope fields, unknown nested
+events, and a malformed line.
+
 `discovery/` contains path-only fixtures for input discovery tests. Tests copy
 it into temporary directories before removing inputs or adding symlinks. The
 `.jsonl.zst` file only verifies reader selection in this phase and is not
