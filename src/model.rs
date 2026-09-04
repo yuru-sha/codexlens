@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -7,34 +8,58 @@ use crate::rollout::SourceLocation;
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_SUMMARY_BYTES: usize = 8 * 1024;
 pub const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
+pub const CANONICAL_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceKind {
+    Rollout,
+    State,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceRef {
+    pub kind: SourceKind,
     pub path: PathBuf,
     pub line: Option<usize>,
+    pub ingested_at: Option<String>,
+    pub parser_schema_version: u32,
 }
 
 impl SourceRef {
+    pub fn rollout(path: PathBuf, line: usize) -> Self {
+        Self {
+            kind: SourceKind::Rollout,
+            path,
+            line: Some(line),
+            ingested_at: None,
+            parser_schema_version: CANONICAL_SCHEMA_VERSION,
+        }
+    }
+
     pub fn state(path: PathBuf) -> Self {
-        Self { path, line: None }
+        Self {
+            kind: SourceKind::State,
+            path,
+            line: None,
+            ingested_at: None,
+            parser_schema_version: CANONICAL_SCHEMA_VERSION,
+        }
+    }
+
+    pub(crate) fn stamp_ingest_time(&mut self, timestamp: &str) {
+        self.ingested_at = Some(timestamp.to_owned());
     }
 }
 
 impl From<SourceLocation> for SourceRef {
     fn from(source: SourceLocation) -> Self {
-        Self {
-            path: source.path,
-            line: Some(source.line),
-        }
+        Self::rollout(source.path, source.line)
     }
 }
 
 impl From<&SourceLocation> for SourceRef {
     fn from(source: &SourceLocation) -> Self {
-        Self {
-            path: source.path.clone(),
-            line: Some(source.line),
-        }
+        Self::rollout(source.path.clone(), source.line)
     }
 }
 
@@ -59,6 +84,125 @@ pub struct Session {
     pub history_mode: Option<String>,
     pub reasoning_effort: Option<String>,
     pub provenance: SourceRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionConflict {
+    pub field: &'static str,
+    pub existing: String,
+    pub incoming: String,
+}
+
+pub(crate) fn merge_session_fields(
+    target: &mut Session,
+    incoming: &Session,
+) -> Vec<SessionConflict> {
+    let mut conflicts = Vec::new();
+    merge_session_field(
+        "created_at",
+        &mut target.created_at,
+        &incoming.created_at,
+        &mut conflicts,
+    );
+    merge_session_field(
+        "updated_at",
+        &mut target.updated_at,
+        &incoming.updated_at,
+        &mut conflicts,
+    );
+    merge_session_field("cwd", &mut target.cwd, &incoming.cwd, &mut conflicts);
+    merge_session_field(
+        "project",
+        &mut target.project,
+        &incoming.project,
+        &mut conflicts,
+    );
+    merge_session_field("model", &mut target.model, &incoming.model, &mut conflicts);
+    merge_session_field(
+        "provider",
+        &mut target.provider,
+        &incoming.provider,
+        &mut conflicts,
+    );
+    merge_session_field(
+        "source",
+        &mut target.source,
+        &incoming.source,
+        &mut conflicts,
+    );
+    merge_session_field(
+        "thread_source",
+        &mut target.thread_source,
+        &incoming.thread_source,
+        &mut conflicts,
+    );
+    merge_session_field(
+        "rollout_path",
+        &mut target.rollout_path,
+        &incoming.rollout_path,
+        &mut conflicts,
+    );
+    merge_session_field(
+        "archive_state",
+        &mut target.archive_state,
+        &incoming.archive_state,
+        &mut conflicts,
+    );
+    merge_session_field("title", &mut target.title, &incoming.title, &mut conflicts);
+    merge_session_field(
+        "preview",
+        &mut target.preview,
+        &incoming.preview,
+        &mut conflicts,
+    );
+    merge_session_field(
+        "parent_id",
+        &mut target.parent_id,
+        &incoming.parent_id,
+        &mut conflicts,
+    );
+    merge_session_field(
+        "cli_version",
+        &mut target.cli_version,
+        &incoming.cli_version,
+        &mut conflicts,
+    );
+    merge_session_field(
+        "originator",
+        &mut target.originator,
+        &incoming.originator,
+        &mut conflicts,
+    );
+    merge_session_field(
+        "history_mode",
+        &mut target.history_mode,
+        &incoming.history_mode,
+        &mut conflicts,
+    );
+    merge_session_field(
+        "reasoning_effort",
+        &mut target.reasoning_effort,
+        &incoming.reasoning_effort,
+        &mut conflicts,
+    );
+    conflicts
+}
+
+fn merge_session_field<T: Clone + Debug + PartialEq>(
+    field: &'static str,
+    target: &mut Option<T>,
+    incoming: &Option<T>,
+    conflicts: &mut Vec<SessionConflict>,
+) {
+    match (target.as_ref(), incoming.as_ref()) {
+        (None, Some(value)) => *target = Some(value.clone()),
+        (Some(existing), Some(value)) if existing != value => conflicts.push(SessionConflict {
+            field,
+            existing: format!("{existing:?}"),
+            incoming: format!("{value:?}"),
+        }),
+        _ => {}
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,7 +250,7 @@ pub struct Message {
     pub session_id: Option<String>,
     pub turn_id: Option<String>,
     pub role: Option<MessageRole>,
-    pub content: String,
+    pub content: Option<String>,
     pub timestamp: Option<String>,
     pub provenance: SourceRef,
 }
@@ -183,6 +327,8 @@ pub struct Record {
     pub turn_id: Option<String>,
     pub timestamp: Option<String>,
     pub sequence: usize,
+    pub original_record_type: Option<String>,
+    pub original_nested_type: Option<String>,
     pub kind: RecordKind,
     pub provenance: SourceRef,
 }

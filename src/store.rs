@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -9,13 +9,18 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use crate::discovery::{DiscoveredInput, InputKind, ReaderKind};
 use crate::model::{
     CanonicalData, CanonicalDiagnostic, DiagnosticKind, FileOperation, Message, Record, RecordKind,
-    Session, SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn,
+    Session, SourceKind, SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn,
 };
 use crate::normalize::{normalize_rollout, normalize_rollout_with_state};
 use crate::rollout::{ParseDiagnosticKind, RolloutParseOptions, parse_rollout};
-use crate::state::{StateDiagnosticKind, StateReadResult, read_state_database};
+use crate::state::{
+    StateDiagnostic, StateDiagnosticKind, StateReadResult, merge_state_results, read_state_database,
+};
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 3;
+
+const STATE_STORAGE_STANDALONE: &str = "standalone";
+const STATE_STORAGE_ENRICHMENT: &str = "enrichment";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestInputKind {
@@ -85,20 +90,32 @@ impl Store {
         path: &Path,
         options: &RolloutParseOptions,
     ) -> Result<IngestSummary> {
-        let identity = canonical_identity(path)?;
-        self.ingest_rollout_at(path, &identity, options, &[])
+        let identity = canonical_identity(path).unwrap_or_else(|_| path.to_path_buf());
+        self.ingest_rollout_at(path, &identity, options, &[], false)
     }
 
     pub fn ingest_state_database(&mut self, path: &Path) -> Result<IngestSummary> {
-        let identity = canonical_identity(path)?;
-        let fingerprint = fingerprint(path)?;
+        let identity = canonical_identity(path).unwrap_or_else(|_| path.to_path_buf());
+        let fingerprint = match fingerprint(path) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                let data = unreadable_data(path, SourceKind::State, &error.to_string());
+                self.persist_diagnostics(&identity, &data.diagnostics)?;
+                return Ok(summary_from_data(path.to_path_buf(), &data, false));
+            }
+        };
         let source = path.to_path_buf();
-        if self.is_unchanged(&identity, &fingerprint, IngestInputKind::State)? {
+        if self.is_unchanged(
+            &identity,
+            &fingerprint,
+            IngestInputKind::State,
+            Some(STATE_STORAGE_STANDALONE),
+        )? {
             return Ok(skipped_summary(source));
         }
 
         let read = read_state_database(path);
-        self.ingest_state_read(path, &identity, &fingerprint, read, IngestInputKind::State)
+        self.ingest_state_read(path, &identity, &fingerprint, read, true)
     }
 
     pub fn ingest_inputs(
@@ -107,26 +124,89 @@ impl Store {
         options: &IngestOptions,
     ) -> Result<IngestReport> {
         let mut report = IngestReport::default();
-        let mut state_sessions = Vec::new();
+        let mut state_reads = Vec::new();
+        let mut state_changed = false;
+        let mut state_refresh_blocked = false;
+        let has_plain_rollout = inputs.iter().any(|input| {
+            matches!(input.kind, InputKind::Rollout { .. })
+                && matches!(input.reader, Some(ReaderKind::PlainJsonl))
+        });
+        let state_storage_mode = if has_plain_rollout {
+            STATE_STORAGE_ENRICHMENT
+        } else {
+            STATE_STORAGE_STANDALONE
+        };
 
         for input in inputs {
             if input.kind != InputKind::StateDatabase {
                 continue;
             }
             let identity = input.identity.clone();
-            let fingerprint = fingerprint(&input.path)?;
+            let fingerprint = match fingerprint(&input.path) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    let read = StateReadResult {
+                        sessions: Vec::new(),
+                        diagnostics: vec![StateDiagnostic {
+                            source: SourceRef::state(input.path.clone()),
+                            kind: StateDiagnosticKind::Unreadable,
+                            message: bounded_message(&error.to_string()),
+                        }],
+                    };
+                    state_reads.push(read.clone());
+                    let data = state_data(read);
+                    self.persist_diagnostics(&identity, &data.diagnostics)?;
+                    report
+                        .files
+                        .push(summary_from_data(input.path.clone(), &data, false));
+                    state_refresh_blocked = true;
+                    continue;
+                }
+            };
             let read = read_state_database(&input.path);
-            state_sessions.extend(read.sessions.iter().cloned());
-            if self.is_unchanged(&identity, &fingerprint, IngestInputKind::State)? {
+            state_reads.push(read.clone());
+            if self.is_unchanged(
+                &identity,
+                &fingerprint,
+                IngestInputKind::State,
+                Some(state_storage_mode),
+            )? {
                 report.files.push(skipped_summary(input.path.clone()));
             } else {
+                let refreshable = !read.diagnostics.iter().any(|diagnostic| {
+                    matches!(
+                        diagnostic.kind,
+                        StateDiagnosticKind::Unreadable
+                            | StateDiagnosticKind::Query
+                            | StateDiagnosticKind::SchemaMismatch
+                    )
+                });
+                state_changed |= refreshable;
+                state_refresh_blocked |= !refreshable;
                 report.files.push(self.ingest_state_read(
                     &input.path,
                     &identity,
                     &fingerprint,
                     read,
-                    IngestInputKind::State,
+                    !has_plain_rollout,
                 )?);
+            }
+        }
+
+        let combined_state = merge_state_results(state_reads);
+        let state_sessions = combined_state.sessions;
+        for input in inputs {
+            if input.kind != InputKind::StateDatabase {
+                continue;
+            }
+            let diagnostics = combined_state
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.source.path == input.path)
+                .map(canonical_state_diagnostic)
+                .collect::<Vec<_>>();
+            if !diagnostics.is_empty() {
+                self.persist_diagnostics(&input.identity, &diagnostics)?;
             }
         }
 
@@ -140,6 +220,7 @@ impl Store {
                     &input.identity,
                     &options.rollout,
                     &state_sessions,
+                    state_changed && !state_refresh_blocked,
                 )?),
                 Some(ReaderKind::ZstdJsonl) => report.files.push(self.ingest_unsupported(
                     &input.path,
@@ -166,7 +247,14 @@ impl Store {
     ) -> Result<IngestSummary> {
         let identity = canonical_identity(source_identity)?;
         let fingerprint = fingerprint(source_identity)?;
-        self.ingest_batch(source_identity, &identity, kind, &fingerprint, data)
+        self.ingest_batch(
+            source_identity,
+            &identity,
+            kind,
+            &fingerprint,
+            data,
+            (kind == IngestInputKind::State).then_some(STATE_STORAGE_STANDALONE),
+        )
     }
 
     fn ingest_rollout_at(
@@ -175,9 +263,19 @@ impl Store {
         identity: &Path,
         options: &RolloutParseOptions,
         state_sessions: &[Session],
+        force_refresh: bool,
     ) -> Result<IngestSummary> {
-        let fingerprint = fingerprint(path)?;
-        if self.is_unchanged(identity, &fingerprint, IngestInputKind::Rollout)? {
+        let fingerprint = match fingerprint(path) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                let data = unreadable_data(path, SourceKind::Rollout, &error.to_string());
+                self.persist_diagnostics(identity, &data.diagnostics)?;
+                return Ok(summary_from_data(path.to_path_buf(), &data, false));
+            }
+        };
+        if !force_refresh
+            && self.is_unchanged(identity, &fingerprint, IngestInputKind::Rollout, None)?
+        {
             return Ok(skipped_summary(path.to_path_buf()));
         }
         let parsed = parse_rollout(path, options);
@@ -197,6 +295,7 @@ impl Store {
             IngestInputKind::Rollout,
             &fingerprint,
             &data,
+            None,
         )
     }
 
@@ -206,20 +305,36 @@ impl Store {
         identity: &Path,
         fingerprint: &Fingerprint,
         read: StateReadResult,
-        kind: IngestInputKind,
+        persist_sessions: bool,
     ) -> Result<IngestSummary> {
         if read.diagnostics.iter().any(|diagnostic| {
             matches!(
                 diagnostic.kind,
-                StateDiagnosticKind::Unreadable | StateDiagnosticKind::Query
+                StateDiagnosticKind::Unreadable
+                    | StateDiagnosticKind::Query
+                    | StateDiagnosticKind::SchemaMismatch
             )
         }) {
             let data = state_data(read);
             self.persist_diagnostics(identity, &data.diagnostics)?;
             return Ok(summary_from_data(path.to_path_buf(), &data, false));
         }
-        let data = state_data(read);
-        self.ingest_batch(path, identity, kind, fingerprint, &data)
+        let mut data = state_data(read);
+        if !persist_sessions {
+            data.sessions.clear();
+        }
+        self.ingest_batch(
+            path,
+            identity,
+            IngestInputKind::State,
+            fingerprint,
+            &data,
+            Some(if persist_sessions {
+                STATE_STORAGE_STANDALONE
+            } else {
+                STATE_STORAGE_ENRICHMENT
+            }),
+        )
     }
 
     fn ingest_unsupported(
@@ -229,19 +344,26 @@ impl Store {
         kind: IngestInputKind,
         message: &str,
     ) -> Result<IngestSummary> {
-        let fingerprint = fingerprint(path)?;
-        if self.is_unchanged(identity, &fingerprint, kind)? {
+        let fingerprint = match fingerprint(path) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                let data = unreadable_data(path, SourceKind::Rollout, &error.to_string());
+                self.persist_diagnostics(identity, &data.diagnostics)?;
+                return Ok(summary_from_data(path.to_path_buf(), &data, false));
+            }
+        };
+        if self.is_unchanged(identity, &fingerprint, kind, None)? {
             return Ok(skipped_summary(path.to_path_buf()));
         }
         let data = CanonicalData {
             diagnostics: vec![CanonicalDiagnostic {
                 kind: DiagnosticKind::UnsupportedReader,
-                source: SourceRef::state(path.to_path_buf()),
+                source: SourceRef::rollout(path.to_path_buf(), 1),
                 message: message.to_owned(),
             }],
             ..CanonicalData::default()
         };
-        self.ingest_batch(path, identity, kind, &fingerprint, &data)
+        self.ingest_batch(path, identity, kind, &fingerprint, &data, None)
     }
 
     fn is_unchanged(
@@ -249,12 +371,13 @@ impl Store {
         identity: &Path,
         fingerprint: &Fingerprint,
         kind: IngestInputKind,
+        storage_mode: Option<&str>,
     ) -> Result<bool> {
         let identity = identity.to_string_lossy();
         let previous = self
             .connection
             .query_row(
-                "SELECT input_kind, size, modified_ns, digest FROM ingested_files WHERE identity = ?1",
+                "SELECT input_kind, size, modified_ns, digest, storage_mode FROM ingested_files WHERE identity = ?1",
                 params![identity.as_ref()],
                 |row| {
                     Ok((
@@ -262,18 +385,20 @@ impl Store {
                         row.get::<_, i64>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 },
             )
             .optional()?;
-        Ok(
-            previous.is_some_and(|(previous_kind, size, modified_ns, digest)| {
+        Ok(previous.is_some_and(
+            |(previous_kind, size, modified_ns, digest, previous_storage_mode)| {
                 previous_kind == kind.as_str()
                     && size == i64::try_from(fingerprint.size).unwrap_or(i64::MAX)
                     && modified_ns == fingerprint.modified_ns.map(|value| value.to_string())
                     && digest == fingerprint.digest.to_string()
-            }),
-        )
+                    && previous_storage_mode.as_deref() == storage_mode
+            },
+        ))
     }
 
     fn ingest_batch(
@@ -283,14 +408,17 @@ impl Store {
         kind: IngestInputKind,
         fingerprint: &Fingerprint,
         data: &CanonicalData,
+        storage_mode: Option<&str>,
     ) -> Result<IngestSummary> {
         let identity = source_identity.to_string_lossy().into_owned();
+        let mut stamped_data = data.clone();
+        stamp_data(&mut stamped_data, &current_timestamp());
         let transaction = self.connection.transaction()?;
         delete_source(&transaction, &identity)?;
-        insert_data(&transaction, &identity, data)?;
+        insert_data(&transaction, &identity, &stamped_data)?;
         transaction.execute(
-            "INSERT INTO ingested_files (identity, source_path, input_kind, size, modified_ns, digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(identity) DO UPDATE SET source_path = excluded.source_path, input_kind = excluded.input_kind, size = excluded.size, modified_ns = excluded.modified_ns, digest = excluded.digest",
+            "INSERT INTO ingested_files (identity, source_path, input_kind, size, modified_ns, digest, storage_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(identity) DO UPDATE SET source_path = excluded.source_path, input_kind = excluded.input_kind, size = excluded.size, modified_ns = excluded.modified_ns, digest = excluded.digest, storage_mode = excluded.storage_mode",
             params![
                 identity,
                 source_path.to_string_lossy().as_ref(),
@@ -298,10 +426,15 @@ impl Store {
                 i64::try_from(fingerprint.size).unwrap_or(i64::MAX),
                 fingerprint.modified_ns.map(|value| value.to_string()),
                 fingerprint.digest.to_string(),
+                storage_mode,
             ],
         )?;
         transaction.commit()?;
-        Ok(summary_from_data(source_path.to_path_buf(), data, false))
+        Ok(summary_from_data(
+            source_path.to_path_buf(),
+            &stamped_data,
+            false,
+        ))
     }
 
     fn persist_diagnostics(
@@ -310,9 +443,12 @@ impl Store {
         diagnostics: &[CanonicalDiagnostic],
     ) -> Result<()> {
         let identity = source_identity.to_string_lossy();
+        let timestamp = current_timestamp();
         let transaction = self.connection.transaction()?;
         for (index, diagnostic) in diagnostics.iter().enumerate() {
-            insert_diagnostic(&transaction, identity.as_ref(), diagnostic, index)?;
+            let mut stamped = diagnostic.clone();
+            stamped.source.stamp_ingest_time(&timestamp);
+            insert_diagnostic(&transaction, identity.as_ref(), &stamped, index)?;
         }
         transaction.commit()?;
         Ok(())
@@ -394,7 +530,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                 session_id TEXT,
                 turn_id TEXT,
                 role TEXT,
-                content TEXT NOT NULL,
+                content TEXT,
                 timestamp TEXT
             );
             CREATE TABLE IF NOT EXISTS tool_calls (
@@ -485,27 +621,187 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             "#,
         )?;
     }
+    if current < 2 {
+        transaction.execute_batch(
+            r#"
+            CREATE TABLE messages_v2 (
+                message_key TEXT PRIMARY KEY,
+                source_identity TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                source_line INTEGER,
+                message_id TEXT,
+                session_id TEXT,
+                turn_id TEXT,
+                role TEXT,
+                content TEXT,
+                timestamp TEXT
+            );
+            INSERT INTO messages_v2 (message_key, source_identity, source_path, source_line, message_id, session_id, turn_id, role, content, timestamp)
+                SELECT message_key, source_identity, source_path, source_line, message_id, session_id, turn_id, role, content, timestamp
+                FROM messages;
+            DROP TABLE messages;
+            ALTER TABLE messages_v2 RENAME TO messages;
+            INSERT OR IGNORE INTO schema_versions (version) VALUES (2);
+            PRAGMA user_version = 2;
+            "#,
+        )?;
+    }
+    if current < 3 {
+        for table in [
+            "sessions",
+            "turns",
+            "records",
+            "messages",
+            "tool_calls",
+            "tool_results",
+            "file_operations",
+            "token_usage",
+            "diagnostics",
+        ] {
+            add_provenance_columns(&transaction, table)?;
+        }
+        add_column_if_table_exists(&transaction, "ingested_files", "storage_mode TEXT")?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO schema_versions (version) VALUES (3)",
+            [],
+        )?;
+        transaction.execute_batch("PRAGMA user_version = 3;")?;
+    }
     transaction.commit()?;
     Ok(())
 }
 
+fn add_provenance_columns(transaction: &Transaction<'_>, table: &str) -> Result<()> {
+    add_column_if_table_exists(
+        transaction,
+        table,
+        "source_kind TEXT NOT NULL DEFAULT 'rollout'",
+    )?;
+    add_column_if_table_exists(transaction, table, "ingested_at TEXT")?;
+    add_column_if_table_exists(
+        transaction,
+        table,
+        "parser_schema_version INTEGER NOT NULL DEFAULT 1",
+    )
+}
+
+fn add_column_if_table_exists(
+    transaction: &Transaction<'_>,
+    table: &str,
+    definition: &str,
+) -> Result<()> {
+    let exists = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        params![table],
+        |row| row.get::<_, i64>(0),
+    )? != 0;
+    if exists {
+        transaction.execute(
+            &format!(
+                "ALTER TABLE {} ADD COLUMN {definition}",
+                quote_identifier(table)
+            ),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
 fn state_data(read: StateReadResult) -> CanonicalData {
+    let StateReadResult {
+        sessions,
+        diagnostics,
+    } = read;
     CanonicalData {
-        sessions: read.sessions,
-        diagnostics: read
-            .diagnostics
-            .into_iter()
-            .map(|diagnostic| CanonicalDiagnostic {
-                kind: match diagnostic.kind {
-                    StateDiagnosticKind::Unreadable => DiagnosticKind::Unreadable,
-                    StateDiagnosticKind::SchemaMismatch => DiagnosticKind::StateSchemaMismatch,
-                    StateDiagnosticKind::Query => DiagnosticKind::StateQuery,
-                },
-                source: diagnostic.source,
-                message: diagnostic.message,
-            })
-            .collect(),
+        sessions,
+        diagnostics: diagnostics.iter().map(canonical_state_diagnostic).collect(),
         ..CanonicalData::default()
+    }
+}
+
+fn unreadable_data(path: &Path, kind: SourceKind, message: &str) -> CanonicalData {
+    let source = match kind {
+        SourceKind::Rollout => SourceRef::rollout(path.to_path_buf(), 1),
+        SourceKind::State => SourceRef::state(path.to_path_buf()),
+    };
+    CanonicalData {
+        diagnostics: vec![CanonicalDiagnostic {
+            kind: DiagnosticKind::Unreadable,
+            source,
+            message: bounded_message(message),
+        }],
+        ..CanonicalData::default()
+    }
+}
+
+fn stamp_data(data: &mut CanonicalData, timestamp: &str) {
+    for session in &mut data.sessions {
+        session.provenance.stamp_ingest_time(timestamp);
+    }
+    for turn in &mut data.turns {
+        turn.provenance.stamp_ingest_time(timestamp);
+        for event in &mut turn.lifecycle {
+            event.provenance.stamp_ingest_time(timestamp);
+        }
+    }
+    for record in &mut data.records {
+        record.provenance.stamp_ingest_time(timestamp);
+    }
+    for message in &mut data.messages {
+        message.provenance.stamp_ingest_time(timestamp);
+    }
+    for call in &mut data.tool_calls {
+        call.provenance.stamp_ingest_time(timestamp);
+    }
+    for result in &mut data.tool_results {
+        result.provenance.stamp_ingest_time(timestamp);
+    }
+    for operation in &mut data.file_operations {
+        operation.provenance.stamp_ingest_time(timestamp);
+    }
+    for usage in &mut data.token_usage {
+        usage.provenance.stamp_ingest_time(timestamp);
+    }
+    for diagnostic in &mut data.diagnostics {
+        diagnostic.source.stamp_ingest_time(timestamp);
+    }
+}
+
+fn current_timestamp() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().to_string())
+        .unwrap_or_else(|_| "0".to_owned())
+}
+
+fn source_kind_name(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::Rollout => "rollout",
+        SourceKind::State => "state",
+    }
+}
+
+fn bounded_message(message: &str) -> String {
+    const MAX_BYTES: usize = 512;
+    if message.len() <= MAX_BYTES {
+        return message.to_owned();
+    }
+    let mut end = MAX_BYTES - 3;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &message[..end])
+}
+
+fn canonical_state_diagnostic(diagnostic: &StateDiagnostic) -> CanonicalDiagnostic {
+    CanonicalDiagnostic {
+        kind: diagnostic.kind.canonical_kind(),
+        source: diagnostic.source.clone(),
+        message: diagnostic.message.clone(),
     }
 }
 
@@ -562,12 +858,15 @@ fn insert_data(transaction: &Transaction<'_>, identity: &str, data: &CanonicalDa
 
 fn insert_session(transaction: &Transaction<'_>, identity: &str, session: &Session) -> Result<()> {
     transaction.execute(
-        "INSERT OR REPLACE INTO sessions (session_id, source_identity, source_path, source_line, created_at, updated_at, cwd, project, model, provider, source, thread_source, rollout_path, archive_state, title, preview, parent_id, cli_version, originator, history_mode, reasoning_effort) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+        "INSERT OR REPLACE INTO sessions (session_id, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, created_at, updated_at, cwd, project, model, provider, source, thread_source, rollout_path, archive_state, title, preview, parent_id, cli_version, originator, history_mode, reasoning_effort) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             session.id,
             identity,
             session.provenance.path.to_string_lossy().as_ref(),
             db_line(session.provenance.line),
+            source_kind_name(session.provenance.kind),
+            session.provenance.ingested_at,
+            i64::from(session.provenance.parser_schema_version),
             session.created_at,
             session.updated_at,
             session.cwd,
@@ -594,12 +893,15 @@ fn insert_turn(transaction: &Transaction<'_>, identity: &str, turn: &Turn) -> Re
     let key = row_key(identity, &turn.provenance, &format!("turn:{}", turn.id));
     let lifecycle_json = serde_json::to_string(&turn.lifecycle)?;
     transaction.execute(
-        "INSERT OR REPLACE INTO turns (turn_key, source_identity, source_path, source_line, session_id, turn_id, started_at, completed_at, cwd, model, reasoning_effort, sequence, lifecycle_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT OR REPLACE INTO turns (turn_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, turn_id, started_at, completed_at, cwd, model, reasoning_effort, sequence, lifecycle_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             key,
             identity,
             turn.provenance.path.to_string_lossy().as_ref(),
             db_line(turn.provenance.line),
+            source_kind_name(turn.provenance.kind),
+            turn.provenance.ingested_at,
+            i64::from(turn.provenance.parser_schema_version),
             turn.session_id,
             turn.id,
             turn.started_at,
@@ -621,14 +923,17 @@ fn insert_record(
     index: usize,
 ) -> Result<()> {
     let key = row_key(identity, &record.provenance, &format!("record:{index}"));
-    let (kind, record_type, nested_type, raw_json) = record_kind_values(&record.kind);
+    let (kind, record_type, nested_type, raw_json) = record_kind_values(record);
     transaction.execute(
-        "INSERT OR REPLACE INTO records (record_key, source_identity, source_path, source_line, session_id, turn_id, timestamp, sequence, kind, record_type, nested_type, raw_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT OR REPLACE INTO records (record_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, turn_id, timestamp, sequence, kind, record_type, nested_type, raw_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             key,
             identity,
             record.provenance.path.to_string_lossy().as_ref(),
             db_line(record.provenance.line),
+            source_kind_name(record.provenance.kind),
+            record.provenance.ingested_at,
+            i64::from(record.provenance.parser_schema_version),
             record.session_id,
             record.turn_id,
             record.timestamp,
@@ -650,12 +955,15 @@ fn insert_message(
 ) -> Result<()> {
     let key = row_key(identity, &message.provenance, &format!("message:{index}"));
     transaction.execute(
-        "INSERT OR REPLACE INTO messages (message_key, source_identity, source_path, source_line, message_id, session_id, turn_id, role, content, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT OR REPLACE INTO messages (message_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, message_id, session_id, turn_id, role, content, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             key,
             identity,
             message.provenance.path.to_string_lossy().as_ref(),
             db_line(message.provenance.line),
+            source_kind_name(message.provenance.kind),
+            message.provenance.ingested_at,
+            i64::from(message.provenance.parser_schema_version),
             message.id,
             message.session_id,
             message.turn_id,
@@ -675,12 +983,15 @@ fn insert_tool_call(
 ) -> Result<()> {
     let key = row_key(identity, &call.provenance, &format!("call:{index}"));
     transaction.execute(
-        "INSERT OR REPLACE INTO tool_calls (call_key, source_identity, source_path, source_line, item_id, call_id, session_id, turn_id, tool_name, input_summary, command, cwd, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT OR REPLACE INTO tool_calls (call_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, item_id, call_id, session_id, turn_id, tool_name, input_summary, command, cwd, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             key,
             identity,
             call.provenance.path.to_string_lossy().as_ref(),
             db_line(call.provenance.line),
+            source_kind_name(call.provenance.kind),
+            call.provenance.ingested_at,
+            i64::from(call.provenance.parser_schema_version),
             call.id,
             call.call_id,
             call.session_id,
@@ -713,12 +1024,15 @@ fn insert_tool_result(
                 )
             });
     transaction.execute(
-        "INSERT OR REPLACE INTO tool_results (result_key, source_identity, source_path, source_line, result_id, call_id, session_id, turn_id, command, cwd, stdout, stderr, duration_ms, exit_code, status, outcome, outcome_source, matched_call, deduplication_key, equivalent_to_path, equivalent_to_line, is_duplicate) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+        "INSERT OR REPLACE INTO tool_results (result_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, result_id, call_id, session_id, turn_id, command, cwd, stdout, stderr, duration_ms, exit_code, status, outcome, outcome_source, matched_call, deduplication_key, equivalent_to_path, equivalent_to_line, is_duplicate) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         params![
             key,
             identity,
             result.provenance.path.to_string_lossy().as_ref(),
             db_line(result.provenance.line),
+            source_kind_name(result.provenance.kind),
+            result.provenance.ingested_at,
+            i64::from(result.provenance.parser_schema_version),
             result.id,
             result.call_id,
             result.session_id,
@@ -753,12 +1067,15 @@ fn insert_file_operation(
         &format!("operation:{index}"),
     );
     transaction.execute(
-        "INSERT OR REPLACE INTO file_operations (operation_key, source_identity, source_path, source_line, session_id, turn_id, path, operation, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT OR REPLACE INTO file_operations (operation_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, turn_id, path, operation, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             key,
             identity,
             operation.provenance.path.to_string_lossy().as_ref(),
             db_line(operation.provenance.line),
+            source_kind_name(operation.provenance.kind),
+            operation.provenance.ingested_at,
+            i64::from(operation.provenance.parser_schema_version),
             operation.session_id,
             operation.turn_id,
             operation.path,
@@ -777,12 +1094,15 @@ fn insert_token_usage(
 ) -> Result<()> {
     let key = row_key(identity, &usage.provenance, &format!("usage:{index}"));
     transaction.execute(
-        "INSERT OR REPLACE INTO token_usage (usage_key, source_identity, source_path, source_line, session_id, turn_id, timestamp, input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens, sequence) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT OR REPLACE INTO token_usage (usage_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, turn_id, timestamp, input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens, sequence) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             key,
             identity,
             usage.provenance.path.to_string_lossy().as_ref(),
             db_line(usage.provenance.line),
+            source_kind_name(usage.provenance.kind),
+            usage.provenance.ingested_at,
+            i64::from(usage.provenance.parser_schema_version),
             usage.session_id,
             usage.turn_id,
             usage.timestamp,
@@ -808,12 +1128,15 @@ fn insert_diagnostic(
         &format!("diagnostic:{index}:{}", diagnostic.kind.as_str()),
     );
     transaction.execute(
-        "INSERT OR REPLACE INTO diagnostics (diagnostic_key, source_identity, source_path, source_line, kind, message) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR REPLACE INTO diagnostics (diagnostic_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, kind, message) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             key,
             identity,
             diagnostic.source.path.to_string_lossy().as_ref(),
             db_line(diagnostic.source.line),
+            source_kind_name(diagnostic.source.kind),
+            diagnostic.source.ingested_at,
+            i64::from(diagnostic.source.parser_schema_version),
             diagnostic.kind.as_str(),
             diagnostic.message,
         ],
@@ -821,24 +1144,70 @@ fn insert_diagnostic(
     Ok(())
 }
 
-fn record_kind_values(
-    kind: &RecordKind,
-) -> (&'static str, Option<&str>, Option<&str>, Option<&str>) {
-    match kind {
-        RecordKind::SessionMetadata => ("session_metadata", None, None, None),
-        RecordKind::TurnContext => ("turn_context", None, None, None),
-        RecordKind::ResponseItem => ("response_item", None, None, None),
-        RecordKind::EventMessage => ("event_message", None, None, None),
-        RecordKind::Compacted => ("compacted", None, None, None),
-        RecordKind::WorldState => ("world_state", None, None, None),
+fn record_kind_values(record: &Record) -> (&'static str, Option<&str>, Option<&str>, Option<&str>) {
+    match &record.kind {
+        RecordKind::SessionMetadata => (
+            "session_metadata",
+            record
+                .original_record_type
+                .as_deref()
+                .or(Some("session_meta")),
+            record.original_nested_type.as_deref(),
+            None,
+        ),
+        RecordKind::TurnContext => (
+            "turn_context",
+            record
+                .original_record_type
+                .as_deref()
+                .or(Some("turn_context")),
+            record.original_nested_type.as_deref(),
+            None,
+        ),
+        RecordKind::ResponseItem => (
+            "response_item",
+            record
+                .original_record_type
+                .as_deref()
+                .or(Some("response_item")),
+            record.original_nested_type.as_deref(),
+            None,
+        ),
+        RecordKind::EventMessage => (
+            "event_message",
+            record.original_record_type.as_deref().or(Some("event_msg")),
+            record.original_nested_type.as_deref(),
+            None,
+        ),
+        RecordKind::Compacted => (
+            "compacted",
+            record.original_record_type.as_deref().or(Some("compacted")),
+            record.original_nested_type.as_deref(),
+            None,
+        ),
+        RecordKind::WorldState => (
+            "world_state",
+            record
+                .original_record_type
+                .as_deref()
+                .or(Some("world_state")),
+            record.original_nested_type.as_deref(),
+            None,
+        ),
         RecordKind::Unknown {
             record_type,
             nested_type,
             raw_json,
         } => (
             "unknown",
-            record_type.as_deref(),
-            nested_type.as_deref(),
+            record
+                .original_record_type
+                .as_deref()
+                .or(record_type.as_deref()),
+            record
+                .original_nested_type
+                .as_deref()
+                .or(nested_type.as_deref()),
             Some(raw_json.as_str()),
         ),
     }
@@ -994,7 +1363,7 @@ mod tests {
         assert_eq!(
             store
                 .connection()
-                .query_row("SELECT version FROM schema_versions", [], |row| row
+                .query_row("SELECT MAX(version) FROM schema_versions", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
             SCHEMA_VERSION
@@ -1004,11 +1373,7 @@ mod tests {
     #[test]
     fn rollout_ingest_is_idempotent_and_changed_input_replaces_rows() {
         let source = temp_path("rollout.jsonl");
-        fs::write(
-            &source,
-            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\"}}\n",
-        )
-        .unwrap();
+        copy_fixture("rollout", "store-initial.jsonl", &source);
         let mut store = Store::in_memory().unwrap();
         let first = store
             .ingest_rollout_file(&source, &RolloutParseOptions::default())
@@ -1026,12 +1391,27 @@ mod tests {
                 .unwrap(),
             1
         );
+        let provenance = store
+            .connection()
+            .query_row(
+                "SELECT source_kind, record_type, ingested_at, parser_schema_version FROM records",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(provenance.0, "rollout");
+        assert_eq!(provenance.1, "session_meta");
+        assert!(provenance.2.is_some());
+        assert_eq!(provenance.3, 1);
 
-        fs::write(
-            &source,
-            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\"}}\n{\"type\":\"future\",\"payload\":{\"keep\":true}}\n",
-        )
-        .unwrap();
+        copy_fixture("rollout", "store-changed.jsonl", &source);
         let changed = store
             .ingest_rollout_file(&source, &RolloutParseOptions::default())
             .unwrap();
@@ -1061,26 +1441,16 @@ mod tests {
     #[test]
     fn failed_replacement_rolls_back_source_deletion() {
         let source = temp_path("rollback.jsonl");
-        fs::write(
-            &source,
-            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\"}}\n",
-        )
-        .unwrap();
+        copy_fixture("rollout", "store-initial.jsonl", &source);
         let mut store = Store::in_memory().unwrap();
         store
             .ingest_rollout_file(&source, &RolloutParseOptions::default())
             .unwrap();
         store
             .connection
-            .execute_batch(
-                "CREATE TRIGGER fail_record_insert BEFORE INSERT ON records BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;",
-            )
+            .execute_batch(include_str!("../tests/fixtures/store/rollback-trigger.sql"))
             .unwrap();
-        fs::write(
-            &source,
-            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\"}}\n{\"type\":\"world_state\"}\n",
-        )
-        .unwrap();
+        copy_fixture("rollout", "store-changed.jsonl", &source);
 
         assert!(
             store
@@ -1101,13 +1471,7 @@ mod tests {
     #[test]
     fn state_ingest_persists_read_only_metadata() {
         let source = temp_path("state.sqlite");
-        let connection = Connection::open(&source).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE threads (id TEXT, rollout_path TEXT, cwd TEXT, model_provider TEXT, archived INTEGER, git_repo_root TEXT); INSERT INTO threads VALUES ('s', '/fixture.jsonl', '/fixture', 'provider', 1, '/project');",
-            )
-            .unwrap();
-        drop(connection);
+        create_database(&source, include_str!("../tests/fixtures/state/current.sql"));
 
         let mut store = Store::in_memory().unwrap();
         let summary = store.ingest_state_database(&source).unwrap();
@@ -1115,7 +1479,7 @@ mod tests {
         let row = store
             .connection()
             .query_row(
-                "SELECT session_id, cwd, provider, archive_state, project FROM sessions",
+                "SELECT session_id, cwd, provider, archive_state, project, source_kind FROM sessions",
                 [],
                 |row| {
                     Ok((
@@ -1124,6 +1488,7 @@ mod tests {
                         row.get::<_, String>(2)?,
                         row.get::<_, i64>(3)?,
                         row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )
@@ -1131,13 +1496,269 @@ mod tests {
         assert_eq!(
             row,
             (
-                "s".to_owned(),
+                "fixture-current-session".to_owned(),
                 "/fixture".to_owned(),
                 "provider".to_owned(),
                 1,
-                "/project".to_owned()
+                "/project".to_owned(),
+                "state".to_owned(),
             )
         );
         let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn schema_mismatch_preserves_previous_state_ingest() {
+        let source = temp_path("state-rollback.sqlite");
+        create_database(&source, include_str!("../tests/fixtures/state/current.sql"));
+
+        let mut store = Store::in_memory().unwrap();
+        store.ingest_state_database(&source).unwrap();
+        std::fs::remove_file(&source).unwrap();
+        create_database(
+            &source,
+            include_str!("../tests/fixtures/state/incompatible.sql"),
+        );
+
+        let summary = store.ingest_state_database(&source).unwrap();
+
+        assert_eq!(summary.sessions, 0);
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM diagnostics WHERE kind = 'state_schema_mismatch'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn v1_message_schema_migrates_to_nullable_content() {
+        let source = temp_path("schema-v1.sqlite");
+        create_database(
+            &source,
+            include_str!("../tests/fixtures/store/schema-v1.sql"),
+        );
+
+        let store = Store::open(&source).unwrap();
+        let not_null = store
+            .connection()
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('messages') WHERE name = 'content'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+
+        assert_eq!(not_null, 0);
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT MAX(version) FROM schema_versions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn changed_state_refreshes_enriched_rollout_without_duplicate_sessions() {
+        let state_source = temp_path("enrichment.sqlite");
+        let rollout_source = temp_path("enrichment.jsonl");
+        create_database(
+            &state_source,
+            include_str!("../tests/fixtures/state/enrichment.sql"),
+        );
+        copy_fixture("rollout", "enrichment.jsonl", &rollout_source);
+        let connection = Connection::open(&state_source).unwrap();
+        connection
+            .execute(
+                "UPDATE threads SET rollout_path = ?1",
+                params![rollout_source.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let inputs = vec![
+            DiscoveredInput {
+                path: state_source.clone(),
+                identity: fs::canonicalize(&state_source).unwrap(),
+                kind: InputKind::StateDatabase,
+                reader: None,
+            },
+            DiscoveredInput {
+                path: rollout_source.clone(),
+                identity: fs::canonicalize(&rollout_source).unwrap(),
+                kind: InputKind::Rollout { archived: false },
+                reader: Some(ReaderKind::PlainJsonl),
+            },
+        ];
+        let mut store = Store::in_memory().unwrap();
+        store
+            .ingest_inputs(&inputs, &IngestOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT project FROM sessions WHERE session_id = 'fixture-enrichment-session'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "/state-project-v1"
+        );
+
+        let connection = Connection::open(&state_source).unwrap();
+        connection
+            .execute("UPDATE threads SET project_path = '/state-project-v2'", [])
+            .unwrap();
+        drop(connection);
+
+        let report = store
+            .ingest_inputs(&inputs, &IngestOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT project FROM sessions WHERE session_id = 'fixture-enrichment-session'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "/state-project-v2"
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(
+            report
+                .files
+                .iter()
+                .any(|file| file.source == rollout_source && !file.skipped)
+        );
+
+        let standalone = store.ingest_state_database(&state_source).unwrap();
+        assert!(!standalone.skipped);
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+
+        let mixed_again = store
+            .ingest_inputs(&inputs, &IngestOptions::default())
+            .unwrap();
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(
+            mixed_again
+                .files
+                .iter()
+                .any(|file| file.source == state_source && !file.skipped)
+        );
+        let _ = fs::remove_file(state_source);
+        let _ = fs::remove_file(rollout_source);
+    }
+
+    #[test]
+    fn unreadable_state_does_not_abort_other_inputs() {
+        let missing_state = temp_path("missing-state.sqlite");
+        let rollout_source = temp_path("readable-rollout.jsonl");
+        copy_fixture("rollout", "store-initial.jsonl", &rollout_source);
+        let inputs = vec![
+            DiscoveredInput {
+                path: missing_state.clone(),
+                identity: missing_state.clone(),
+                kind: InputKind::StateDatabase,
+                reader: None,
+            },
+            DiscoveredInput {
+                path: rollout_source.clone(),
+                identity: fs::canonicalize(&rollout_source).unwrap(),
+                kind: InputKind::Rollout { archived: false },
+                reader: Some(ReaderKind::PlainJsonl),
+            },
+        ];
+
+        let mut store = Store::in_memory().unwrap();
+        let report = store
+            .ingest_inputs(&inputs, &IngestOptions::default())
+            .unwrap();
+
+        assert_eq!(report.files.len(), 2);
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM records", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM diagnostics WHERE kind = 'unreadable'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        let _ = fs::remove_file(rollout_source);
+    }
+
+    fn copy_fixture(category: &str, name: &str, destination: &Path) {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(category)
+            .join(name);
+        fs::copy(source, destination).unwrap();
+    }
+
+    fn create_database(path: &Path, schema: &str) {
+        let connection = Connection::open(path).unwrap();
+        connection.execute_batch(schema).unwrap();
     }
 }

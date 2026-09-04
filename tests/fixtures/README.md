@@ -17,6 +17,12 @@ Rules:
 `rollout/basic.jsonl` is the smallest representative rollout. It includes an
 unknown record to ensure forward compatibility is tested from the beginning.
 
+`rollout/edge-cases.jsonl` covers thread-only identities, missing content,
+structured status, unmatched tool results, and repeated token snapshots.
+
+`state/` contains synthetic SQL schemas for state adapter and store migration
+tests. `store/` contains synthetic rollout input and a version-one schema.
+
 `rollout/defensive.jsonl` covers optional envelope fields, unknown nested
 events, and a malformed line.
 

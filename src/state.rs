@@ -1,16 +1,28 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags};
 
-use crate::model::{Session, SourceRef};
+use crate::model::{DiagnosticKind, Session, SourceRef, merge_session_fields};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateDiagnosticKind {
     Unreadable,
     SchemaMismatch,
     Query,
+    MetadataConflict,
+}
+
+impl StateDiagnosticKind {
+    pub(crate) fn canonical_kind(self) -> DiagnosticKind {
+        match self {
+            Self::Unreadable => DiagnosticKind::Unreadable,
+            Self::SchemaMismatch => DiagnosticKind::StateSchemaMismatch,
+            Self::Query => DiagnosticKind::StateQuery,
+            Self::MetadataConflict => DiagnosticKind::MetadataConflict,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +98,7 @@ pub fn read_state_database(path: &Path) -> StateReadResult {
         }
     };
 
-    read_connection(path, &connection)
+    normalize_state_result(read_connection(path, &connection))
 }
 
 pub fn read_state(path: &Path) -> StateReadResult {
@@ -98,12 +110,35 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
+    merge_state_results(
+        paths
+            .into_iter()
+            .map(|path| read_state_database(path.as_ref())),
+    )
+}
+
+pub(crate) fn merge_state_results<I>(results: I) -> StateReadResult
+where
+    I: IntoIterator<Item = StateReadResult>,
+{
     let mut result = StateReadResult::default();
-    for path in paths {
-        let read = read_state_database(path.as_ref());
+    for read in results {
         result.sessions.extend(read.sessions);
         result.diagnostics.extend(read.diagnostics);
     }
+    normalize_state_result(result)
+}
+
+fn normalize_state_result(mut result: StateReadResult) -> StateReadResult {
+    let mut sessions = BTreeMap::new();
+    for session in std::mem::take(&mut result.sessions) {
+        if let Some(existing) = sessions.get_mut(&session.id) {
+            merge_state_session(existing, &session, &mut result.diagnostics);
+        } else {
+            sessions.insert(session.id.clone(), session);
+        }
+    }
+    result.sessions = sessions.into_values().collect();
     result
         .sessions
         .sort_by(|left, right| left.id.cmp(&right.id));
@@ -111,9 +146,27 @@ where
         left.source
             .path
             .cmp(&right.source.path)
+            .then_with(|| left.source.line.cmp(&right.source.line))
             .then_with(|| left.message.cmp(&right.message))
     });
     result
+}
+
+fn merge_state_session(
+    target: &mut Session,
+    incoming: &Session,
+    diagnostics: &mut Vec<StateDiagnostic>,
+) {
+    for conflict in merge_session_fields(target, incoming) {
+        diagnostics.push(StateDiagnostic {
+            source: incoming.provenance.clone(),
+            kind: StateDiagnosticKind::MetadataConflict,
+            message: format!(
+                "state metadata conflict for {}: {} vs {}",
+                conflict.field, conflict.existing, conflict.incoming
+            ),
+        });
+    }
 }
 
 fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
@@ -398,11 +451,15 @@ mod tests {
         let schemas = [
             (
                 "reduced",
-                "CREATE TABLE threads (id TEXT, cwd TEXT); INSERT INTO threads VALUES ('reduced', '/fixture');",
+                include_str!("../tests/fixtures/state/reduced.sql"),
             ),
             (
                 "extended",
-                "CREATE TABLE threads (id TEXT, rollout_path TEXT, created_at TEXT, updated_at TEXT, cwd TEXT, project_path TEXT, model TEXT, model_provider TEXT, archived INTEGER, extra TEXT); INSERT INTO threads VALUES ('extended', '/fixture.jsonl', 'created', 'updated', '/fixture', '/project', 'model', 'provider', 1, 'ignored');",
+                include_str!("../tests/fixtures/state/extended.sql"),
+            ),
+            (
+                "current",
+                include_str!("../tests/fixtures/state/current.sql"),
             ),
         ];
         for (name, schema) in schemas {
@@ -421,7 +478,10 @@ mod tests {
     #[test]
     fn incompatible_schema_is_an_explicit_diagnostic() {
         let path = temporary_database("incompatible");
-        create_database(&path, "CREATE TABLE threads (title TEXT);");
+        create_database(
+            &path,
+            include_str!("../tests/fixtures/state/incompatible.sql"),
+        );
 
         let result = read_state_database(&path);
         assert!(result.sessions.is_empty());
@@ -431,5 +491,51 @@ mod tests {
             StateDiagnosticKind::SchemaMismatch
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn duplicate_state_rows_are_merged_with_conflicts() {
+        let path = temporary_database("conflicting");
+        create_database(
+            &path,
+            include_str!("../tests/fixtures/state/conflicting.sql"),
+        );
+
+        let result = read_state_database(&path);
+
+        assert_eq!(result.sessions.len(), 1);
+        assert_eq!(result.sessions[0].cwd.as_deref(), Some("/first"));
+        assert_eq!(result.sessions[0].model.as_deref(), Some("model-one"));
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.kind == StateDiagnosticKind::MetadataConflict)
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn all_state_databases_are_read_and_merged_deterministically() {
+        let first = temporary_database("all-first");
+        let second = temporary_database("all-second");
+        create_database(&first, include_str!("../tests/fixtures/state/reduced.sql"));
+        create_database(
+            &second,
+            include_str!("../tests/fixtures/state/extended.sql"),
+        );
+
+        let result = read_state_databases([&first, &second]);
+
+        assert_eq!(
+            result
+                .sessions
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fixture-extended-session", "fixture-reduced-session"]
+        );
+        let _ = std::fs::remove_file(first);
+        let _ = std::fs::remove_file(second);
     }
 }

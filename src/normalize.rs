@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde_json::{Map, Value};
 
@@ -6,6 +6,7 @@ use crate::model::{
     CanonicalData, CanonicalDiagnostic, DiagnosticKind, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES,
     MAX_TOOL_SUMMARY_BYTES, Message, MessageRole, OutcomeSource, Record, RecordKind, Session,
     SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn, TurnLifecycleEvent,
+    merge_session_fields,
 };
 use crate::rollout::{KnownRecordType, ParseDiagnostic, RolloutParseResult, RolloutRecord};
 use crate::state::StateReadResult;
@@ -41,13 +42,7 @@ pub fn normalize_rollout_result(
             .diagnostics
             .iter()
             .map(|diagnostic| CanonicalDiagnostic {
-                kind: match diagnostic.kind {
-                    crate::state::StateDiagnosticKind::Unreadable => DiagnosticKind::Unreadable,
-                    crate::state::StateDiagnosticKind::SchemaMismatch => {
-                        DiagnosticKind::StateSchemaMismatch
-                    }
-                    crate::state::StateDiagnosticKind::Query => DiagnosticKind::StateQuery,
-                },
+                kind: diagnostic.kind.canonical_kind(),
                 source: diagnostic.source.clone(),
                 message: diagnostic.message.clone(),
             }),
@@ -59,8 +54,12 @@ pub fn normalize_records(records: &[RolloutRecord], state: &[Session]) -> Canoni
     let mut data = CanonicalData::default();
     let mut sessions = BTreeMap::new();
     let source_path = records.first().map(|record| record.source.path.clone());
-    let mut current_session_id =
-        matching_state_session(source_path.as_deref(), state).map(|session| {
+    let matched_state_session_id =
+        matching_state_session(source_path.as_deref(), state).map(|session| session.id.clone());
+    let mut current_session_id = matched_state_session_id
+        .as_deref()
+        .and_then(|session_id| state.iter().find(|session| session.id == session_id))
+        .map(|session| {
             sessions.insert(session.id.clone(), session.clone());
             session.id.clone()
         });
@@ -87,6 +86,19 @@ pub fn normalize_records(records: &[RolloutRecord], state: &[Session]) -> Canoni
                     source.clone(),
                     &mut data.diagnostics,
                 ) {
+                    if matched_state_session_id
+                        .as_deref()
+                        .is_some_and(|state_id| state_id != candidate.id)
+                    {
+                        data.diagnostics.push(CanonicalDiagnostic {
+                            kind: DiagnosticKind::MetadataConflict,
+                            source: source.clone(),
+                            message: bounded(&format!(
+                                "state and rollout session identities differ: state={:?}, rollout={:?}",
+                                matched_state_session_id, candidate.id
+                            )),
+                        });
+                    }
                     current_session_id = Some(candidate.id.clone());
                     current_turn_id = None;
                     merge_rollout_session(&mut sessions, candidate, state, &mut data.diagnostics);
@@ -198,17 +210,21 @@ pub fn normalize_records(records: &[RolloutRecord], state: &[Session]) -> Canoni
             _ => {}
         }
 
+        let (original_record_type, original_nested_type) = original_record_types(record);
         data.records.push(Record {
             session_id: current_session_id.clone(),
             turn_id: record_turn_id,
             timestamp: record.timestamp.clone(),
             sequence,
+            original_record_type,
+            original_nested_type,
             kind: record_kind(record),
             provenance: source,
         });
     }
 
     data.sessions = sessions.into_values().collect();
+    deduplicate_token_usage(&mut data.token_usage);
     mark_tool_results(&mut data.tool_calls, &mut data.tool_results);
     mark_duplicate_tool_results(&mut data.tool_results);
     data
@@ -270,168 +286,15 @@ fn merge_session(
     incoming: &Session,
     diagnostics: &mut Vec<CanonicalDiagnostic>,
 ) {
-    merge_string(
-        "created_at",
-        &mut target.created_at,
-        incoming.created_at.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "updated_at",
-        &mut target.updated_at,
-        incoming.updated_at.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "cwd",
-        &mut target.cwd,
-        incoming.cwd.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "project",
-        &mut target.project,
-        incoming.project.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "model",
-        &mut target.model,
-        incoming.model.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "provider",
-        &mut target.provider,
-        incoming.provider.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "source",
-        &mut target.source,
-        incoming.source.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "thread_source",
-        &mut target.thread_source,
-        incoming.thread_source.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "rollout_path",
-        &mut target.rollout_path,
-        incoming.rollout_path.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_bool(
-        "archive_state",
-        &mut target.archive_state,
-        incoming.archive_state,
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "title",
-        &mut target.title,
-        incoming.title.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "preview",
-        &mut target.preview,
-        incoming.preview.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "parent_id",
-        &mut target.parent_id,
-        incoming.parent_id.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "cli_version",
-        &mut target.cli_version,
-        incoming.cli_version.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "originator",
-        &mut target.originator,
-        incoming.originator.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "history_mode",
-        &mut target.history_mode,
-        incoming.history_mode.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-    merge_string(
-        "reasoning_effort",
-        &mut target.reasoning_effort,
-        incoming.reasoning_effort.clone(),
-        &incoming.provenance,
-        diagnostics,
-    );
-}
-
-fn merge_string(
-    field: &str,
-    target: &mut Option<String>,
-    incoming: Option<String>,
-    source: &SourceRef,
-    diagnostics: &mut Vec<CanonicalDiagnostic>,
-) {
-    let Some(incoming) = incoming else {
-        return;
-    };
-    match target {
-        None => *target = Some(incoming),
-        Some(existing) if existing == &incoming => {}
-        Some(existing) => diagnostics.push(CanonicalDiagnostic {
+    for conflict in merge_session_fields(target, incoming) {
+        diagnostics.push(CanonicalDiagnostic {
             kind: DiagnosticKind::MetadataConflict,
-            source: source.clone(),
+            source: incoming.provenance.clone(),
             message: bounded(&format!(
-                "session metadata conflict for {field}: {existing:?} vs {incoming:?}"
+                "session metadata conflict for {}: {} vs {}",
+                conflict.field, conflict.existing, conflict.incoming
             )),
-        }),
-    }
-}
-
-fn merge_bool(
-    field: &str,
-    target: &mut Option<bool>,
-    incoming: Option<bool>,
-    source: &SourceRef,
-    diagnostics: &mut Vec<CanonicalDiagnostic>,
-) {
-    let Some(incoming) = incoming else {
-        return;
-    };
-    match target {
-        None => *target = Some(incoming),
-        Some(existing) if *existing == incoming => {}
-        Some(existing) => diagnostics.push(CanonicalDiagnostic {
-            kind: DiagnosticKind::MetadataConflict,
-            source: source.clone(),
-            message: format!("session metadata conflict for {field}: {existing:?} vs {incoming:?}"),
-        }),
+        });
     }
 }
 
@@ -444,14 +307,26 @@ fn session_from_payload(
     let payload = payload?.as_object()?;
     let id = string_field(payload, &["id"]);
     let session_id = string_field(payload, &["session_id"]);
-    if id.is_some() && session_id.is_some() && id != session_id {
-        diagnostics.push(CanonicalDiagnostic {
-            kind: DiagnosticKind::MetadataConflict,
-            source: source.clone(),
-            message: "session metadata contains conflicting id and session_id".to_owned(),
-        });
+    let thread_id = string_field(payload, &["thread_id"]);
+    let identity = [id.as_ref(), session_id.as_ref(), thread_id.as_ref()]
+        .into_iter()
+        .flatten()
+        .next()
+        .cloned();
+    if let Some(identity) = identity.as_ref() {
+        if [id.as_ref(), session_id.as_ref(), thread_id.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|candidate| candidate != identity)
+        {
+            diagnostics.push(CanonicalDiagnostic {
+                kind: DiagnosticKind::MetadataConflict,
+                source: source.clone(),
+                message: "session metadata contains conflicting identity fields".to_owned(),
+            });
+        }
     }
-    let id = id.or(session_id)?;
+    let id = identity?;
     Some(Session {
         id,
         created_at: string_field(payload, &["timestamp", "created_at"])
@@ -576,15 +451,17 @@ fn message_from_payload(
 ) -> Message {
     let content = payload
         .get("content")
+        .filter(|value| !value.is_null())
         .or_else(|| payload.get("text"))
+        .filter(|value| !value.is_null())
         .map(extract_message_text)
-        .unwrap_or_default();
+        .map(|content| bounded_to(&content, MAX_MESSAGE_BYTES));
     Message {
         id: string_field(payload, &["id"]),
         session_id,
         turn_id,
         role: string_field(payload, &["role"]).map(parse_role),
-        content: bounded_to(&content, MAX_MESSAGE_BYTES),
+        content,
         timestamp,
         provenance,
     }
@@ -708,10 +585,19 @@ fn token_usage_from_payload(
 fn mark_tool_results(calls: &mut [ToolCall], results: &mut [ToolResult]) {
     for result in results {
         result.matched_call = result.call_id.as_ref().is_some_and(|call_id| {
-            calls
-                .iter()
-                .any(|call| call.call_id.as_ref() == Some(call_id))
+            calls.iter().any(|call| {
+                call.call_id.as_ref() == Some(call_id)
+                    && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
+                    && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
+            })
         });
+    }
+}
+
+fn context_matches(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
     }
 }
 
@@ -740,6 +626,11 @@ fn equivalent_results(left: &ToolResult, right: &ToolResult) -> bool {
     if left_call != right_call {
         return false;
     }
+    if !context_matches(left.session_id.as_deref(), right.session_id.as_deref())
+        || !context_matches(left.turn_id.as_deref(), right.turn_id.as_deref())
+    {
+        return false;
+    }
     if left
         .exit_code
         .zip(right.exit_code)
@@ -751,7 +642,9 @@ fn equivalent_results(left: &ToolResult, right: &ToolResult) -> bool {
         .status
         .as_deref()
         .zip(right.status.as_deref())
-        .is_some_and(|(left, right)| normalize_token(left) != normalize_token(right))
+        .is_some_and(|(left, right)| {
+            !normalize_token(left).eq_ignore_ascii_case(&normalize_token(right))
+        })
     {
         return false;
     }
@@ -786,14 +679,33 @@ fn equivalent_results(left: &ToolResult, right: &ToolResult) -> bool {
 
 fn result_key(result: &ToolResult) -> String {
     format!(
-        "call:{}:{}:{}:{}",
+        "session:{}:turn:{}:call:{}:{}:{}:{}",
+        result.session_id.as_deref().unwrap_or(""),
+        result.turn_id.as_deref().unwrap_or(""),
         result.call_id.as_deref().unwrap_or(""),
         result
             .exit_code
             .map_or_else(String::new, |value| value.to_string()),
-        normalize_token(result.status.as_deref().unwrap_or("")),
+        normalize_token(result.status.as_deref().unwrap_or("")).to_ascii_lowercase(),
         bounded(&combined_output(result)),
     )
+}
+
+fn deduplicate_token_usage(usages: &mut Vec<TokenUsage>) {
+    let mut seen = HashSet::new();
+    usages.retain(|usage| {
+        if usage.session_id.is_none() && usage.turn_id.is_none() {
+            return true;
+        }
+        seen.insert((
+            usage.session_id.clone(),
+            usage.turn_id.clone(),
+            usage.input_tokens,
+            usage.cached_input_tokens,
+            usage.output_tokens,
+            usage.reasoning_output_tokens,
+        ))
+    });
 }
 
 fn combined_output(result: &ToolResult) -> String {
@@ -824,21 +736,33 @@ fn classify_outcome(
     if let Some(outcome) = status.and_then(status_outcome) {
         return (outcome, OutcomeSource::Status);
     }
+    if output_indicates_failure(stdout, stderr) {
+        return (ToolOutcome::Failed, OutcomeSource::OutputText);
+    }
+    (ToolOutcome::Unknown, OutcomeSource::Unknown)
+}
+
+fn output_indicates_failure(stdout: Option<&str>, stderr: Option<&str>) -> bool {
+    const ERROR_MARKERS: &[&str] = &[
+        "error",
+        "failed",
+        "failure",
+        "command not found",
+        "permission denied",
+        "traceback",
+    ];
     let output = [stdout, stderr]
         .into_iter()
         .flatten()
+        .map(normalize_token)
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase();
-    if output.contains("error") || output.contains("failed") {
-        (ToolOutcome::Failed, OutcomeSource::OutputText)
-    } else {
-        (ToolOutcome::Unknown, OutcomeSource::Unknown)
-    }
+    ERROR_MARKERS.iter().any(|marker| output.contains(marker))
 }
 
 fn status_outcome(status: &str) -> Option<ToolOutcome> {
-    let status = normalize_token(status);
+    let status = normalize_token(status).to_ascii_lowercase();
     if matches!(
         status.as_str(),
         "success" | "succeeded" | "complete" | "completed" | "ok"
@@ -869,6 +793,33 @@ fn record_kind(record: &RolloutRecord) -> RecordKind {
             nested_type: unknown.nested_type.clone(),
             raw_json: serde_json::to_string(&unknown.raw).expect("JSON values serialize"),
         },
+    }
+}
+
+fn original_record_types(record: &RolloutRecord) -> (Option<String>, Option<String>) {
+    match &record.kind {
+        crate::rollout::RolloutRecordKind::Known {
+            record_type,
+            nested_type,
+            ..
+        } => (
+            Some(known_record_type_name(*record_type).to_owned()),
+            nested_type.clone(),
+        ),
+        crate::rollout::RolloutRecordKind::Unknown(unknown) => {
+            (unknown.record_type.clone(), unknown.nested_type.clone())
+        }
+    }
+}
+
+fn known_record_type_name(record_type: KnownRecordType) -> &'static str {
+    match record_type {
+        KnownRecordType::SessionMeta => "session_meta",
+        KnownRecordType::TurnContext => "turn_context",
+        KnownRecordType::ResponseItem => "response_item",
+        KnownRecordType::EventMessage => "event_msg",
+        KnownRecordType::Compacted => "compacted",
+        KnownRecordType::WorldState => "world_state",
     }
 }
 
@@ -1023,12 +974,7 @@ mod tests {
 
     #[test]
     fn normalizes_fixture_sessions_messages_turns_and_tools() {
-        let bytes = include_bytes!("../tests/fixtures/rollout/basic.jsonl");
-        let parsed = parse_rollout_reader(
-            Path::new("fixture.jsonl"),
-            PlainJsonlReader::new(Cursor::new(bytes)),
-        );
-        let data = normalize_rollout(&parsed);
+        let data = parse(include_str!("../tests/fixtures/rollout/basic.jsonl"));
 
         assert_eq!(data.sessions[0].id, "fixture-session-001");
         assert_eq!(data.sessions[0].cwd.as_deref(), Some("/fixture/project"));
@@ -1036,8 +982,8 @@ mod tests {
         assert_eq!(data.messages.len(), 2);
         assert_eq!(data.messages[0].role, Some(MessageRole::User));
         assert_eq!(
-            data.messages[1].content,
-            "I will inspect the project first."
+            data.messages[1].content.as_deref(),
+            Some("I will inspect the project first.")
         );
         assert_eq!(data.tool_calls.len(), 1);
         assert_eq!(data.tool_results.len(), 2);
@@ -1045,16 +991,15 @@ mod tests {
         assert_eq!(data.tool_results[0].outcome, ToolOutcome::Failed);
         assert!(data.tool_results[0].matched_call);
         assert!(data.tool_results[1].is_duplicate);
+        assert_eq!(data.token_usage.len(), 1);
         assert_eq!(data.token_usage[0].input_tokens, Some(120));
     }
 
     #[test]
     fn structured_outcome_beats_error_text() {
-        let data = parse(
-            r#"{"type":"session_meta","payload":{"id":"s"}}
-{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"c","name":"x"}}
-{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c","output":"error text","exit_code":0,"status":"failed"}}"#,
-        );
+        let data = parse(include_str!(
+            "../tests/fixtures/rollout/structured-outcome.jsonl"
+        ));
         let result = &data.tool_results[0];
         assert_eq!(result.outcome, ToolOutcome::Succeeded);
         assert_eq!(result.outcome_source, OutcomeSource::ExitCode);
@@ -1062,26 +1007,46 @@ mod tests {
 
     #[test]
     fn missing_optional_values_stay_unknown() {
-        let data = parse(
-            r#"{"type":"session_meta","payload":{"id":"s"}}
-{"type":"response_item","payload":{"type":"message","content":[]}}
-{"type":"response_item","payload":{"type":"custom_tool_call_output","output":"text"}}"#,
-        );
+        let data = parse(include_str!(
+            "../tests/fixtures/rollout/missing-fields.jsonl"
+        ));
         assert_eq!(data.messages[0].role, None);
+        assert_eq!(data.messages[0].content, None);
         assert_eq!(data.tool_results[0].call_id, None);
         assert_eq!(data.tool_results[0].outcome, ToolOutcome::Unknown);
+    }
+
+    #[test]
+    fn thread_ids_tokens_and_tool_contexts_are_preserved() {
+        let data = parse(include_str!("../tests/fixtures/rollout/edge-cases.jsonl"));
+
+        assert_eq!(data.sessions.len(), 2);
+        assert_eq!(data.sessions[0].id, "fixture-second-session");
+        assert_eq!(data.sessions[1].id, "fixture-thread-only");
+        assert_eq!(data.messages[0].content, None);
+        assert_eq!(data.tool_results.len(), 2);
+        assert_eq!(data.tool_results[0].outcome, ToolOutcome::Failed);
+        assert_eq!(data.tool_results[0].outcome_source, OutcomeSource::Status);
+        assert!(!data.tool_results[0].matched_call);
+        assert_eq!(data.tool_results[1].outcome, ToolOutcome::Failed);
+        assert_eq!(
+            data.tool_results[1].outcome_source,
+            OutcomeSource::OutputText
+        );
+        assert!(!data.tool_results[1].matched_call);
+        assert_eq!(data.token_usage.len(), 1);
     }
 
     #[test]
     fn rollout_values_win_conflicts_and_state_fills_missing_metadata() {
         let parsed = parse_rollout_reader(
             Path::new("fixture.jsonl"),
-            PlainJsonlReader::new(Cursor::new(
-                br#"{"type":"session_meta","payload":{"id":"s","cwd":"/rollout"}}"#,
-            )),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../tests/fixtures/rollout/conflict.jsonl"
+            ))),
         );
         let state = Session {
-            id: "s".to_owned(),
+            id: "fixture-conflict-session".to_owned(),
             created_at: None,
             updated_at: None,
             cwd: Some("/state".to_owned()),
@@ -1112,5 +1077,44 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.kind == DiagnosticKind::MetadataConflict)
         );
+    }
+
+    #[test]
+    fn state_and_rollout_identity_mismatch_is_diagnostic() {
+        let parsed = parse_rollout_reader(
+            Path::new("fixture.jsonl"),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../tests/fixtures/rollout/conflict.jsonl"
+            ))),
+        );
+        let state = Session {
+            id: "fixture-state-session".to_owned(),
+            created_at: None,
+            updated_at: None,
+            cwd: None,
+            project: None,
+            model: None,
+            provider: None,
+            source: None,
+            thread_source: None,
+            rollout_path: Some("fixture.jsonl".to_owned()),
+            archive_state: None,
+            title: None,
+            preview: None,
+            parent_id: None,
+            cli_version: None,
+            originator: None,
+            history_mode: None,
+            reasoning_effort: None,
+            provenance: SourceRef::state(PathBuf::from("state.sqlite")),
+        };
+
+        let data = normalize_rollout_with_state(&parsed, &[state]);
+
+        assert_eq!(data.sessions.len(), 2);
+        assert!(data.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == DiagnosticKind::MetadataConflict
+                && diagnostic.message.contains("identities differ")
+        }));
     }
 }

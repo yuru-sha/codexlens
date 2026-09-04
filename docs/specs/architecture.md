@@ -70,6 +70,11 @@ is skipped. A changed identity replaces only that source's derived rows inside
 one transaction; a failed replacement rolls back the deletion and preserves
 the previous successful ingest.
 
+When discovered inputs include plain rollouts, state databases provide session
+metadata for rollout normalization and are not stored as separate session rows;
+this keeps one canonical stored session per rollout source. Direct state-only
+ingestion still persists state sessions when explicitly requested.
+
 Read commands may run an incremental analysis first. A future `--frozen`
 option can explicitly skip that refresh, but reporting must always make the
 freshness state visible.
