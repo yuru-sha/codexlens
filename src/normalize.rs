@@ -332,20 +332,51 @@ fn extract_file_operations(data: &mut CanonicalData) {
         }
     }
     for result in &data.tool_results {
-        if result.matched_call || result.is_duplicate {
+        if result.is_duplicate {
             continue;
         }
         let command = result.command.as_deref().unwrap_or_default();
         let timestamp = record_timestamp(data, &result.provenance);
+        let tool_name = result
+            .call_id
+            .as_ref()
+            .and_then(|call_id| {
+                calls.iter().find(|call| {
+                    call.call_id.as_ref() == Some(call_id)
+                        && context_matches(call.session_id.as_deref(), result.session_id.as_deref())
+                        && context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
+                })
+            })
+            .and_then(|call| call.tool_name.as_deref())
+            .unwrap_or_default();
+        let mut extracted = Vec::new();
         append_observed_file_operations(
-            &mut data.file_operations,
+            &mut extracted,
             result.session_id.clone(),
             result.turn_id.clone(),
-            "",
+            tool_name,
             command,
             &result.provenance,
             timestamp,
         );
+        for operation in extracted {
+            let Some(call_id) = result.call_id.as_ref() else {
+                data.file_operations.push(operation);
+                continue;
+            };
+            let Some(session_id) = operation.session_id.as_ref() else {
+                continue;
+            };
+            if call_operations.insert((
+                session_id.clone(),
+                operation.turn_id.clone(),
+                call_id.clone(),
+                operation.path.clone(),
+                operation.operation.clone(),
+            )) {
+                data.file_operations.push(operation);
+            }
+        }
     }
     data.file_operations.sort_by(|left, right| {
         left.session_id
@@ -406,7 +437,12 @@ fn append_observed_file_operations(
         }
     }
     if observed.is_empty() && explicit_tool {
-        if let Some(path) = json_string_field(command, &["path", "file_path", "filename"]) {
+        if let Some(path) =
+            json_string_field(command, &["path", "file_path", "filename"]).or_else(|| {
+                let path = command.trim();
+                likely_file_path(path).then(|| path.to_owned())
+            })
+        {
             observed.push((
                 if tool == "create_file" {
                     "create".to_owned()
@@ -451,6 +487,10 @@ fn append_observed_file_operations(
             provenance: provenance.clone(),
         });
     }
+}
+
+fn likely_file_path(path: &str) -> bool {
+    !path.is_empty() && !path.contains(['\n', '\r']) && !path.starts_with(['{', '['])
 }
 
 fn canonical_command_value(value: &Value) -> String {
@@ -814,6 +854,9 @@ fn tool_call_from_payload(
             .or_else(|| payload.get("arguments"))
             .or_else(|| payload.get("query"))
             .or_else(|| payload.get("command"))
+            .or_else(|| payload.get("path"))
+            .or_else(|| payload.get("file_path"))
+            .or_else(|| payload.get("filename"))
             .map(canonical_command_value),
         command: payload.get("command").map(canonical_command_value),
         cwd: string_field(payload, &["cwd"]),
@@ -863,7 +906,12 @@ fn tool_result_from_payload(
         call_id: string_field(payload, &["call_id"]),
         session_id,
         turn_id,
-        command: payload.get("command").map(canonical_command_value),
+        command: payload
+            .get("command")
+            .or_else(|| payload.get("path"))
+            .or_else(|| payload.get("file_path"))
+            .or_else(|| payload.get("filename"))
+            .map(canonical_command_value),
         cwd: string_field(payload, &["cwd"]),
         stdout,
         stderr,
@@ -931,19 +979,50 @@ fn context_matches(left: Option<&str>, right: Option<&str>) -> bool {
 
 fn mark_duplicate_tool_results(results: &mut [ToolResult]) {
     // ponytail: O(n^2) result dedup; index by call_id if large histories make it measurable.
+    let mut representatives = Vec::new();
     for index in 0..results.len() {
-        let duplicate_of =
-            (0..index).find(|previous| equivalent_results(&results[*previous], &results[index]));
-        if let Some(previous) = duplicate_of {
+        let Some(previous) = representatives
+            .iter()
+            .copied()
+            .find(|previous| equivalent_results(&results[*previous], &results[index]))
+        else {
+            if results[index].call_id.is_some() {
+                results[index].deduplication_key = Some(result_key(&results[index]));
+            }
+            representatives.push(index);
+            continue;
+        };
+        if result_quality(&results[index]) > result_quality(&results[previous]) {
+            results[previous].deduplication_key = Some(result_key(&results[index]));
+            results[previous].equivalent_to = Some(results[index].provenance.clone());
+            results[previous].is_duplicate = true;
+            results[index].deduplication_key = Some(result_key(&results[index]));
+            if let Some(representative) = representatives
+                .iter_mut()
+                .find(|representative| **representative == previous)
+            {
+                *representative = index;
+            }
+        } else if results[index].call_id.is_some() {
             results[index].deduplication_key = results[previous]
                 .deduplication_key
                 .clone()
                 .or_else(|| Some(result_key(&results[previous])));
             results[index].equivalent_to = Some(results[previous].provenance.clone());
             results[index].is_duplicate = true;
-        } else if results[index].call_id.is_some() {
-            results[index].deduplication_key = Some(result_key(&results[index]));
         }
+    }
+}
+
+fn result_quality(result: &ToolResult) -> u8 {
+    if result.exit_code.is_some() {
+        3
+    } else if result.status.is_some() {
+        2
+    } else if !combined_output(result).is_empty() {
+        1
+    } else {
+        0
     }
 }
 
@@ -1196,10 +1275,7 @@ fn is_event_tool_call_type(kind: Option<&str>) -> bool {
 }
 
 fn is_event_tool_result_type(kind: Option<&str>) -> bool {
-    matches!(
-        kind,
-        Some("exec_command_output_delta" | "exec_command_end" | "mcp_tool_call_end")
-    )
+    matches!(kind, Some("exec_command_end" | "mcp_tool_call_end"))
 }
 
 fn is_lifecycle_type(kind: Option<&str>) -> bool {
@@ -1389,10 +1465,88 @@ mod tests {
 
         assert_eq!(data.file_operations.len(), 1);
         assert_eq!(data.file_operations[0].path, "src/lib.rs");
+        assert_eq!(normalize_path("../src/lib.rs"), "../src/lib.rs");
         assert_eq!(
             canonical_command_value(&serde_json::json!({"argv": ["cargo", "test"]})),
             "cargo test"
         );
+    }
+
+    #[test]
+    fn preserves_path_only_file_payloads_and_deduplicates_the_matched_result() {
+        let data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-file-session","cwd":"/fixture/project","project":"/fixture/project"}}
+{"type":"turn_context","payload":{"turn_id":"fixture-file-turn","cwd":"/fixture/project"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-file-call","name":"edit_file","input":{"path":"src/lib.rs"}}}
+{"type":"event_msg","payload":{"type":"exec_command_end","call_id":"fixture-file-call","command":{"path":"src/lib.rs"},"exit_code":0,"status":"completed"}}"#,
+        );
+
+        assert_eq!(data.file_operations.len(), 1);
+        assert_eq!(data.file_operations[0].path, "src/lib.rs");
+    }
+
+    #[test]
+    fn streaming_output_delta_is_not_a_completed_tool_result() {
+        let data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-stream-session"}}
+{"type":"turn_context","payload":{"turn_id":"fixture-stream-turn"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-stream-call","name":"exec_command","input":{"cmd":"cargo test"}}}
+{"type":"event_msg","payload":{"type":"exec_command_output_delta","call_id":"fixture-stream-call","command":["cargo","test"],"output":"partial"}}"#,
+        );
+
+        assert!(data.tool_results.is_empty());
+        assert_eq!(
+            data.records
+                .last()
+                .and_then(|record| record.original_nested_type.as_deref()),
+            Some("exec_command_output_delta")
+        );
+    }
+
+    #[test]
+    fn structured_result_wins_order_independent_deduplication() {
+        let base = ToolResult {
+            id: None,
+            call_id: Some("fixture-result-call".to_owned()),
+            session_id: Some("fixture-result-session".to_owned()),
+            turn_id: Some("fixture-result-turn".to_owned()),
+            command: Some("cargo test".to_owned()),
+            cwd: None,
+            stdout: None,
+            stderr: None,
+            duration_ms: None,
+            exit_code: None,
+            status: None,
+            outcome: ToolOutcome::Unknown,
+            outcome_source: OutcomeSource::Unknown,
+            matched_call: false,
+            deduplication_key: None,
+            equivalent_to: None,
+            is_duplicate: false,
+            provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 1),
+        };
+        let mut results = vec![
+            ToolResult {
+                stdout: Some("same output".to_owned()),
+                provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 2),
+                ..base.clone()
+            },
+            ToolResult {
+                stdout: Some("same output".to_owned()),
+                exit_code: Some(1),
+                status: Some("failed".to_owned()),
+                outcome: ToolOutcome::Failed,
+                outcome_source: OutcomeSource::ExitCode,
+                provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 3),
+                ..base
+            },
+        ];
+
+        mark_duplicate_tool_results(&mut results);
+
+        assert!(results[0].is_duplicate);
+        assert!(!results[1].is_duplicate);
+        assert_eq!(results[1].exit_code, Some(1));
     }
 
     #[test]

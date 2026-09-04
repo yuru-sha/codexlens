@@ -892,10 +892,7 @@ pub fn analyze_knowledge(data: &CanonicalData, options: &AnalysisOptions) -> Vec
             }
             let missing_snapshot = sessions.iter().any(|session| {
                 !data.instruction_snapshots.iter().any(|snapshot| {
-                    snapshot.session_id.as_deref() == Some(session)
-                        && snapshot.content.is_some()
-                        && snapshot.source
-                            != crate::model::InstructionSnapshotSource::Unavailable
+                    snapshot.session_id.as_deref() == Some(session) && snapshot_is_usable(snapshot)
                 })
             });
             let mut limitations = vec![
@@ -1215,7 +1212,7 @@ fn correction_fact(text: &str) -> Option<String> {
     if trimmed.is_empty() || trimmed.ends_with('?') || question_prefix(trimmed) {
         return None;
     }
-    let normalized = normalize_fact(trimmed);
+    let normalized = normalize_fact(&redact_sensitive(trimmed));
     for marker in CORRECTION_MARKERS {
         if let Some(rest) = normalized.strip_prefix(marker) {
             let rest = rest.strip_suffix(" instead").unwrap_or(rest).trim();
@@ -1247,9 +1244,9 @@ fn normalize_fact(text: &str) -> String {
 }
 
 fn bounded_fingerprint(value: &str) -> String {
-    let normalized = normalize_fact(value);
-    let redacted = redact_sensitive(&normalized);
-    truncate_bytes(&redacted, MAX_FACT_KEY_BYTES)
+    let redacted = redact_sensitive(value);
+    let normalized = normalize_fact(&redacted);
+    truncate_bytes(&normalized, MAX_FACT_KEY_BYTES)
 }
 
 fn correction_facts(data: &CanonicalData, options: &AnalysisOptions) -> Vec<FactEvent> {
@@ -1514,6 +1511,21 @@ fn stuck_window(
         }
     }
 
+    let edit_turn_ids = edits
+        .iter()
+        .filter_map(|edit| edit.turn_id.as_deref())
+        .collect::<HashSet<_>>();
+    let relevant_failures = failures.iter().filter(|failure| {
+        failure.session_id
+            == edits
+                .first()
+                .map(|edit| edit.session_id.as_str())
+                .unwrap_or_default()
+            && failure
+                .turn_id
+                .as_deref()
+                .is_some_and(|turn_id| edit_turn_ids.contains(turn_id))
+    });
     let mut activities = edits
         .iter()
         .map(|edit| Activity {
@@ -1526,18 +1538,7 @@ fn stuck_window(
             kind: ActivityKind::Edit,
         })
         .collect::<Vec<_>>();
-    activities.extend(
-        failures
-            .iter()
-            .filter(|failure| {
-                failure.session_id
-                    == edits
-                        .first()
-                        .map(|edit| edit.session_id.as_str())
-                        .unwrap_or_default()
-            })
-            .cloned(),
-    );
+    activities.extend(relevant_failures.cloned());
     activities.sort_by(compare_activity_positions);
     for start in 0..activities.len() {
         let mut selected = Vec::new();
@@ -1634,9 +1635,7 @@ fn snapshot_for_evidence<'a>(
 ) -> Option<&'a InstructionSnapshot> {
     let session_id = evidence.session_id.as_deref()?;
     let mut snapshots = data.instruction_snapshots.iter().filter(|snapshot| {
-        snapshot.session_id.as_deref() == Some(session_id)
-            && snapshot.content.is_some()
-            && !snapshot_is_unavailable(snapshot)
+        snapshot.session_id.as_deref() == Some(session_id) && snapshot_is_usable(snapshot)
     });
     let exact = snapshots.clone().find(|snapshot| {
         snapshot.provenance.path == evidence.source.path
@@ -1705,6 +1704,9 @@ fn instruction_join_findings(
         if session_ids.is_empty() {
             continue;
         }
+        if session_ids.len() < finding.distinct_sessions {
+            continue;
+        }
         let (snapshots_by_session, missing_sessions) = snapshots_for_finding(data, finding);
         let available_snapshots = snapshots_by_session
             .values()
@@ -1748,7 +1750,7 @@ fn instruction_join_findings(
                 kind: FindingType::Gap,
                 severity: finding.severity,
                 confidence: finding.confidence,
-                scope: finding.scope.clone(),
+                scope: instruction_scope(data, finding, &session_ids),
                 key: format!("{}|{}", finding.kind.as_str(), finding.key),
                 summary: format!(
                     "Recurring {} evidence has no matching guidance in the historical instruction snapshot",
@@ -1971,7 +1973,7 @@ fn instruction_duplicate_findings(data: &CanonicalData, options: &AnalysisOption
                     &mut evidence,
                     evidence_for(
                         Some(join.session_id.clone()),
-                        join.provenance.clone(),
+                        SourceRef::state(file.path.clone()),
                         EvidenceRole::InstructionFile,
                         Some(&file.path.to_string_lossy()),
                         options,
@@ -2021,18 +2023,6 @@ fn stale_file(
     join: &InstructionJoin,
     snapshot: &InstructionSnapshot,
 ) -> Option<(PathBuf, String, String)> {
-    if let (Some(old_hash), Some(new_hash)) = (
-        snapshot.effective_chain_hash.as_deref(),
-        join.resolution.effective_chain_hash.as_deref(),
-    ) {
-        if old_hash != new_hash {
-            let path = join
-                .nearest_path
-                .clone()
-                .or_else(|| join.resolution.chain.last().map(|file| file.path.clone()))?;
-            return Some((path, old_hash.to_owned(), new_hash.to_owned()));
-        }
-    }
     for old in &snapshot.chain {
         let Some(old_hash) = old.content_hash.as_deref() else {
             continue;
@@ -2043,6 +2033,9 @@ fn stale_file(
             .iter()
             .find(|file| file.path == old.path);
         let Some(new_hash) = current.and_then(|file| file.content_hash.as_deref()) else {
+            if matches!(old.kind, crate::model::InstructionFileKind::Observed) {
+                continue;
+            }
             return Some((
                 old.path.clone(),
                 old_hash.to_owned(),
@@ -2053,20 +2046,28 @@ fn stale_file(
             return Some((old.path.clone(), old_hash.to_owned(), new_hash.to_owned()));
         }
     }
+    if snapshot
+        .effective_chain_hash
+        .as_deref()
+        .zip(join.resolution.effective_chain_hash.as_deref())
+        .is_some_and(|(old_hash, new_hash)| old_hash != new_hash)
+    {
+        let path = join
+            .nearest_path
+            .clone()
+            .or_else(|| join.resolution.chain.last().map(|file| file.path.clone()))?;
+        return Some((
+            path,
+            snapshot.effective_chain_hash.clone()?,
+            join.resolution.effective_chain_hash.clone()?,
+        ));
+    }
     None
 }
 
 fn overscoped_path(join: &InstructionJoin, finding: &Finding) -> Option<PathBuf> {
     let target = finding.affected_paths.first()?;
-    let target = PathBuf::from(normalize_path(target));
-    let target = if target.is_absolute() {
-        target
-    } else {
-        join.project_root
-            .as_ref()
-            .or(join.cwd.as_ref())?
-            .join(target)
-    };
+    let target = resolve_instruction_path(join, target)?;
     let nested = join
         .resolution
         .chain
@@ -2079,14 +2080,25 @@ fn overscoped_path(join: &InstructionJoin, finding: &Finding) -> Option<PathBuf>
     join.resolution
         .chain
         .iter()
+        .rev()
+        .filter(|file| file.scope != InstructionScope::ProjectNested)
         .find(|file| {
-            file.scope == InstructionScope::ProjectRoot
-                && file
-                    .content
-                    .as_deref()
-                    .is_some_and(|content| guidance_matches(finding, content))
+            file.content
+                .as_deref()
+                .is_some_and(|content| guidance_matches(finding, content))
         })
         .map(|file| file.path.clone())
+}
+
+fn resolve_instruction_path(join: &InstructionJoin, path: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(normalize_path(path));
+    if path.is_absolute() {
+        return Some(path);
+    }
+    let base = join.cwd.as_ref().or(join.project_root.as_ref())?;
+    Some(PathBuf::from(normalize_path(
+        &base.join(path).to_string_lossy(),
+    )))
 }
 
 fn guidance_matches(finding: &Finding, content: &str) -> bool {
@@ -2139,6 +2151,10 @@ fn snapshot_is_unavailable(snapshot: &InstructionSnapshot) -> bool {
         || snapshot.accuracy == crate::model::InstructionSnapshotAccuracy::Unavailable
 }
 
+fn snapshot_is_usable(snapshot: &InstructionSnapshot) -> bool {
+    snapshot.content.is_some() && !snapshot_is_unavailable(snapshot) && !snapshot.truncated
+}
+
 fn evidence_sessions(finding: &Finding) -> Vec<String> {
     let mut sessions = finding
         .evidence
@@ -2174,6 +2190,14 @@ where
     "AGENTS.md".to_owned()
 }
 
+fn instruction_scope(data: &CanonicalData, finding: &Finding, sessions: &[String]) -> FindingScope {
+    let session_ids = sessions.iter().map(String::as_str).collect::<Vec<_>>();
+    finding.affected_paths.first().map_or_else(
+        || finding.scope.clone(),
+        |path| path_scope(data, &session_ids, path),
+    )
+}
+
 fn path_scope(data: &CanonicalData, sessions: &[&str], path: &str) -> FindingScope {
     let nearest = sessions
         .iter()
@@ -2194,11 +2218,7 @@ fn nearest_instruction_path(data: &CanonicalData, session_id: &str, path: &str) 
         .iter()
         .find(|join| join.session_id == session_id)?;
     let nearest = join.nearest_path.as_ref()?;
-    let target = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        join.project_root.as_ref()?.join(path)
-    };
+    let target = resolve_instruction_path(join, path)?;
     target
         .starts_with(nearest.parent().unwrap_or(nearest.as_path()))
         .then(|| nearest.clone())
@@ -2314,7 +2334,7 @@ fn compare_sources(left: &SourceRef, right: &SourceRef) -> Ordering {
 }
 
 fn command_family(command: &str) -> String {
-    let mut tokens = command_tokens(command);
+    let mut tokens = command_tokens(&redact_sensitive(command));
     if tokens.is_empty() {
         return "unknown_command".to_owned();
     }
@@ -2329,14 +2349,11 @@ fn command_family(command: &str) -> String {
         .to_ascii_lowercase();
     let mut family = vec![executable];
     for token in tokens.iter().skip(1) {
-        if token.starts_with('-')
-            || looks_volatile(token)
-            || token.contains('/')
-            || token.contains('\\')
-        {
+        let normalized = token.to_ascii_lowercase();
+        if token.starts_with('-') || !SAFE_COMMAND_WORDS.contains(&normalized.as_str()) {
             continue;
         }
-        family.push(normalize_fragment(token));
+        family.push(normalized);
         if family.len() == 3 {
             break;
         }
@@ -2344,16 +2361,59 @@ fn command_family(command: &str) -> String {
     family.join(" ")
 }
 
+const SAFE_COMMAND_WORDS: &[&str] = &[
+    "build",
+    "check",
+    "clippy",
+    "diff",
+    "eslint",
+    "fmt",
+    "format",
+    "lint",
+    "mypy",
+    "nextest",
+    "prettier",
+    "pytest",
+    "run",
+    "test",
+    "typecheck",
+    "vet",
+];
+
 fn command_tokens(command: &str) -> Vec<String> {
-    command
-        .split_whitespace()
-        .map(|token| {
-            token
-                .trim_matches(|character| character == '\'' || character == '"')
-                .to_owned()
-        })
-        .filter(|token| !token.is_empty())
-        .collect()
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in command.chars() {
+        if escaped {
+            token.push(character);
+            escaped = false;
+        } else if character == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            } else {
+                token.push(character);
+            }
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character.is_whitespace() {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+        } else {
+            token.push(character);
+        }
+    }
+    if escaped {
+        token.push('\\');
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
 }
 
 fn strip_command_wrappers(tokens: &mut Vec<String>) {
@@ -2411,15 +2471,21 @@ fn normalize_fragment(value: &str) -> String {
 fn normalize_guidance(value: &str) -> String {
     value
         .split_whitespace()
-        .map(|token| token.to_ascii_lowercase())
-        .map(|token| {
-            token
-                .trim_matches(|character: char| "`*_#>-. ,;:!?()[]{}\"'".contains(character))
-                .to_owned()
-        })
+        .map(normalize_guidance_token)
         .filter(|token| !token.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn normalize_guidance_token(value: &str) -> String {
+    let lower = value.to_ascii_lowercase().replace('\\', "/");
+    let path_candidate = lower.trim_end_matches(|character: char| ".,;:!?`\"'".contains(character));
+    if path_candidate.starts_with("./") || path_candidate.starts_with("../") {
+        return normalize_path(path_candidate);
+    }
+    path_candidate
+        .trim_matches(|character: char| "`*_#>-. ,;:!?()[]{}\"'".contains(character))
+        .to_owned()
 }
 
 fn looks_volatile(value: &str) -> bool {
@@ -2506,9 +2572,15 @@ fn redact_assignment(value: &str, marker: &str) -> String {
     while let Some(offset) = lower.get(cursor..).and_then(|rest| rest.find(marker)) {
         let start = cursor + offset;
         let value_start = start + marker.len();
-        let end = value[value_start..]
-            .find(char::is_whitespace)
-            .map_or(value.len(), |offset| value_start + offset);
+        let suffix = &value[value_start..];
+        let end = match suffix.chars().next() {
+            Some(delimiter @ ('\'' | '"')) => suffix[1..]
+                .find(delimiter)
+                .map_or(value.len(), |offset| value_start + offset + 2),
+            _ => suffix
+                .find(char::is_whitespace)
+                .map_or(value.len(), |offset| value_start + offset),
+        };
         redacted.push_str(&value[cursor..value_start]);
         redacted.push_str("[redacted]");
         cursor = end;
@@ -2661,6 +2733,21 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_requires_recurrence_across_sessions() {
+        let data = fixture_data();
+        assert_eq!(
+            analyze_knowledge(&data, &AnalysisOptions::default()).len(),
+            1
+        );
+
+        let mut one_session = data;
+        one_session
+            .messages
+            .retain(|message| message.session_id.as_deref() == Some("fixture-analysis-session-a"));
+        assert!(analyze_knowledge(&one_session, &AnalysisOptions::default()).is_empty());
+    }
+
+    #[test]
     fn failures_prefer_structured_results_and_do_not_report_one_session() {
         let data = fixture_data();
         let options = AnalysisOptions::default();
@@ -2744,6 +2831,14 @@ mod tests {
         assert_eq!(classify_verification_command("cargo tests"), None);
         let excerpt = bounded_excerpt("token=first token=second", 512);
         assert_eq!(excerpt, "token=[redacted] token=[redacted]");
+        assert_eq!(
+            bounded_excerpt(r#"cargo test token="a b""#, 512),
+            r#"cargo test token=[redacted]"#
+        );
+        assert_eq!(
+            command_family(r#"cargo test token="a b" fixture-id-001"#),
+            "cargo test"
+        );
     }
 
     #[test]
@@ -2842,6 +2937,33 @@ mod tests {
                 .iter()
                 .filter(|finding| finding.kind == FindingType::Rework)
                 .all(|finding| finding.summary.contains("3-minute rework window"))
+        );
+    }
+
+    #[test]
+    fn rework_requires_edits_inside_the_configured_window() {
+        let data = fixture_data();
+        let options = AnalysisOptions {
+            rework_window_seconds: 30,
+            ..AnalysisOptions::default()
+        };
+
+        assert!(analyze_rework(&data, &options).is_empty());
+    }
+
+    #[test]
+    fn unrelated_failures_do_not_create_a_file_loop() {
+        let mut data = fixture_data();
+        for result in &mut data.tool_results {
+            if result_is_failed(result) {
+                result.turn_id = Some("unrelated-turn".to_owned());
+            }
+        }
+
+        assert!(
+            analyze_rework(&data, &AnalysisOptions::default())
+                .iter()
+                .all(|finding| finding.kind == FindingType::Rework)
         );
     }
 
@@ -3001,6 +3123,25 @@ mod tests {
                 "missing {kind:?}"
             );
         }
+        let gap = findings
+            .iter()
+            .find(|finding| finding.kind == FindingType::Gap)
+            .unwrap();
+        assert_eq!(
+            gap.scope,
+            FindingScope::Instruction(PathBuf::from("/fixture/project/src/AGENTS.md"))
+        );
+        let duplicate = findings
+            .iter()
+            .find(|finding| finding.kind == FindingType::Duplicate)
+            .unwrap();
+        assert_eq!(duplicate.evidence.len(), 2);
+        assert!(
+            duplicate
+                .evidence
+                .iter()
+                .all(|evidence| evidence.source.kind == crate::model::SourceKind::State)
+        );
 
         let mut missing_session = data.clone();
         missing_session.instruction_snapshots.pop();
@@ -3021,6 +3162,69 @@ mod tests {
             findings
                 .iter()
                 .all(|finding| { !matches!(finding.kind, FindingType::Gap | FindingType::Stale) })
+        );
+
+        let mut capped = base.clone();
+        capped.distinct_sessions = 3;
+        let findings = analyze_instructions(
+            &missing_session,
+            std::slice::from_ref(&capped),
+            &AnalysisOptions::default(),
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.kind != FindingType::Gap)
+        );
+
+        let mut global_data = missing_session.clone();
+        let global = InstructionFile {
+            path: PathBuf::from("/fixture/codex/AGENTS.md"),
+            scope: InstructionScope::Global,
+            kind: InstructionFileKind::Standard,
+            state: InstructionFileState::Selected,
+            chain_position: Some(0),
+            content: Some("Run cargo lint.".to_owned()),
+            content_hash: Some(crate::instructions::content_hash(b"Run cargo lint.")),
+            byte_count: 15,
+            diagnostic: None,
+        };
+        for join in &mut global_data.instruction_joins {
+            let nested = join
+                .resolution
+                .chain
+                .iter()
+                .find(|file| file.scope == InstructionScope::ProjectNested)
+                .cloned()
+                .unwrap();
+            join.resolution.chain = vec![global.clone(), nested];
+        }
+        let findings = analyze_instructions(
+            &global_data,
+            std::slice::from_ref(&base),
+            &AnalysisOptions::default(),
+        );
+        assert_eq!(
+            findings
+                .iter()
+                .find(|finding| finding.kind == FindingType::Overscoped)
+                .map(|finding| &finding.scope),
+            Some(&FindingScope::Instruction(global.path))
+        );
+
+        let mut truncated_snapshot = data.clone();
+        for snapshot in &mut truncated_snapshot.instruction_snapshots {
+            snapshot.truncated = true;
+        }
+        let findings = analyze_instructions(
+            &truncated_snapshot,
+            std::slice::from_ref(&base),
+            &AnalysisOptions::default(),
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| !matches!(finding.kind, FindingType::Gap | FindingType::Stale))
         );
     }
 }

@@ -56,17 +56,22 @@ pub(crate) fn normalize_path(path: &str) -> String {
         .strip_prefix("file://")
         .unwrap_or(path)
         .replace('\\', "/");
+    let absolute = path.starts_with('/');
     let mut components = Vec::new();
     for component in path.split('/') {
         match component {
             "" | "." => {}
             ".." => {
-                components.pop();
+                if components.last().is_some_and(|value| *value != "..") {
+                    components.pop();
+                } else if !absolute {
+                    components.push("..");
+                }
             }
             value => components.push(value),
         }
     }
-    let prefix = if path.starts_with('/') { "/" } else { "" };
+    let prefix = if absolute { "/" } else { "" };
     format!("{prefix}{}", components.join("/"))
 }
 
