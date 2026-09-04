@@ -427,6 +427,28 @@ fn is_state_database(path: &Path) -> bool {
     })
 }
 
+pub(crate) fn codex_home_for_source(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    if is_state_database(path) {
+        return path.parent().map(Path::to_path_buf);
+    }
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        if directory.file_name().is_some_and(|name| {
+            matches!(
+                name.to_string_lossy().as_ref(),
+                "sessions" | "archived_sessions"
+            )
+        }) {
+            return directory.parent().map(Path::to_path_buf);
+        }
+        current = directory.parent();
+    }
+    None
+}
+
 fn canonical_path_within_root(
     path: &Path,
     root: &Path,

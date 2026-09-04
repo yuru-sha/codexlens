@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use crate::discovery::{DiscoveredInput, InputKind, ReaderKind};
+use crate::discovery::{DiscoveredInput, InputKind, ReaderKind, codex_home_for_source};
 use crate::instructions::{
     InstructionCaptureOptions, InstructionResolver, join_sessions, snapshot_entries,
     snapshot_from_resolution,
@@ -1646,31 +1646,6 @@ fn resolver_for_source(path: &Path) -> InstructionResolver {
 
 fn resolver_for_inputs(inputs: &[DiscoveredInput]) -> InstructionResolver {
     capture_options_for_inputs(inputs).resolver()
-}
-
-fn codex_home_for_source(path: &Path) -> Option<PathBuf> {
-    if !path.is_absolute() {
-        return None;
-    }
-    if path.file_name().is_some_and(|name| {
-        let name = name.to_string_lossy();
-        name.starts_with("state_") && name.ends_with(".sqlite")
-    }) {
-        return path.parent().map(Path::to_path_buf);
-    }
-    let mut current = path.parent();
-    while let Some(directory) = current {
-        if directory.file_name().is_some_and(|name| {
-            matches!(
-                name.to_string_lossy().as_ref(),
-                "sessions" | "archived_sessions"
-            )
-        }) {
-            return directory.parent().map(Path::to_path_buf);
-        }
-        current = directory.parent();
-    }
-    None
 }
 
 fn canonical_identity(path: &Path) -> Result<PathBuf> {

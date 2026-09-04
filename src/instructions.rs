@@ -536,6 +536,9 @@ fn read_candidate(
             return unreadable("instruction file is not valid UTF-8".to_owned(), byte_count);
         }
     };
+    if content.trim().is_empty() {
+        return base(InstructionFileState::Empty, None, None, byte_count, None);
+    }
     let hash = content_hash(&bytes);
     base(
         if truncated {
@@ -872,7 +875,7 @@ mod tests {
         let temp = TempDir::new();
         let root = temp.0.join("project");
         fs::create_dir_all(&root).unwrap();
-        write(&root.join("AGENTS.override.md"), "");
+        write(&root.join("AGENTS.override.md"), " \n\t");
         write(&root.join("AGENTS.md"), "123456");
         let resolver = InstructionResolver::new(
             None,
