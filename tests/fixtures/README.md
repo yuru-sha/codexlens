@@ -1,6 +1,6 @@
 # Synthetic session fixtures
 
-These fixtures are the only session data committed to the repository.
+These fixtures are the only synthetic input data committed to the repository.
 
 Rules:
 
@@ -16,3 +16,8 @@ Rules:
 
 `rollout/basic.jsonl` is the smallest representative rollout. It includes an
 unknown record to ensure forward compatibility is tested from the beginning.
+
+`discovery/` contains path-only fixtures for input discovery tests. Tests copy
+it into temporary directories before removing inputs or adding symlinks. The
+`.jsonl.zst` file only verifies reader selection in this phase and is not
+decompressed here.
