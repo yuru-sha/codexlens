@@ -3,8 +3,8 @@
 Analyze Codex sessions and turn recurring friction into actionable
 `AGENTS.md` improvements.
 
-> Early development: the repository currently contains the foundation
-> specification, the Phase 1 ingestion library, and the CLI shape. Lenses and
+> Early development: the repository contains the foundation, Phase 1 ingestion
+> library, and Phase 2 instruction resolver, snapshots, and joins. Lenses and
 > reporting remain tracked in the follow-up issues.
 
 ## Goal

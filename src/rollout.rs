@@ -141,7 +141,16 @@ pub struct ParseDiagnostic {
 pub struct RolloutRecord {
     pub source: SourceLocation,
     pub timestamp: Option<String>,
+    pub instruction_context: Option<RolloutInstructionContext>,
     pub kind: RolloutRecordKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RolloutInstructionContext {
+    pub turn_id: Option<String>,
+    pub cwd: Option<String>,
+    pub project_root: Option<String>,
+    pub instruction_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -315,9 +324,13 @@ fn classify_record(source: SourceLocation, raw: Value) -> RolloutRecord {
         };
 
     if let Some(record_type) = known_type.filter(|_| nested_is_known) {
+        let instruction_context = (record_type == KnownRecordType::TurnContext)
+            .then(|| parse_instruction_context(envelope.payload.as_ref()))
+            .flatten();
         RolloutRecord {
             source,
             timestamp,
+            instruction_context,
             kind: RolloutRecordKind::Known {
                 record_type,
                 nested_type,
@@ -339,6 +352,7 @@ fn unknown_record(
     RolloutRecord {
         source: source.clone(),
         timestamp: timestamp.clone(),
+        instruction_context: None,
         kind: RolloutRecordKind::Unknown(UnknownRecord {
             source,
             timestamp,
@@ -347,6 +361,25 @@ fn unknown_record(
             raw,
         }),
     }
+}
+
+fn parse_instruction_context(payload: Option<&Value>) -> Option<RolloutInstructionContext> {
+    let object = payload?.as_object()?;
+    Some(RolloutInstructionContext {
+        turn_id: object
+            .get("turn_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        cwd: object.get("cwd").and_then(Value::as_str).map(str::to_owned),
+        project_root: ["project", "project_root", "project_path"]
+            .iter()
+            .find_map(|key| object.get(*key).and_then(Value::as_str))
+            .map(str::to_owned),
+        instruction_text: object
+            .get("user_instructions")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
 }
 
 fn known_record_type(record_type: &str) -> Option<KnownRecordType> {
@@ -548,6 +581,13 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(
+            result.records[1]
+                .instruction_context
+                .as_ref()
+                .and_then(|context| context.instruction_text.as_deref()),
+            Some("# AGENTS.md instructions for /fixture/project\nRun cargo test.")
+        );
         let unknown = match &result.records[8].kind {
             RolloutRecordKind::Unknown(unknown) => unknown,
             other => panic!("expected unknown record, got {other:?}"),

@@ -48,6 +48,9 @@ measured need.
 ## Fixtures and privacy
 
 - Tests use only synthetic data under `tests/fixtures/`.
+- Tests for content that must not be committed to fixtures may construct a
+  bounded synthetic value in memory; keep the surrounding fixture data under
+  `tests/fixtures/` when practical.
 - Never commit real rollout files, prompts, tool output, tokens, credentials,
   private repository paths, or personal identifiers.
 - Issue and PR examples must be synthetic and bounded.
