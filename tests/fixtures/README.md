@@ -26,8 +26,8 @@ tests. `store/` contains synthetic rollout input and a version-one schema.
 `rollout/defensive.jsonl` covers optional envelope fields, unknown nested
 events, and a malformed line.
 
-`rollout/instructions.jsonl` covers repeated observed instruction payloads for
-snapshot deduplication tests.
+Observed-instruction snapshot tests generate bounded synthetic text in memory,
+so instruction content is not stored in repository fixtures.
 
 `discovery/` contains path-only fixtures for input discovery tests. Tests copy
 it into temporary directories before removing inputs or adding symlinks. The

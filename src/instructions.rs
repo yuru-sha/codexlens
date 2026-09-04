@@ -296,20 +296,30 @@ pub fn snapshot_from_resolution(
     resolution: &InstructionResolution,
     provenance: SourceRef,
 ) -> InstructionSnapshot {
-    let Some(content) = resolution.effective_content.as_deref() else {
+    if resolution.files.is_empty() {
         return unavailable_snapshot(session_id, turn_id, provenance);
+    }
+    let content = resolution.effective_content.clone().unwrap_or_default();
+    let chain = if resolution.chain.is_empty() {
+        snapshot_entries(&resolution.files)
+    } else {
+        snapshot_entries(&resolution.chain)
     };
-    let chain = snapshot_entries(&resolution.chain);
+    let content_hash = content_hash(content.as_bytes());
+    let byte_count = content.len();
     InstructionSnapshot {
         session_id,
         turn_id,
         source: InstructionSnapshotSource::FilesystemAtIngest,
         accuracy: InstructionSnapshotAccuracy::Reconstructed,
-        content: Some(content.to_owned()),
-        content_hash: Some(content_hash(content.as_bytes())),
-        byte_count: content.len(),
+        content: Some(content),
+        content_hash: Some(content_hash.clone()),
+        byte_count,
         chain,
-        effective_chain_hash: resolution.effective_chain_hash.clone(),
+        effective_chain_hash: resolution
+            .effective_chain_hash
+            .clone()
+            .or(Some(content_hash)),
         truncated: resolution.truncated,
         provenance,
     }
@@ -908,5 +918,40 @@ mod tests {
             InstructionSnapshotAccuracy::Unavailable
         );
         assert!(unavailable.content_hash.is_none());
+    }
+
+    #[test]
+    fn empty_filesystem_resolution_is_reconstructed() {
+        let temp = TempDir::new();
+        let root = temp.0.join("project");
+        fs::create_dir_all(&root).unwrap();
+        let resolver = InstructionResolver::default();
+        let resolution = resolver.resolve(Some(&root), Some(&root));
+
+        let snapshot = snapshot_from_resolution(
+            Some("session".to_owned()),
+            Some("turn".to_owned()),
+            &resolution,
+            SourceRef::rollout(PathBuf::from("rollout.jsonl"), 1),
+        );
+
+        assert_eq!(
+            snapshot.source,
+            InstructionSnapshotSource::FilesystemAtIngest
+        );
+        assert_eq!(
+            snapshot.accuracy,
+            InstructionSnapshotAccuracy::Reconstructed
+        );
+        assert_eq!(snapshot.content.as_deref(), Some(""));
+        assert_eq!(snapshot.byte_count, 0);
+        assert!(snapshot.content_hash.is_some());
+        assert!(!snapshot.chain.is_empty());
+        assert!(
+            snapshot
+                .chain
+                .iter()
+                .all(|entry| entry.state == InstructionFileState::Missing)
+        );
     }
 }

@@ -1097,11 +1097,14 @@ mod tests {
 
     #[test]
     fn captures_observed_instruction_payloads_without_claiming_filesystem_history() {
+        let instruction_text = "synthetic observed instruction";
+        let input = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-instruction-session\",\"cwd\":\"/fixture/project\",\"project\":\"/fixture\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-instruction-turn-001\",\"cwd\":\"/fixture/project\",\"user_instructions\":\"{}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-instruction-turn-002\",\"cwd\":\"/fixture/project\",\"user_instructions\":\"{}\"}}}}\n",
+            instruction_text, instruction_text
+        );
         let parsed = parse_rollout_reader(
             Path::new("fixture.jsonl"),
-            PlainJsonlReader::new(Cursor::new(include_bytes!(
-                "../tests/fixtures/rollout/instructions.jsonl"
-            ))),
+            PlainJsonlReader::new(Cursor::new(input.as_bytes())),
         );
         let data = normalize_rollout_with_instructions(
             &parsed,

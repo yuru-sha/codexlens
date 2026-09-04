@@ -1753,7 +1753,12 @@ mod tests {
     #[test]
     fn instruction_snapshots_keep_turns_and_deduplicate_blobs() {
         let source = temp_path("instructions.jsonl");
-        copy_fixture("rollout", "instructions.jsonl", &source);
+        let instruction_text = "synthetic observed instruction";
+        let rollout = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-instruction-session\",\"cwd\":\"/fixture/project\",\"project\":\"/fixture\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-instruction-turn-001\",\"cwd\":\"/fixture/project\",\"user_instructions\":\"{}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-instruction-turn-002\",\"cwd\":\"/fixture/project\",\"user_instructions\":\"{}\"}}}}\n",
+            instruction_text, instruction_text
+        );
+        fs::write(&source, rollout).unwrap();
         let mut store = Store::in_memory().unwrap();
 
         store
@@ -1797,7 +1802,7 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.0, "rollout");
         assert_eq!(snapshot.1, "observed");
-        assert_eq!(snapshot.3, 37);
+        assert_eq!(snapshot.3, i64::try_from(instruction_text.len()).unwrap());
         assert_eq!(snapshot.2, snapshot.4);
         assert!(snapshot.5.contains("Observed"));
         let _ = fs::remove_file(source);
