@@ -296,6 +296,9 @@ fn extract_file_operations(data: &mut CanonicalData) {
     let calls = data.tool_calls.clone();
     let mut call_operations = HashSet::new();
     for call in &calls {
+        if call_is_failed(call) || call_has_failed_result(&data.tool_results, call) {
+            continue;
+        }
         let command = call
             .command
             .as_deref()
@@ -322,7 +325,6 @@ fn extract_file_operations(data: &mut CanonicalData) {
             };
             if call_operations.insert((
                 session_id.clone(),
-                operation.turn_id.clone(),
                 call_id.clone(),
                 operation.path.clone(),
                 operation.operation.clone(),
@@ -332,21 +334,22 @@ fn extract_file_operations(data: &mut CanonicalData) {
         }
     }
     for result in &data.tool_results {
-        if result.is_duplicate {
+        if result.is_duplicate || result_is_failed(result) {
             continue;
         }
         let command = result.command.as_deref().unwrap_or_default();
         let timestamp = record_timestamp(data, &result.provenance);
-        let tool_name = result
-            .call_id
-            .as_ref()
-            .and_then(|call_id| {
-                calls.iter().find(|call| {
-                    call.call_id.as_ref() == Some(call_id)
-                        && context_matches(call.session_id.as_deref(), result.session_id.as_deref())
-                        && context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
-                })
+        let matched_call = result.call_id.as_ref().and_then(|call_id| {
+            calls.iter().find(|call| {
+                call.call_id.as_ref() == Some(call_id)
+                    && context_matches(call.session_id.as_deref(), result.session_id.as_deref())
+                    && context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
             })
+        });
+        if matched_call.is_some_and(call_is_failed) {
+            continue;
+        }
+        let tool_name = matched_call
             .and_then(|call| call.tool_name.as_deref())
             .unwrap_or_default();
         let mut extracted = Vec::new();
@@ -369,7 +372,6 @@ fn extract_file_operations(data: &mut CanonicalData) {
             };
             if call_operations.insert((
                 session_id.clone(),
-                operation.turn_id.clone(),
                 call_id.clone(),
                 operation.path.clone(),
                 operation.operation.clone(),
@@ -437,8 +439,9 @@ fn append_observed_file_operations(
         }
     }
     if observed.is_empty() && explicit_tool {
-        if let Some(path) =
-            json_string_field(command, &["path", "file_path", "filename"]).or_else(|| {
+        if let Some(path) = json_string_field(command, &["path", "file_path", "filename"])
+            .filter(|path| likely_file_path(path))
+            .or_else(|| {
                 let path = command.trim();
                 likely_file_path(path).then(|| path.to_owned())
             })
@@ -490,7 +493,11 @@ fn append_observed_file_operations(
 }
 
 fn likely_file_path(path: &str) -> bool {
-    !path.is_empty() && !path.contains(['\n', '\r']) && !path.starts_with(['{', '['])
+    let path = path.trim();
+    !path.is_empty()
+        && !path.contains(['\n', '\r'])
+        && !path.starts_with(['{', '['])
+        && (!path.chars().any(char::is_whitespace) || path.starts_with(['/', '.', '~']))
 }
 
 fn canonical_command_value(value: &Value) -> String {
@@ -853,6 +860,7 @@ fn tool_call_from_payload(
             .get("input")
             .or_else(|| payload.get("arguments"))
             .or_else(|| payload.get("query"))
+            .or_else(|| payload.get("patch"))
             .or_else(|| payload.get("command"))
             .or_else(|| payload.get("path"))
             .or_else(|| payload.get("file_path"))
@@ -873,8 +881,12 @@ fn tool_call_from_event(
     provenance: SourceRef,
 ) -> ToolCall {
     let mut call = tool_call_from_payload(payload, nested_type, session_id, turn_id, provenance);
-    if call.tool_name.is_none() && nested_type == Some("exec_command_begin") {
-        call.tool_name = Some("exec_command".to_owned());
+    if call.tool_name.is_none() {
+        call.tool_name = match nested_type {
+            Some("exec_command_begin") => Some("exec_command".to_owned()),
+            Some("patch_apply_begin") => Some("apply_patch".to_owned()),
+            _ => None,
+        };
     }
     call
 }
@@ -908,6 +920,7 @@ fn tool_result_from_payload(
         turn_id,
         command: payload
             .get("command")
+            .or_else(|| payload.get("patch"))
             .or_else(|| payload.get("path"))
             .or_else(|| payload.get("file_path"))
             .or_else(|| payload.get("filename"))
@@ -975,6 +988,27 @@ fn context_matches(left: Option<&str>, right: Option<&str>) -> bool {
         (Some(left), Some(right)) => left == right,
         _ => true,
     }
+}
+
+fn call_is_failed(call: &ToolCall) -> bool {
+    call.status.as_deref().and_then(status_outcome) == Some(ToolOutcome::Failed)
+}
+
+fn result_is_failed(result: &ToolResult) -> bool {
+    result.exit_code.is_some_and(|code| code != 0)
+        || result.outcome == ToolOutcome::Failed
+        || result.status.as_deref().and_then(status_outcome) == Some(ToolOutcome::Failed)
+}
+
+fn call_has_failed_result(results: &[ToolResult], call: &ToolCall) -> bool {
+    results.iter().any(|result| {
+        !result.is_duplicate
+            && result.call_id == call.call_id
+            && result.call_id.is_some()
+            && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
+            && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
+            && result_is_failed(result)
+    })
 }
 
 fn mark_duplicate_tool_results(results: &mut [ToolResult]) {
@@ -1271,11 +1305,17 @@ fn is_tool_result_type(kind: Option<&str>) -> bool {
 }
 
 fn is_event_tool_call_type(kind: Option<&str>) -> bool {
-    matches!(kind, Some("exec_command_begin" | "mcp_tool_call_begin"))
+    matches!(
+        kind,
+        Some("exec_command_begin" | "mcp_tool_call_begin" | "patch_apply_begin")
+    )
 }
 
 fn is_event_tool_result_type(kind: Option<&str>) -> bool {
-    matches!(kind, Some("exec_command_end" | "mcp_tool_call_end"))
+    matches!(
+        kind,
+        Some("exec_command_end" | "mcp_tool_call_end" | "patch_apply_end")
+    )
 }
 
 fn is_lifecycle_type(kind: Option<&str>) -> bool {
@@ -1292,7 +1332,7 @@ fn is_error_nested_type(kind: Option<&str>) -> bool {
 fn is_terminal_nested_type(kind: Option<&str>) -> bool {
     matches!(
         kind,
-        Some("turn_complete" | "turn_aborted" | "task_complete")
+        Some("turn_complete" | "turn_aborted" | "task_complete" | "shutdown_complete")
     )
 }
 
@@ -1483,6 +1523,54 @@ mod tests {
 
         assert_eq!(data.file_operations.len(), 1);
         assert_eq!(data.file_operations[0].path, "src/lib.rs");
+    }
+
+    #[test]
+    fn patch_events_are_canonicalized_once_and_failed_edits_are_ignored() {
+        let mut data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-patch-session","cwd":"/fixture/project","project":"/fixture/project"}}
+{"type":"turn_context","payload":{"turn_id":"fixture-patch-turn","cwd":"/fixture/project"}}
+{"type":"event_msg","payload":{"type":"patch_apply_begin","call_id":"fixture-patch-call","patch":"*** Update File: src/lib.rs\n@@\n-old\n+new\n"}}
+{"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"fixture-patch-call","patch":"*** Update File: src/lib.rs\n@@\n-old\n+new\n","status":"completed"}}"#,
+        );
+
+        assert_eq!(data.tool_calls.len(), 1);
+        assert_eq!(data.tool_results.len(), 1);
+        assert_eq!(data.file_operations.len(), 1);
+
+        data.tool_calls[0].turn_id = None;
+        data.file_operations.clear();
+        extract_file_operations(&mut data);
+        assert_eq!(data.file_operations.len(), 1);
+
+        let failed = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-failed-patch-session","cwd":"/fixture/project"}}
+{"type":"turn_context","payload":{"turn_id":"fixture-failed-patch-turn","cwd":"/fixture/project"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-failed-patch-call","name":"apply_patch","input":{"patch":"*** Update File: src/lib.rs\n@@\n-old\n+new\n"}}}
+{"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"fixture-failed-patch-call","patch":"*** Update File: src/lib.rs\n@@\n-old\n+new\n","exit_code":1,"status":"failed"}}"#,
+        );
+        assert!(failed.file_operations.is_empty());
+    }
+
+    #[test]
+    fn path_only_payloads_do_not_treat_natural_language_as_a_file() {
+        let data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-path-session","cwd":"/fixture/project"}}
+{"type":"turn_context","payload":{"turn_id":"fixture-path-turn","cwd":"/fixture/project"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-path-call","name":"edit_file","input":{"path":"Please edit src/lib.rs"}}}"#,
+        );
+
+        assert!(data.file_operations.is_empty());
+    }
+
+    #[test]
+    fn shutdown_complete_is_a_terminal_record() {
+        let data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-shutdown-session"}}
+{"type":"event_msg","payload":{"type":"shutdown_complete"}}"#,
+        );
+
+        assert!(data.records.last().is_some_and(|record| record.is_terminal));
     }
 
     #[test]
