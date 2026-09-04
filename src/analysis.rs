@@ -1762,17 +1762,19 @@ fn snapshot_for_evidence<'a>(
     snapshots.find(|snapshot| snapshot.turn_id.as_deref() == Some(turn_id))
 }
 
+type InstructionSnapshotEvidence<'a> = (SourceRef, &'a InstructionSnapshot);
+
 fn snapshots_for_finding<'a>(
     data: &'a CanonicalData,
     finding: &Finding,
 ) -> (
-    BTreeMap<String, Vec<&'a InstructionSnapshot>>,
+    BTreeMap<String, Vec<InstructionSnapshotEvidence<'a>>>,
     BTreeSet<String>,
 ) {
     let mut selected = BTreeMap::new();
     let mut missing_sessions = BTreeSet::new();
     for session_id in evidence_sessions(finding) {
-        let mut snapshots = Vec::new();
+        let mut snapshots: Vec<InstructionSnapshotEvidence<'a>> = Vec::new();
         for evidence in finding
             .evidence
             .iter()
@@ -1784,9 +1786,9 @@ fn snapshots_for_finding<'a>(
             };
             if !snapshots
                 .iter()
-                .any(|existing: &&InstructionSnapshot| existing.provenance == snapshot.provenance)
+                .any(|(_, existing)| existing.provenance == snapshot.provenance)
             {
-                snapshots.push(snapshot);
+                snapshots.push((evidence.source.clone(), snapshot));
             }
         }
         if snapshots.is_empty() {
@@ -1820,17 +1822,17 @@ fn instruction_join_findings(
         let available_snapshots = snapshots_by_session
             .values()
             .flatten()
-            .copied()
+            .map(|(source, snapshot)| (source.clone(), *snapshot))
             .collect::<Vec<_>>();
-        let historical_match = available_snapshots.iter().any(|snapshot| {
-            guidance_matches(finding, snapshot.content.as_deref().unwrap_or_default())
+        let historical_mismatch = available_snapshots.iter().any(|(_, snapshot)| {
+            !guidance_matches(finding, snapshot.content.as_deref().unwrap_or_default())
         });
-        if !available_snapshots.is_empty() && missing_sessions.is_empty() && !historical_match {
+        if !available_snapshots.is_empty() && missing_sessions.is_empty() && historical_mismatch {
             let mut evidence = reserve_evidence_slots(
                 &finding.evidence,
                 available_snapshots.len().min(DEFAULT_MAX_EVIDENCE),
             );
-            for snapshot in &available_snapshots {
+            for (_, snapshot) in &available_snapshots {
                 push_evidence(
                     &mut evidence,
                     evidence_for(
@@ -1889,7 +1891,7 @@ fn instruction_join_findings(
             };
             if current_instruction_is_usable(join) && !missing_sessions.contains(session_id) {
                 if let Some(snapshots) = snapshots_by_session.get(session_id) {
-                    for snapshot in snapshots {
+                    for (_, snapshot) in snapshots {
                         if let Some((path, old_hash, new_hash)) = stale_file(join, snapshot) {
                             let mut evidence = reserve_evidence_slots(&finding.evidence, 2);
                             push_evidence(
@@ -3749,6 +3751,39 @@ mod tests {
         };
         assert!(snapshot_for_evidence(&data, &base.evidence[0]).is_some());
         assert!(snapshot_for_evidence(&data, &base.evidence[1]).is_some());
+
+        let mut matching = data.instruction_snapshots[0].clone();
+        matching.turn_id = Some("fixture-analysis-turn-a-2".to_owned());
+        matching.provenance = SourceRef::rollout(PathBuf::from("fixture-analysis.jsonl"), 6);
+        matching.content = Some(current.clone());
+        matching.content_hash = Some(crate::instructions::content_hash(current.as_bytes()));
+        matching.byte_count = current.len();
+        let mut cross_turn_data = data.clone();
+        cross_turn_data.instruction_snapshots.push(matching);
+        let mut cross_turn = base.clone();
+        cross_turn.evidence = vec![
+            base.evidence[0].clone(),
+            EvidenceRef {
+                session_id: Some("fixture-analysis-session-a".to_owned()),
+                source: SourceRef::rollout(PathBuf::from("fixture-analysis.jsonl"), 6),
+                role: EvidenceRole::Observation,
+                excerpt: None,
+            },
+        ];
+        cross_turn.occurrences = 2;
+        cross_turn.distinct_sessions = 1;
+        let cross_turn_findings = instruction_join_findings(
+            &cross_turn_data,
+            std::slice::from_ref(&cross_turn),
+            &AnalysisOptions::default(),
+        );
+        assert!(
+            cross_turn_findings
+                .iter()
+                .any(|finding| finding.kind == FindingType::Gap),
+            "a matching snapshot from another turn must not hide a mismatch"
+        );
+
         let findings = analyze_instructions(
             &data,
             std::slice::from_ref(&base),
