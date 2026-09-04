@@ -355,11 +355,11 @@ fn walk_rollout_tree(
             continue;
         }
 
-        if metadata.file_type().is_file()
-            && let Some(reader) = reader_kind(&entry_path)
-        {
-            found = true;
-            add_input(&entry_path, root, kind, Some(reader), inputs, diagnostics);
+        if metadata.file_type().is_file() {
+            if let Some(reader) = reader_kind(&entry_path) {
+                found = true;
+                add_input(&entry_path, root, kind, Some(reader), inputs, diagnostics);
+            }
         }
     }
     found
