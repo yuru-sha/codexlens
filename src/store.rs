@@ -8,13 +8,13 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::discovery::{DiscoveredInput, InputKind, ReaderKind};
 use crate::instructions::{
-    InstructionCaptureOptions, InstructionResolver, join_sessions, snapshot_from_resolution,
+    InstructionCaptureOptions, InstructionResolver, join_sessions, snapshot_entries,
+    snapshot_from_resolution,
 };
 use crate::model::{
     CanonicalData, CanonicalDiagnostic, DiagnosticKind, FileOperation, InstructionFile,
-    InstructionJoin, InstructionScope, InstructionSnapshot, InstructionSnapshotEntry, Message,
-    Record, RecordKind, Session, SourceKind, SourceRef, TokenUsage, ToolCall, ToolOutcome,
-    ToolResult, Turn,
+    InstructionJoin, InstructionScope, InstructionSnapshot, Message, Record, RecordKind, Session,
+    SourceKind, SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn,
 };
 use crate::normalize::{normalize_rollout, normalize_rollout_with_instructions};
 use crate::rollout::{ParseDiagnosticKind, RolloutParseOptions, parse_rollout};
@@ -1374,21 +1374,7 @@ fn insert_instruction_join(
         &join.provenance,
         &format!("join:{}", join.session_id),
     );
-    let chain = join
-        .resolution
-        .chain
-        .iter()
-        .enumerate()
-        .map(|(chain_position, file)| InstructionSnapshotEntry {
-            path: file.path.clone(),
-            scope: Some(file.scope),
-            kind: file.kind.clone(),
-            state: file.state,
-            chain_position,
-            content_hash: file.content_hash.clone(),
-            byte_count: file.byte_count,
-        })
-        .collect::<Vec<_>>();
+    let chain = snapshot_entries(&join.resolution.chain);
     let chain_json = serde_json::to_string(&chain)?;
     let diagnostics_json = serde_json::to_string(&join.resolution.diagnostics)?;
     transaction.execute(
@@ -1896,6 +1882,59 @@ mod tests {
         assert_eq!(snapshot.0, "filesystem_at_ingest");
         assert_eq!(snapshot.1, "reconstructed");
         assert!(!snapshot.2.is_empty());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn unchanged_rollout_keeps_snapshot_when_instruction_file_changes() {
+        let root = temp_path("stable-project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("AGENTS.md"), "before").unwrap();
+        let source = temp_path("stable.jsonl");
+        let rollout = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-stable-session\",\"cwd\":\"{}\",\"project\":\"{}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-stable-turn\",\"cwd\":\"{}\"}}}}\n",
+            root.display(),
+            root.display(),
+            root.display(),
+        );
+        fs::write(&source, rollout).unwrap();
+        let mut store = Store::in_memory().unwrap();
+        let capture = InstructionCaptureOptions::default();
+
+        let first = store
+            .ingest_rollout_file_with_instructions(
+                &source,
+                &RolloutParseOptions::default(),
+                &capture,
+            )
+            .unwrap();
+        assert!(!first.skipped);
+        let before: String = store
+            .connection()
+            .query_row("SELECT content FROM instruction_blobs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        fs::write(root.join("AGENTS.md"), "after").unwrap();
+        let second = store
+            .ingest_rollout_file_with_instructions(
+                &source,
+                &RolloutParseOptions::default(),
+                &capture,
+            )
+            .unwrap();
+
+        assert!(second.skipped);
+        let after: String = store
+            .connection()
+            .query_row("SELECT content FROM instruction_blobs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(before, "before");
+        assert_eq!(after, before);
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_file(source);
     }

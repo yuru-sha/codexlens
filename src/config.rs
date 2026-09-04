@@ -97,7 +97,8 @@ pub fn parse_config(path: &Path, content: &str) -> ConfigReadResult {
     let mut seen = BTreeSet::new();
     let mut section = None;
 
-    for (line_index, raw_line) in content.lines().enumerate() {
+    let mut lines = content.lines().enumerate();
+    while let Some((line_index, raw_line)) = lines.next() {
         let line_number = line_index + 1;
         let line = strip_comment(raw_line).trim();
         if line.is_empty() {
@@ -129,7 +130,17 @@ pub fn parse_config(path: &Path, content: &str) -> ConfigReadResult {
             continue;
         }
         let key = line[..equal].trim();
-        let value = line[equal + 1..].trim();
+        let mut value = line[equal + 1..].trim().to_owned();
+        while value.trim_start().starts_with('[') && !array_complete(&value) {
+            let Some((_, next_raw_line)) = lines.next() else {
+                break;
+            };
+            let next_line = strip_comment(next_raw_line).trim();
+            if !next_line.is_empty() {
+                value.push(' ');
+                value.push_str(next_line);
+            }
+        }
         if !matches!(
             key,
             "project_doc_fallback_filenames" | "project_doc_max_bytes"
@@ -147,7 +158,7 @@ pub fn parse_config(path: &Path, content: &str) -> ConfigReadResult {
         }
 
         match key {
-            "project_doc_fallback_filenames" => match parse_string_array(value) {
+            "project_doc_fallback_filenames" => match parse_string_array(&value) {
                 Ok(names) => {
                     let mut valid = Vec::new();
                     for name in names {
@@ -173,7 +184,7 @@ pub fn parse_config(path: &Path, content: &str) -> ConfigReadResult {
                     &message,
                 )),
             },
-            "project_doc_max_bytes" => match parse_positive_integer(value) {
+            "project_doc_max_bytes" => match parse_positive_integer(&value) {
                 Some(max_bytes) => config.project_doc_max_bytes = max_bytes,
                 None => diagnostics.push(diagnostic(
                     path,
@@ -191,6 +202,32 @@ pub fn parse_config(path: &Path, content: &str) -> ConfigReadResult {
         config,
         diagnostics,
     }
+}
+
+fn array_complete(input: &str) -> bool {
+    let mut depth = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    for character in input.chars() {
+        if let Some(active) = quote {
+            if active == '"' && escaped {
+                escaped = false;
+            } else if active == '"' && character == '\\' {
+                escaped = true;
+            } else if character == active {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '[' => depth += 1,
+            ']' if depth > 0 => depth -= 1,
+            ']' => return false,
+            _ => {}
+        }
+    }
+    depth == 0 && quote.is_none()
 }
 
 fn diagnostic(
@@ -367,6 +404,25 @@ mod tests {
             vec!["PROJECT.md", "GUIDE.md"]
         );
         assert_eq!(result.config.project_doc_max_bytes, 64_000);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn parses_multiline_fallback_filename_arrays() {
+        let result = parse_config(
+            Path::new("config.toml"),
+            r#"
+                project_doc_fallback_filenames = [
+                    "PROJECT.md",
+                    'GUIDE.md',
+                ]
+            "#,
+        );
+
+        assert_eq!(
+            result.config.project_doc_fallback_filenames,
+            vec!["PROJECT.md", "GUIDE.md"]
+        );
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     }
 

@@ -454,8 +454,10 @@ impl ProjectRootStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstructionDiagnosticKind {
+    Config,
     GlobalScopeUnavailable,
     MissingProjectRoot,
+    MissingCwd,
     ProjectRootNotDirectory,
     CwdOutsideProjectRoot,
     RelativePath,
@@ -466,8 +468,10 @@ pub enum InstructionDiagnosticKind {
 impl InstructionDiagnosticKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Config => "config",
             Self::GlobalScopeUnavailable => "global_scope_unavailable",
             Self::MissingProjectRoot => "missing_project_root",
+            Self::MissingCwd => "missing_cwd",
             Self::ProjectRootNotDirectory => "project_root_not_directory",
             Self::CwdOutsideProjectRoot => "cwd_outside_project_root",
             Self::RelativePath => "relative_path",

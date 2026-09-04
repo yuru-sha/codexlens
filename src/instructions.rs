@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use crate::config::{ConfigReadResult, InstructionConfig, load_config_at};
+use crate::config::{ConfigDiagnostic, ConfigReadResult, InstructionConfig, load_config_at};
 use crate::model::{
     InstructionDiagnostic, InstructionDiagnosticKind, InstructionFile, InstructionFileKind,
     InstructionFileState, InstructionJoin, InstructionResolution, InstructionScope,
@@ -14,6 +14,7 @@ use crate::model::{
 pub struct InstructionCaptureOptions {
     pub codex_home: Option<PathBuf>,
     pub config: InstructionConfig,
+    config_diagnostics: Vec<ConfigDiagnostic>,
 }
 
 impl InstructionCaptureOptions {
@@ -26,13 +27,16 @@ impl InstructionCaptureOptions {
             Self {
                 codex_home: Some(codex_home.to_path_buf()),
                 config: loaded.config.clone(),
+                config_diagnostics: loaded.diagnostics.clone(),
             },
             loaded,
         )
     }
 
     pub fn resolver(&self) -> InstructionResolver {
-        InstructionResolver::new(self.codex_home.clone(), self.config.clone())
+        let mut resolver = InstructionResolver::new(self.codex_home.clone(), self.config.clone());
+        resolver.config_diagnostics = self.config_diagnostics.clone();
+        resolver
     }
 }
 
@@ -40,6 +44,7 @@ impl InstructionCaptureOptions {
 pub struct InstructionResolver {
     codex_home: Option<PathBuf>,
     config: InstructionConfig,
+    config_diagnostics: Vec<ConfigDiagnostic>,
 }
 
 impl Default for InstructionResolver {
@@ -50,7 +55,11 @@ impl Default for InstructionResolver {
 
 impl InstructionResolver {
     pub fn new(codex_home: Option<PathBuf>, config: InstructionConfig) -> Self {
-        Self { codex_home, config }
+        Self {
+            codex_home,
+            config,
+            config_diagnostics: Vec::new(),
+        }
     }
 
     pub fn config(&self) -> &InstructionConfig {
@@ -75,6 +84,22 @@ impl InstructionResolver {
         let mut chain = Vec::new();
         let mut diagnostics = Vec::new();
         let max_bytes = self.config.project_doc_max_bytes.max(1);
+
+        for diagnostic in &self.config_diagnostics {
+            let line = diagnostic
+                .line
+                .map_or_else(String::new, |line| format!("line {line}: "));
+            diagnostics.push(InstructionDiagnostic {
+                path: Some(diagnostic.path.clone()),
+                kind: InstructionDiagnosticKind::Config,
+                message: bounded_message(&format!(
+                    "{}{}: {}",
+                    diagnostic.kind.as_str(),
+                    line,
+                    diagnostic.message
+                )),
+            });
+        }
 
         if let Some(codex_home) = self.codex_home.as_deref() {
             if codex_home.is_absolute() {
@@ -249,17 +274,8 @@ pub fn snapshot_from_rollout(
     }
 }
 
-pub fn snapshot_from_resolution(
-    session_id: Option<String>,
-    turn_id: Option<String>,
-    resolution: &InstructionResolution,
-    provenance: SourceRef,
-) -> InstructionSnapshot {
-    let Some(content) = resolution.effective_content.as_deref() else {
-        return unavailable_snapshot(session_id, turn_id, provenance);
-    };
-    let chain = resolution
-        .chain
+pub(crate) fn snapshot_entries(files: &[InstructionFile]) -> Vec<InstructionSnapshotEntry> {
+    files
         .iter()
         .enumerate()
         .map(|(chain_position, file)| InstructionSnapshotEntry {
@@ -271,7 +287,19 @@ pub fn snapshot_from_resolution(
             content_hash: file.content_hash.clone(),
             byte_count: file.byte_count,
         })
-        .collect();
+        .collect()
+}
+
+pub fn snapshot_from_resolution(
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    resolution: &InstructionResolution,
+    provenance: SourceRef,
+) -> InstructionSnapshot {
+    let Some(content) = resolution.effective_content.as_deref() else {
+        return unavailable_snapshot(session_id, turn_id, provenance);
+    };
+    let chain = snapshot_entries(&resolution.chain);
     InstructionSnapshot {
         session_id,
         turn_id,
@@ -551,6 +579,9 @@ fn project_root(
             });
             return (None, ProjectRootStatus::Unavailable);
         }
+        if !validate_cwd(cwd, diagnostics) {
+            return (None, ProjectRootStatus::Unavailable);
+        }
         let Some(root) = discover_project_root(cwd) else {
             return (None, ProjectRootStatus::Unavailable);
         };
@@ -566,6 +597,9 @@ fn project_root(
             });
             return (Some(root), ProjectRootStatus::Conflict);
         }
+        if !validate_cwd(cwd, diagnostics) {
+            return (Some(root), ProjectRootStatus::Conflict);
+        }
         if !cwd.starts_with(&root) {
             diagnostics.push(InstructionDiagnostic {
                 path: Some(cwd.to_path_buf()),
@@ -576,6 +610,28 @@ fn project_root(
         }
     }
     (Some(root), ProjectRootStatus::Known)
+}
+
+fn validate_cwd(cwd: &Path, diagnostics: &mut Vec<InstructionDiagnostic>) -> bool {
+    match fs::metadata(cwd) {
+        Ok(metadata) if metadata.is_dir() => true,
+        Ok(_) => {
+            diagnostics.push(InstructionDiagnostic {
+                path: Some(cwd.to_path_buf()),
+                kind: InstructionDiagnosticKind::MissingCwd,
+                message: "cwd is not a directory".to_owned(),
+            });
+            false
+        }
+        Err(error) => {
+            diagnostics.push(InstructionDiagnostic {
+                path: Some(cwd.to_path_buf()),
+                kind: InstructionDiagnosticKind::MissingCwd,
+                message: bounded_message(&error.to_string()),
+            });
+            false
+        }
+    }
 }
 
 fn discover_project_root(cwd: &Path) -> Option<PathBuf> {
@@ -798,6 +854,36 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.kind
                     == InstructionDiagnosticKind::CwdOutsideProjectRoot)
+        );
+
+        let missing_cwd = resolver.resolve(Some(&root), Some(&root.join("missing")));
+        assert_eq!(missing_cwd.project_root_status, ProjectRootStatus::Conflict);
+        assert!(
+            missing_cwd
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.kind == InstructionDiagnosticKind::MissingCwd)
+        );
+    }
+
+    #[test]
+    fn configured_diagnostics_are_kept_in_resolution() {
+        let temp = TempDir::new();
+        let home = temp.0.join("codex");
+        let root = temp.0.join("project");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        write(&home.join("config.toml"), "project_doc_max_bytes = 0");
+
+        let (capture, loaded) = InstructionCaptureOptions::from_codex_home(&home, None);
+        assert_eq!(loaded.diagnostics.len(), 1);
+        let result = capture.resolver().resolve(Some(&root), Some(&root));
+
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.kind == InstructionDiagnosticKind::Config)
         );
     }
 
