@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use crate::model::{
     CanonicalData, InstructionFile, InstructionFileState, InstructionJoin, InstructionScope,
-    InstructionSnapshot, Message, MessageRole, ProjectRootStatus, SourceRef, ToolCall, ToolOutcome,
-    ToolResult, normalize_path,
+    InstructionSnapshot, Message, MessageRole, OutcomeSource, ProjectRootStatus, SourceRef,
+    ToolCall, ToolOutcome, ToolResult, normalize_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +41,6 @@ pub const DISCOVERY_MARKERS: &[&str] = &[
     "this repo uses ",
     "this repository uses ",
     "the project uses ",
-    "the repository uses ",
     "this project requires ",
     "the project requires ",
     "remember that ",
@@ -978,8 +977,7 @@ fn failure_events(data: &CanonicalData) -> Vec<FailureEvent> {
             tool,
             family,
             category,
-            structured: result.exit_code.is_some_and(|code| code != 0)
-                || result.outcome == ToolOutcome::Failed,
+            structured: result_is_structured_failure(result),
             description,
             position: position_for_source(data, &result.provenance, None),
             source: result.provenance.clone(),
@@ -1029,7 +1027,18 @@ fn failure_activities(data: &CanonicalData) -> Vec<Activity> {
 }
 
 fn result_is_failed(result: &ToolResult) -> bool {
-    result.exit_code.is_some_and(|code| code != 0) || result.outcome == ToolOutcome::Failed
+    if let Some(code) = result.exit_code {
+        return code != 0;
+    }
+    result.outcome == ToolOutcome::Failed || result.status.as_deref().is_some_and(status_is_failed)
+}
+
+fn result_is_structured_failure(result: &ToolResult) -> bool {
+    matches!(
+        result.outcome_source,
+        OutcomeSource::ExitCode | OutcomeSource::Status
+    ) || result.exit_code.is_some()
+        || result.status.as_deref().is_some_and(status_is_failed)
 }
 
 fn status_is_failed(status: &str) -> bool {
@@ -1105,7 +1114,8 @@ fn matching_call<'a>(data: &'a CanonicalData, result: &ToolResult) -> Option<&'a
 fn context_matches(left: Option<&str>, right: Option<&str>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => left == right,
-        _ => true,
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -1273,7 +1283,16 @@ fn normalize_fact_token(value: &str) -> String {
 fn bounded_fingerprint(value: &str) -> String {
     let redacted = redact_sensitive(value);
     let normalized = normalize_fact(&redacted);
-    truncate_bytes(&normalized, MAX_FACT_KEY_BYTES)
+    if normalized.len() <= MAX_FACT_KEY_BYTES {
+        return normalized;
+    }
+    let hash = crate::instructions::content_hash(normalized.as_bytes());
+    let suffix = format!("~{hash}");
+    format!(
+        "{}{}",
+        truncate_bytes(&normalized, MAX_FACT_KEY_BYTES.saturating_sub(suffix.len())),
+        suffix
+    )
 }
 
 fn correction_facts(data: &CanonicalData, options: &AnalysisOptions) -> Vec<FactEvent> {
@@ -1381,7 +1400,7 @@ fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
         let Some(session_id) = call.session_id.clone() else {
             continue;
         };
-        if !call_has_observed_result(data, call) {
+        if call.call_id.is_some() && !call_has_observed_result(data, call) {
             continue;
         }
         let command = call
@@ -1438,6 +1457,12 @@ fn verification_kind(command: &str) -> Option<String> {
         .iter()
         .map(|token| token.to_ascii_lowercase())
         .collect::<Vec<_>>();
+    if lower
+        .iter()
+        .any(|token| matches!(token.as_str(), "--help" | "-h" | "--version" | "-V"))
+    {
+        return None;
+    }
     let first = lower.first()?.as_str();
     let kind = match first {
         "cargo" => lower.get(1).and_then(|value| match value.as_str() {
@@ -1455,10 +1480,10 @@ fn verification_kind(command: &str) -> Option<String> {
             _ => None,
         }),
         "pytest" => Some("test"),
-        "ruff" => Some(if lower.get(1).is_some_and(|value| value == "format") {
-            "format"
-        } else {
-            "lint"
+        "ruff" => lower.get(1).and_then(|value| match value.as_str() {
+            "check" => Some("lint"),
+            "format" => Some("format"),
+            _ => None,
         }),
         "mypy" | "eslint" => Some("lint"),
         "prettier" => Some("format"),
@@ -1648,7 +1673,7 @@ fn turn_is_complete(data: &CanonicalData, session_id: &str, turn_id: Option<&str
     }
     data.records.iter().any(|record| {
         record.session_id.as_deref() == Some(session_id)
-            && turn_id.is_none_or(|id| record.turn_id.as_deref() == Some(id))
+            && context_matches(record.turn_id.as_deref(), turn_id)
             && record.is_terminal
     })
 }
@@ -2592,14 +2617,7 @@ fn normalize_guidance(value: &str) -> String {
 }
 
 fn normalize_guidance_token(value: &str) -> String {
-    let lower = value.to_ascii_lowercase().replace('\\', "/");
-    let path_candidate = lower.trim_end_matches(|character: char| ".,;:!?`\"'".contains(character));
-    if path_candidate.starts_with("./") || path_candidate.starts_with("../") {
-        return normalize_path(path_candidate);
-    }
-    path_candidate
-        .trim_matches(|character: char| "`*_#>-. ,;:!?()[]{}\"'".contains(character))
-        .to_owned()
+    normalize_fact_token(value)
 }
 
 fn looks_volatile(value: &str) -> bool {
@@ -2885,20 +2903,31 @@ fn parse_timestamp(value: &str) -> Option<i64> {
     {
         return None;
     }
-    let suffix = value
-        .get(19..)
-        .unwrap_or_default()
-        .trim_start_matches(|character: char| character == '.' || character.is_ascii_digit());
+    let suffix = value.get(19..).unwrap_or_default();
+    let suffix = if let Some(fraction) = suffix.strip_prefix('.') {
+        let fraction_len = fraction
+            .bytes()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if fraction_len == 0 {
+            return None;
+        }
+        &fraction[fraction_len..]
+    } else {
+        suffix
+    };
     let offset = if suffix.eq_ignore_ascii_case("z") {
         0
-    } else if suffix.len() >= 6 && (suffix.starts_with('+') || suffix.starts_with('-')) {
+    } else if suffix.len() == 6
+        && (suffix.starts_with('+') || suffix.starts_with('-'))
+        && suffix.as_bytes().get(3) == Some(&b':')
+    {
         let sign = if suffix.starts_with('+') { 1 } else { -1 };
         let hours = parse_digits(suffix, 1, 2)?;
-        let minutes = if suffix.as_bytes().get(3) == Some(&b':') {
-            parse_digits(suffix, 4, 2)?
-        } else {
-            parse_digits(suffix, 3, 2)?
-        };
+        let minutes = parse_digits(suffix, 4, 2)?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
         sign * (hours * 3600 + minutes * 60)
     } else {
         return None;
@@ -2937,8 +2966,8 @@ mod tests {
 
     use crate::instructions::snapshot_from_rollout;
     use crate::model::{
-        InstructionFileKind, InstructionFileState, InstructionResolution, OutcomeSource,
-        ProjectRootStatus,
+        FileOperation, InstructionFileKind, InstructionFileState, InstructionResolution,
+        OutcomeSource, ProjectRootStatus, Record, RecordKind,
     };
     use crate::normalize::normalize_rollout;
     use crate::rollout::{PlainJsonlReader, parse_rollout_reader};
@@ -3124,6 +3153,41 @@ mod tests {
         assert!(fingerprint.len() <= MAX_FACT_KEY_BYTES);
         assert!(!fingerprint.contains("first-token"));
         assert!(!fingerprint.contains("second-token"));
+        let common = "fact ".repeat(40);
+        let first = correction_fact(&format!("Use {common}alpha")).unwrap();
+        let second = correction_fact(&format!("Use {common}beta")).unwrap();
+        assert_ne!(first, second);
+        assert!(first.len() <= MAX_FACT_KEY_BYTES);
+        assert!(second.len() <= MAX_FACT_KEY_BYTES);
+        assert_eq!(
+            normalize_guidance(
+                "Use /fixture/project/src/lib.rs fixture-00000000-0000-0000-0000-000000000001"
+            ),
+            normalize_fact(
+                "Use /fixture/project/src/lib.rs fixture-00000000-0000-0000-0000-000000000001"
+            )
+        );
+        let finding = Finding {
+            kind: FindingType::Knowledge,
+            severity: FindingSeverity::Medium,
+            confidence: FindingConfidence::Medium,
+            scope: FindingScope::Global,
+            key: normalize_fact("/fixture/project/src/lib.rs"),
+            summary: String::new(),
+            evidence: Vec::new(),
+            occurrences: 2,
+            distinct_sessions: 2,
+            affected_paths: Vec::new(),
+            observed_commands: Vec::new(),
+            sequence: Vec::new(),
+            suggested_action: String::new(),
+            limitations: Vec::new(),
+            verification_status: None,
+        };
+        assert!(guidance_matches(
+            &finding,
+            "This project uses /fixture/project/src/lib.rs."
+        ));
         assert_eq!(correction_fact("The repo uses cargo test."), None);
         assert_eq!(
             classify_verification_command("env cargo test"),
@@ -3143,6 +3207,14 @@ mod tests {
         );
         assert_eq!(classify_verification_command("custom-test"), None);
         assert_eq!(classify_verification_command("cargo tests"), None);
+        assert_eq!(classify_verification_command("pytest --version"), None);
+        assert_eq!(classify_verification_command("mypy --help"), None);
+        assert_eq!(classify_verification_command("ruff"), None);
+        assert_eq!(classify_verification_command("ruff --help"), None);
+        assert_eq!(
+            classify_verification_command("ruff check src"),
+            Some("lint".to_owned())
+        );
         let excerpt = bounded_excerpt("token=first token=second", 512);
         assert_eq!(excerpt, "token=[redacted] token=[redacted]");
         assert_eq!(
@@ -3245,6 +3317,102 @@ mod tests {
         assert!(findings
             .iter()
             .all(|finding| finding.verification_status == Some(VerificationStatus::NotObserved)));
+    }
+
+    #[test]
+    fn missing_context_does_not_match_another_turn() {
+        let data = CanonicalData {
+            file_operations: vec![FileOperation {
+                session_id: Some("fixture-session".to_owned()),
+                turn_id: None,
+                path: "src/lib.rs".to_owned(),
+                operation: "edit".to_owned(),
+                timestamp: None,
+                provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 1),
+            }],
+            records: vec![Record {
+                session_id: Some("fixture-session".to_owned()),
+                turn_id: Some("other-turn".to_owned()),
+                timestamp: None,
+                sequence: 2,
+                original_record_type: Some("event_msg".to_owned()),
+                original_nested_type: Some("turn_complete".to_owned()),
+                error_category: None,
+                is_error: false,
+                is_terminal: true,
+                kind: RecordKind::EventMessage,
+                provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 2),
+            }],
+            ..CanonicalData::default()
+        };
+        let findings = analyze_verification(&data, &AnalysisOptions::default());
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].verification_status,
+            Some(VerificationStatus::NotObserved)
+        );
+        assert!(!context_matches(None, Some("other-turn")));
+    }
+
+    #[test]
+    fn call_without_id_can_supply_observed_verification() {
+        let data = CanonicalData {
+            tool_calls: vec![ToolCall {
+                id: None,
+                call_id: None,
+                session_id: Some("fixture-session".to_owned()),
+                turn_id: Some("fixture-turn".to_owned()),
+                tool_name: Some("exec_command".to_owned()),
+                input_summary: None,
+                command: Some("cargo test".to_owned()),
+                cwd: None,
+                status: None,
+                provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 1),
+            }],
+            ..CanonicalData::default()
+        };
+        assert_eq!(verification_events(&data).len(), 1);
+    }
+
+    #[test]
+    fn failure_source_controls_confidence_and_status_is_a_fallback() {
+        let mut output_only = fixture_data();
+        for result in &mut output_only.tool_results {
+            result.exit_code = None;
+            result.status = None;
+            result.outcome = ToolOutcome::Failed;
+            result.outcome_source = OutcomeSource::OutputText;
+        }
+        let events = failure_events(&output_only)
+            .into_iter()
+            .filter(|event| event.tool != "event")
+            .collect::<Vec<_>>();
+        assert!(!events.is_empty());
+        assert!(events.iter().all(|event| !event.structured));
+
+        let mut status_only = fixture_data();
+        for result in &mut status_only.tool_results {
+            result.exit_code = None;
+            result.status = Some("failed".to_owned());
+            result.outcome = ToolOutcome::Unknown;
+            result.outcome_source = OutcomeSource::Unknown;
+        }
+        assert!(
+            !failure_events(&status_only)
+                .into_iter()
+                .filter(|event| event.tool != "event")
+                .collect::<Vec<_>>()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn timestamps_require_a_valid_rfc3339_offset() {
+        assert!(parse_timestamp("2026-01-01T00:00:00Z").is_some());
+        assert!(parse_timestamp("2026-01-01T00:00:00.123+09:00").is_some());
+        assert!(parse_timestamp("2026-01-01T00:00:00+0900").is_none());
+        assert!(parse_timestamp("2026-01-01T00:00:00+09:00junk").is_none());
+        assert!(parse_timestamp("2026-01-01T00:00:00+99:99").is_none());
     }
 
     #[test]

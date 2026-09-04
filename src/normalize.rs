@@ -298,7 +298,9 @@ fn extract_file_operations(data: &mut CanonicalData) {
     let calls = data.tool_calls.clone();
     let mut call_operations = HashSet::new();
     for call in &calls {
-        if call_is_failed(call) || call_has_failed_result(&data.tool_results, call) {
+        if call_is_failed(&data.tool_results, call)
+            || call_has_failed_result(&data.tool_results, call)
+        {
             continue;
         }
         let command = call
@@ -352,7 +354,7 @@ fn extract_file_operations(data: &mut CanonicalData) {
                     && context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
             })
         });
-        if matched_call.is_some_and(call_is_failed) {
+        if matched_call.is_some_and(|call| call_is_failed(&data.tool_results, call)) {
             continue;
         }
         let tool_name = matched_call
@@ -1038,17 +1040,38 @@ fn mark_tool_results(calls: &mut [ToolCall], results: &mut [ToolResult]) {
 fn context_matches(left: Option<&str>, right: Option<&str>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => left == right,
-        _ => true,
+        (None, None) => true,
+        _ => false,
     }
 }
 
-fn call_is_failed(call: &ToolCall) -> bool {
+fn call_is_failed(results: &[ToolResult], call: &ToolCall) -> bool {
+    let matched = results
+        .iter()
+        .filter(|result| {
+            !result.is_duplicate
+                && result.call_id == call.call_id
+                && result.call_id.is_some()
+                && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
+                && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
+        })
+        .collect::<Vec<_>>();
+    if matched.iter().any(|result| result.exit_code.is_some()) {
+        return matched
+            .iter()
+            .any(|result| result.exit_code.is_some_and(|code| code != 0));
+    }
+    if matched.iter().any(|result| result.status.is_some()) {
+        return matched.iter().any(|result| result_is_failed(result));
+    }
     call.status.as_deref().and_then(ToolOutcome::from_status) == Some(ToolOutcome::Failed)
 }
 
 fn result_is_failed(result: &ToolResult) -> bool {
-    result.exit_code.is_some_and(|code| code != 0)
-        || result.outcome == ToolOutcome::Failed
+    if let Some(code) = result.exit_code {
+        return code != 0;
+    }
+    result.outcome == ToolOutcome::Failed
         || result.status.as_deref().and_then(ToolOutcome::from_status) == Some(ToolOutcome::Failed)
 }
 
@@ -1128,7 +1151,12 @@ fn equivalent_results(left: &ToolResult, right: &ToolResult) -> bool {
         && right.outcome != ToolOutcome::Unknown
         && left.outcome != right.outcome
     {
-        return false;
+        let one_exit_code = left.exit_code.is_some() ^ right.exit_code.is_some();
+        let output_representation = left.outcome_source == OutcomeSource::OutputText
+            || right.outcome_source == OutcomeSource::OutputText;
+        if !one_exit_code && !output_representation {
+            return false;
+        }
     }
     true
 }
@@ -1529,6 +1557,19 @@ mod tests {
     }
 
     #[test]
+    fn exit_code_takes_precedence_over_a_conflicting_failed_status() {
+        let data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-status-session","cwd":"/fixture/project"}}
+{"type":"turn_context","payload":{"turn_id":"fixture-status-turn","cwd":"/fixture/project"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-status-call","name":"edit_file","status":"failed","input":{"path":"src/lib.rs"}}}
+{"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"fixture-status-call","patch":"*** Update File: src/lib.rs\n@@\n-old\n+new\n","exit_code":0,"status":"failed"}}"#,
+        );
+
+        assert_eq!(data.file_operations.len(), 1);
+        assert_eq!(data.tool_results[0].outcome, ToolOutcome::Succeeded);
+    }
+
+    #[test]
     fn patch_events_are_canonicalized_once_and_failed_edits_are_ignored() {
         let mut data = parse(
             r#"{"type":"session_meta","payload":{"id":"fixture-patch-session","cwd":"/fixture/project","project":"/fixture/project"}}
@@ -1637,7 +1678,7 @@ mod tests {
                 outcome: ToolOutcome::Failed,
                 outcome_source: OutcomeSource::ExitCode,
                 provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 3),
-                ..base
+                ..base.clone()
             },
         ];
 
@@ -1646,6 +1687,27 @@ mod tests {
         assert!(results[0].is_duplicate);
         assert!(!results[1].is_duplicate);
         assert_eq!(results[1].exit_code, Some(1));
+
+        let mut conflicting = vec![
+            ToolResult {
+                stdout: Some("error output".to_owned()),
+                outcome: ToolOutcome::Failed,
+                outcome_source: OutcomeSource::OutputText,
+                provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 4),
+                ..base.clone()
+            },
+            ToolResult {
+                exit_code: Some(0),
+                status: Some("completed".to_owned()),
+                outcome: ToolOutcome::Succeeded,
+                outcome_source: OutcomeSource::ExitCode,
+                provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 5),
+                ..base
+            },
+        ];
+        mark_duplicate_tool_results(&mut conflicting);
+        assert!(conflicting[0].is_duplicate);
+        assert!(!conflicting[1].is_duplicate);
     }
 
     #[test]
