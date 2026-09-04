@@ -298,9 +298,10 @@ fn normalize_records_with_resolver(
 fn extract_file_operations(data: &mut CanonicalData) {
     let calls = data.tool_calls.clone();
     let mut call_operations = HashSet::new();
+    let mut unpaired_no_id_calls = Vec::new();
     for call in &calls {
-        if call_is_failed(&data.tool_results, call)
-            || call_has_failed_result(&data.tool_results, call)
+        if call_is_failed(&data.tool_results, &calls, call)
+            || call_has_failed_result(&data.tool_results, &calls, call)
         {
             continue;
         }
@@ -329,14 +330,22 @@ fn extract_file_operations(data: &mut CanonicalData) {
                 continue;
             };
             let call_identity = call.call_id.clone().unwrap_or_else(|| {
-                format!("missing-call-id:{}", call.turn_id.as_deref().unwrap_or(""))
+                format!(
+                    "missing-call-id:call:{}:{}",
+                    call.provenance.path.display(),
+                    call.provenance.line.unwrap_or_default()
+                )
             });
+            let operation_path = operation_identity_path(&operation.path, cwd.as_deref());
             if call_operations.insert((
                 session_id.clone(),
                 call_identity,
-                operation_identity_path(&operation.path, cwd.as_deref()),
+                operation_path.clone(),
                 operation.operation.clone(),
             )) {
+                if call.call_id.is_none() {
+                    unpaired_no_id_calls.push((operation.clone(), operation_path));
+                }
                 data.file_operations.push(operation);
             }
         }
@@ -347,20 +356,8 @@ fn extract_file_operations(data: &mut CanonicalData) {
         }
         let command = result.command.as_deref().unwrap_or_default();
         let timestamp = record_timestamp(data, &result.provenance);
-        let matched_call = result.call_id.as_ref().and_then(|call_id| {
-            calls.iter().find(|call| {
-                call.call_id.as_ref() == Some(call_id)
-                    && call_result_context_matches(
-                        call.session_id.as_deref(),
-                        result.session_id.as_deref(),
-                    )
-                    && call_result_context_matches(
-                        call.turn_id.as_deref(),
-                        result.turn_id.as_deref(),
-                    )
-            })
-        });
-        if matched_call.is_some_and(|call| call_is_failed(&data.tool_results, call)) {
+        let matched_call = matching_call(&calls, result);
+        if matched_call.is_some_and(|call| call_is_failed(&data.tool_results, &calls, call)) {
             continue;
         }
         let tool_name = matched_call
@@ -392,16 +389,40 @@ fn extract_file_operations(data: &mut CanonicalData) {
             let Some(session_id) = operation.session_id.as_ref() else {
                 continue;
             };
+            let operation_path = operation_identity_path(&operation.path, cwd.as_deref());
+            if result.call_id.is_none() {
+                let matching_call =
+                    unpaired_no_id_calls
+                        .iter()
+                        .position(|(call_operation, call_path)| {
+                            call_operation.session_id == operation.session_id
+                                && call_result_context_matches(
+                                    call_operation.turn_id.as_deref(),
+                                    operation.turn_id.as_deref(),
+                                )
+                                && call_operation.operation == operation.operation
+                                && *call_path == operation_path
+                                && source_precedes(
+                                    &call_operation.provenance,
+                                    &operation.provenance,
+                                )
+                        });
+                if let Some(index) = matching_call {
+                    unpaired_no_id_calls.remove(index);
+                    continue;
+                }
+            }
             let result_identity = result.call_id.clone().unwrap_or_else(|| {
                 format!(
-                    "missing-call-id:{}",
-                    result.turn_id.as_deref().unwrap_or("")
+                    "missing-call-id:result:{}:{}",
+                    result.provenance.path.display(),
+                    result.provenance.line.unwrap_or_default()
                 )
             });
             if call_operations.insert((
                 session_id.clone(),
                 result_identity,
-                operation_identity_path(&operation.path, cwd.as_deref()),
+                operation_path,
                 operation.operation.clone(),
             )) {
                 data.file_operations.push(operation);
@@ -1066,42 +1087,102 @@ fn call_result_context_matches(left: Option<&str>, right: Option<&str>) -> bool 
     }
 }
 
-fn matching_results<'a>(results: &'a [ToolResult], call: &ToolCall) -> Vec<&'a ToolResult> {
-    let mut matched = if let Some(call_id) = call.call_id.as_ref() {
-        results
-            .iter()
-            .filter(|result| {
-                !result.is_duplicate
-                    && result.call_id.as_ref() == Some(call_id)
-                    && call_result_context_matches(
-                        result.session_id.as_deref(),
-                        call.session_id.as_deref(),
-                    )
-                    && call_result_context_matches(
-                        result.turn_id.as_deref(),
-                        call.turn_id.as_deref(),
-                    )
-            })
-            .collect::<Vec<_>>()
-    } else {
-        results
-            .iter()
-            .filter(|result| {
-                !result.is_duplicate
-                    && result.call_id.is_none()
-                    && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
-                    && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
-            })
-            .collect::<Vec<_>>()
-    };
-    if call.call_id.is_none() && matched.len() != 1 {
-        matched.clear();
+fn matching_call<'a>(calls: &'a [ToolCall], result: &ToolResult) -> Option<&'a ToolCall> {
+    let candidates = calls
+        .iter()
+        .filter(|call| {
+            call.call_id == result.call_id
+                && call.call_id.is_some()
+                && call_result_context_matches(
+                    call.session_id.as_deref(),
+                    result.session_id.as_deref(),
+                )
+                && call_result_context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
+        })
+        .collect::<Vec<_>>();
+    let exact = candidates
+        .iter()
+        .copied()
+        .filter(|call| {
+            context_matches(call.session_id.as_deref(), result.session_id.as_deref())
+                && context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
+        })
+        .collect::<Vec<_>>();
+    if let Some(call) = exact.first().copied() {
+        return Some(call);
     }
-    matched
+    (candidates.len() == 1)
+        .then(|| candidates.into_iter().next())
+        .flatten()
 }
 
-fn call_is_failed(results: &[ToolResult], call: &ToolCall) -> bool {
-    let matched = matching_results(results, call);
+fn same_call(left: &ToolCall, right: &ToolCall) -> bool {
+    left.call_id == right.call_id
+        && left.session_id == right.session_id
+        && left.turn_id == right.turn_id
+        && left.provenance == right.provenance
+}
+
+fn source_precedes(left: &SourceRef, right: &SourceRef) -> bool {
+    left.kind == right.kind
+        && left.path == right.path
+        && matches!((left.line, right.line), (Some(left), Some(right)) if left < right)
+}
+
+fn matching_results<'a>(
+    results: &'a [ToolResult],
+    calls: &[ToolCall],
+    call: &ToolCall,
+) -> Vec<&'a ToolResult> {
+    if call.call_id.is_none()
+        && calls
+            .iter()
+            .filter(|candidate| {
+                candidate.call_id.is_none()
+                    && context_matches(candidate.session_id.as_deref(), call.session_id.as_deref())
+                    && context_matches(candidate.turn_id.as_deref(), call.turn_id.as_deref())
+            })
+            .count()
+            != 1
+    {
+        return Vec::new();
+    }
+
+    let candidates = results
+        .iter()
+        .filter(|result| {
+            !result.is_duplicate
+                && result.call_id == call.call_id
+                && call_result_context_matches(
+                    result.session_id.as_deref(),
+                    call.session_id.as_deref(),
+                )
+                && call_result_context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
+                && (call.call_id.is_none()
+                    || matching_call(calls, result)
+                        .is_some_and(|candidate| same_call(candidate, call)))
+        })
+        .collect::<Vec<_>>();
+    let exact = candidates
+        .iter()
+        .copied()
+        .filter(|result| {
+            context_matches(result.session_id.as_deref(), call.session_id.as_deref())
+                && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
+        })
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        return exact;
+    }
+    if candidates.len() == 1 {
+        candidates
+    } else {
+        Vec::new()
+    }
+}
+
+fn call_is_failed(results: &[ToolResult], calls: &[ToolCall], call: &ToolCall) -> bool {
+    let matched = matching_results(results, calls, call);
     if matched.iter().any(|result| result.exit_code.is_some()) {
         return matched
             .iter()
@@ -1121,8 +1202,8 @@ fn result_is_failed(result: &ToolResult) -> bool {
         || result.status.as_deref().and_then(ToolOutcome::from_status) == Some(ToolOutcome::Failed)
 }
 
-fn call_has_failed_result(results: &[ToolResult], call: &ToolCall) -> bool {
-    matching_results(results, call)
+fn call_has_failed_result(results: &[ToolResult], calls: &[ToolCall], call: &ToolCall) -> bool {
+    matching_results(results, calls, call)
         .into_iter()
         .any(result_is_failed)
 }
@@ -1183,10 +1264,20 @@ fn equivalent_results(left: &ToolResult, right: &ToolResult) -> bool {
     if left_call != right_call {
         return false;
     }
-    if !call_result_context_matches(left.session_id.as_deref(), right.session_id.as_deref())
-        || !call_result_context_matches(left.turn_id.as_deref(), right.turn_id.as_deref())
+    if !context_matches(left.session_id.as_deref(), right.session_id.as_deref())
+        || !context_matches(left.turn_id.as_deref(), right.turn_id.as_deref())
     {
         return false;
+    }
+    if left.outcome == ToolOutcome::Unknown && right.outcome == ToolOutcome::Unknown {
+        return left.command == right.command
+            && left.cwd == right.cwd
+            && left.stdout == right.stdout
+            && left.stderr == right.stderr
+            && left.duration_ms == right.duration_ms
+            && left.exit_code == right.exit_code
+            && left.status == right.status
+            && left.outcome_source == right.outcome_source;
     }
     if left.outcome != ToolOutcome::Unknown
         && right.outcome != ToolOutcome::Unknown
@@ -1620,6 +1711,16 @@ mod tests {
         );
         assert_eq!(succeeded.file_operations.len(), 1);
 
+        let separate_operations = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-file-two-session","cwd":"/fixture/project"}}
+{"type":"turn_context","payload":{"turn_id":"fixture-file-two-turn","cwd":"/fixture/project"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"edit_file","input":{"path":"src/lib.rs"}}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"edit_file","input":{"path":"src/lib.rs"}}}
+{"type":"event_msg","payload":{"type":"patch_apply_end","patch":"*** Update File: src/lib.rs\n@@\n-old\n+new\n","exit_code":0,"status":"completed"}}
+{"type":"event_msg","payload":{"type":"patch_apply_end","patch":"*** Update File: src/lib.rs\n@@\n-new\n+newer\n","exit_code":0,"status":"completed"}}"#,
+        );
+        assert_eq!(separate_operations.file_operations.len(), 2);
+
         let failed = parse(
             r#"{"type":"session_meta","payload":{"id":"fixture-no-id-failed-session","cwd":"/fixture/project"}}
 {"type":"turn_context","payload":{"turn_id":"fixture-no-id-failed-turn","cwd":"/fixture/project"}}
@@ -1787,12 +1888,29 @@ mod tests {
                 outcome: ToolOutcome::Succeeded,
                 outcome_source: OutcomeSource::ExitCode,
                 provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 5),
-                ..base
+                ..base.clone()
             },
         ];
         mark_duplicate_tool_results(&mut conflicting);
         assert!(conflicting[0].is_duplicate);
         assert!(!conflicting[1].is_duplicate);
+
+        let mut unknown = vec![
+            ToolResult {
+                command: Some("cargo test".to_owned()),
+                stdout: Some("first".to_owned()),
+                provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 6),
+                ..base.clone()
+            },
+            ToolResult {
+                command: Some("cargo check".to_owned()),
+                stdout: Some("second".to_owned()),
+                provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 7),
+                ..base
+            },
+        ];
+        mark_duplicate_tool_results(&mut unknown);
+        assert!(unknown.iter().all(|result| !result.is_duplicate));
     }
 
     #[test]
@@ -1814,6 +1932,23 @@ mod tests {
         assert_eq!(data.messages[0].content, None);
         assert_eq!(data.tool_results[0].call_id, None);
         assert_eq!(data.tool_results[0].outcome, ToolOutcome::Unknown);
+    }
+
+    #[test]
+    fn missing_result_context_is_not_matched_when_call_id_is_ambiguous() {
+        let data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-first-session"}}
+{"type":"turn_context","payload":{"turn_id":"fixture-first-turn"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-reused-call","name":"exec_command","input":{"cmd":"cargo test"}}}
+{"type":"session_meta","payload":{"id":"fixture-second-session"}}
+{"type":"turn_context","payload":{"turn_id":"fixture-second-turn"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-reused-call","name":"exec_command","input":{"cmd":"cargo test"}}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-reused-call","exit_code":0,"status":"completed"}}"#,
+        );
+        let mut result = data.tool_results[0].clone();
+        result.session_id = None;
+        result.turn_id = None;
+        assert!(matching_call(&data.tool_calls, &result).is_none());
     }
 
     #[test]

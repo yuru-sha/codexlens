@@ -1103,12 +1103,33 @@ fn combined_result_output(result: &ToolResult) -> String {
 }
 
 fn matching_call<'a>(data: &'a CanonicalData, result: &ToolResult) -> Option<&'a ToolCall> {
-    data.tool_calls.iter().find(|call| {
-        call.call_id == result.call_id
-            && call.call_id.is_some()
-            && call_result_context_matches(call.session_id.as_deref(), result.session_id.as_deref())
-            && call_result_context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
-    })
+    let candidates = data
+        .tool_calls
+        .iter()
+        .filter(|call| {
+            call.call_id == result.call_id
+                && call.call_id.is_some()
+                && call_result_context_matches(
+                    call.session_id.as_deref(),
+                    result.session_id.as_deref(),
+                )
+                && call_result_context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
+        })
+        .collect::<Vec<_>>();
+    let exact = candidates
+        .iter()
+        .copied()
+        .filter(|call| {
+            context_matches(call.session_id.as_deref(), result.session_id.as_deref())
+                && context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
+        })
+        .collect::<Vec<_>>();
+    if let Some(call) = exact.first().copied() {
+        return Some(call);
+    }
+    (candidates.len() == 1)
+        .then(|| candidates.into_iter().next())
+        .flatten()
 }
 
 fn context_matches(left: Option<&str>, right: Option<&str>) -> bool {
@@ -1124,6 +1145,13 @@ fn call_result_context_matches(left: Option<&str>, right: Option<&str>) -> bool 
         (Some(left), Some(right)) => left == right,
         _ => true,
     }
+}
+
+fn same_call(left: &ToolCall, right: &ToolCall) -> bool {
+    left.call_id == right.call_id
+        && left.session_id == right.session_id
+        && left.turn_id == right.turn_id
+        && left.provenance == right.provenance
 }
 
 fn correction_events(data: &CanonicalData) -> Vec<CorrectionEvent> {
@@ -1434,18 +1462,15 @@ fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
         let Some(session_id) = result.session_id.clone() else {
             continue;
         };
-        if result.call_id.as_ref().is_some_and(|call_id| {
-            call_ids
-                .iter()
-                .any(|(call_session, call_turn, known_call_id)| {
-                    call_session == &session_id
-                        && known_call_id == call_id
-                        && call_result_context_matches(
-                            call_turn.as_deref(),
-                            result.turn_id.as_deref(),
-                        )
+        if result.call_id.is_some() && {
+            matching_call(data, result).is_some_and(|call| {
+                call_ids.iter().any(|(call_session, call_turn, call_id)| {
+                    call.session_id.as_ref() == Some(call_session)
+                        && call.turn_id.as_ref() == call_turn.as_ref()
+                        && call.call_id.as_ref() == Some(call_id)
                 })
-        }) {
+            })
+        } {
             continue;
         }
         let command = result.command.as_deref().unwrap_or_default();
@@ -1520,11 +1545,7 @@ fn call_has_observed_result(data: &CanonicalData, call: &ToolCall) -> bool {
         return data.tool_results.iter().any(|result| {
             !result.is_duplicate
                 && result.call_id.as_ref() == Some(call_id)
-                && call_result_context_matches(
-                    result.session_id.as_deref(),
-                    call.session_id.as_deref(),
-                )
-                && call_result_context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
+                && matching_call(data, result).is_some_and(|candidate| same_call(candidate, call))
         });
     }
 
@@ -2286,6 +2307,14 @@ fn snapshot_is_usable(snapshot: &InstructionSnapshot) -> bool {
 
 fn current_instruction_is_usable(join: &InstructionJoin) -> bool {
     !join.resolution.truncated
+        && !join
+            .resolution
+            .files
+            .iter()
+            .any(|file| file.state == InstructionFileState::Unreadable)
+        && !join.resolution.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == crate::model::InstructionDiagnosticKind::Unreadable
+        })
         && !join.resolution.files.iter().any(|file| {
             matches!(
                 file.state,
