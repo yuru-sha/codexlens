@@ -8,13 +8,11 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
 use crate::model::{
     CanonicalData, InstructionFile, InstructionJoin, InstructionScope, InstructionSnapshot,
-    Message, MessageRole, Record, RecordKind, SourceRef, ToolCall, ToolOutcome, ToolResult,
+    Message, MessageRole, SourceRef, ToolCall, ToolOutcome, ToolResult, normalize_path,
 };
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_REWORK_WINDOW_SECONDS: i64 = 10 * 60;
 pub const DEFAULT_EXCERPT_BYTES: usize = 512;
@@ -28,8 +26,6 @@ pub const CORRECTION_MARKERS: &[&str] = &[
     "this repo uses ",
     "this repository uses ",
     "the project uses ",
-    "the repo uses ",
-    "the repository uses ",
     "this project requires ",
     "the project requires ",
     "remember that ",
@@ -53,6 +49,7 @@ pub const DISCOVERY_MARKERS: &[&str] = &[
 
 const DEFAULT_MAX_EVIDENCE: usize = 12;
 const LONG_FACT_BYTES: usize = 240;
+const MAX_FACT_KEY_BYTES: usize = 128;
 
 /// Options shared by all lenses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,6 +266,9 @@ pub fn knowledge(data: &CanonicalData) -> Vec<Finding> {
 
 pub fn stuck(data: &CanonicalData) -> Vec<Finding> {
     rework(data)
+        .into_iter()
+        .filter(|finding| finding.kind == FindingType::Stuck)
+        .collect()
 }
 
 pub fn rediscovery(data: &CanonicalData) -> Vec<Finding> {
@@ -316,6 +316,7 @@ pub fn sort_findings(findings: &mut [Finding]) {
             .cmp(&left.severity)
             .then_with(|| right.confidence.cmp(&left.confidence))
             .then_with(|| right.distinct_sessions.cmp(&left.distinct_sessions))
+            .then_with(|| normalize_fragment(&left.key).cmp(&normalize_fragment(&right.key)))
             .then_with(|| right.occurrences.cmp(&left.occurrences))
             .then_with(|| left.sort_key().cmp(&right.sort_key()))
             .then_with(|| left.scope.to_string().cmp(&right.scope.to_string()))
@@ -459,7 +460,10 @@ pub fn analyze_failures(data: &CanonicalData, options: &AnalysisOptions) -> Vec<
                 occurrences: events.len(),
                 distinct_sessions: sessions.len(),
                 affected_paths: Vec::new(),
-                observed_commands: vec![first.family.clone()],
+                observed_commands: vec![bounded_excerpt(
+                    &first.family,
+                    options.excerpt_max_bytes,
+                )],
                 sequence: Vec::new(),
                 suggested_action: format!(
                     "Document the prerequisite or preferred command for {} in the applicable instructions",
@@ -544,7 +548,9 @@ pub fn analyze_corrections(data: &CanonicalData, options: &AnalysisOptions) -> V
                 observed_commands: Vec::new(),
                 sequence: events
                     .iter()
-                    .map(|event| event.preceding.description.clone())
+                    .map(|event| {
+                        bounded_excerpt(&event.preceding.description, options.excerpt_max_bytes)
+                    })
                     .collect(),
                 suggested_action: format!(
                     "Record the bounded project fact {:?} in the narrowest applicable instructions",
@@ -603,8 +609,10 @@ pub fn analyze_rework(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Fi
             scope,
             key: path.clone(),
             summary: format!(
-                "{} edits to {} occurred within the ten-minute rework window",
-                count, path
+                "{} edits to {} occurred within the {} rework window",
+                count,
+                path,
+                rework_window_label(options.rework_window_seconds)
             ),
             evidence,
             occurrences: count,
@@ -615,7 +623,12 @@ pub fn analyze_rework(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Fi
                 .iter()
                 .enumerate()
                 .filter(|(index, _)| window.contains(index))
-                .map(|(_, edit)| format!("edit {}", edit.path))
+                .map(|(_, edit)| {
+                    bounded_excerpt(
+                        &format!("edit {}", edit.path),
+                        options.excerpt_max_bytes,
+                    )
+                })
                 .collect(),
             suggested_action: "Review whether the repeated edit reflects a missing scoped instruction; iteration may be intentional".to_owned(),
             limitations: vec![
@@ -629,7 +642,10 @@ pub fn analyze_rework(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Fi
             let mut loop_evidence = Vec::new();
             let mut sequence = Vec::new();
             for activity in &activities {
-                sequence.push(activity.description.clone());
+                sequence.push(bounded_excerpt(
+                    &activity.description,
+                    options.excerpt_max_bytes,
+                ));
                 push_evidence(
                     &mut loop_evidence,
                     evidence_for(
@@ -648,7 +664,7 @@ pub fn analyze_rework(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Fi
             let observed_commands = activities
                 .iter()
                 .filter(|activity| activity.kind == ActivityKind::Failure)
-                .map(|activity| activity.description.clone())
+                .map(|activity| bounded_excerpt(&activity.description, options.excerpt_max_bytes))
                 .collect();
             findings.push(Finding {
                 kind: FindingType::Stuck,
@@ -814,11 +830,11 @@ pub fn analyze_verification(data: &CanonicalData, options: &AnalysisOptions) -> 
             affected_paths: paths,
             observed_commands: observed_before_pending
                 .iter()
-                .map(|activity| activity.description.clone())
+                .map(|activity| bounded_excerpt(&activity.description, options.excerpt_max_bytes))
                 .collect(),
             sequence: pending
                 .iter()
-                .map(|activity| activity.description.clone())
+                .map(|activity| bounded_excerpt(&activity.description, options.excerpt_max_bytes))
                 .collect(),
             suggested_action: "If this change batch is expected to be complete, run and record an observed project verification command".to_owned(),
             limitations: vec![match status {
@@ -838,7 +854,13 @@ pub fn analyze_verification(data: &CanonicalData, options: &AnalysisOptions) -> 
 
 pub fn analyze_knowledge(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
     let mut facts = correction_facts(data, options);
-    facts.extend(discovery_facts(data, options));
+    let correction_sources = facts
+        .iter()
+        .map(|fact| (fact.source.path.clone(), fact.source.line))
+        .collect::<HashSet<_>>();
+    facts.extend(discovery_facts(data, options).into_iter().filter(|fact| {
+        !correction_sources.contains(&(fact.source.path.clone(), fact.source.line))
+    }));
     let mut grouped: BTreeMap<String, Vec<FactEvent>> = BTreeMap::new();
     for fact in facts {
         grouped.entry(fact.key.clone()).or_default().push(fact);
@@ -886,7 +908,7 @@ pub fn analyze_knowledge(data: &CanonicalData, options: &AnalysisOptions) -> Vec
             }
             let suggested_action = if long {
                 format!(
-                    "Add a short index/link in {target}; keep the detailed fact in a scoped project documentation page"
+                    "Add a short index/link in {target} to a scoped page such as docs/knowledge.md; keep the detailed fact there"
                 )
             } else {
                 format!("Add the concise fact to the narrowest applicable instruction file {target}")
@@ -961,18 +983,13 @@ fn failure_events(data: &CanonicalData) -> Vec<FailureEvent> {
         });
     }
     for record in &data.records {
-        if !is_explicit_error_record(record) {
+        if !record.is_error {
             continue;
         }
         let Some(session_id) = record.session_id.clone() else {
             continue;
         };
-        let category = record
-            .original_nested_type
-            .as_deref()
-            .map(normalize_fragment)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "error".to_owned());
+        let category = "error".to_owned();
         let key = format!("event|event|{category}");
         events.push(FailureEvent {
             session_id,
@@ -1059,11 +1076,12 @@ fn failure_category(result: &ToolResult) -> String {
 
 fn failure_description(tool: &str, family: &str, category: &str, result: &ToolResult) -> String {
     let output = combined_result_output(result);
-    if output.is_empty() {
+    let description = if output.is_empty() {
         format!("{tool} {family} -> {category}")
     } else {
         format!("{tool} {family} -> {category}: {output}")
-    }
+    };
+    bounded_excerpt(&description, DEFAULT_EXCERPT_BYTES)
 }
 
 fn combined_result_output(result: &ToolResult) -> String {
@@ -1089,13 +1107,6 @@ fn context_matches(left: Option<&str>, right: Option<&str>) -> bool {
         (Some(left), Some(right)) => left == right,
         _ => true,
     }
-}
-
-fn is_explicit_error_record(record: &Record) -> bool {
-    let nested = record.original_nested_type.as_deref().unwrap_or_default();
-    matches!(nested, "error" | "stream_error" | "exec_error")
-        || matches!(record.kind, RecordKind::Unknown { .. })
-            && matches!(nested, "error" | "stream_error" | "exec_error")
 }
 
 fn correction_events(data: &CanonicalData) -> Vec<CorrectionEvent> {
@@ -1209,7 +1220,7 @@ fn correction_fact(text: &str) -> Option<String> {
         if let Some(rest) = normalized.strip_prefix(marker) {
             let rest = rest.strip_suffix(" instead").unwrap_or(rest).trim();
             if !rest.is_empty() {
-                return Some(rest.to_owned());
+                return Some(bounded_fingerprint(rest));
             }
         }
     }
@@ -1233,6 +1244,12 @@ fn normalize_fact(text: &str) -> String {
     normalize_fragment(text)
         .trim_matches(|character: char| ".,;:!?`\"'".contains(character))
         .to_owned()
+}
+
+fn bounded_fingerprint(value: &str) -> String {
+    let normalized = normalize_fact(value);
+    let redacted = redact_sensitive(&normalized);
+    truncate_bytes(&redacted, MAX_FACT_KEY_BYTES)
 }
 
 fn correction_facts(data: &CanonicalData, options: &AnalysisOptions) -> Vec<FactEvent> {
@@ -1275,7 +1292,7 @@ fn discovery_facts(data: &CanonicalData, options: &AnalysisOptions) -> Vec<FactE
         }
         facts.push(FactEvent {
             session_id,
-            key: fact.clone(),
+            key: bounded_fingerprint(&fact),
             text: fact,
             source: message.provenance.clone(),
             excerpt: bounded_excerpt(content, options.excerpt_max_bytes),
@@ -1340,6 +1357,9 @@ fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
         let Some(session_id) = call.session_id.clone() else {
             continue;
         };
+        if !call_has_observed_result(data, call) {
+            continue;
+        }
         let command = call
             .command
             .as_deref()
@@ -1388,7 +1408,8 @@ fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
 }
 
 fn verification_kind(command: &str) -> Option<String> {
-    let tokens = command_tokens(command);
+    let mut tokens = command_tokens(command);
+    strip_command_wrappers(&mut tokens);
     let lower = tokens
         .iter()
         .map(|token| token.to_ascii_lowercase())
@@ -1426,12 +1447,21 @@ fn verification_kind(command: &str) -> Option<String> {
             .iter()
             .any(|value| value == "--check")
             .then_some("check"),
-        _ => lower
-            .first()
-            .and_then(|value| Path::new(value).file_stem().and_then(|stem| stem.to_str()))
-            .and_then(target_kind),
+        _ => None,
     }?;
     Some(kind.to_owned())
+}
+
+fn call_has_observed_result(data: &CanonicalData, call: &ToolCall) -> bool {
+    let Some(call_id) = call.call_id.as_ref() else {
+        return false;
+    };
+    data.tool_results.iter().any(|result| {
+        !result.is_duplicate
+            && result.call_id.as_ref() == Some(call_id)
+            && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
+            && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
+    })
 }
 
 pub fn classify_verification_command(command: &str) -> Option<String> {
@@ -1451,11 +1481,10 @@ fn command_manager_kind(tokens: &[String]) -> Option<&'static str> {
 
 fn target_kind(target: &str) -> Option<&'static str> {
     match target {
-        "test" | "tests" => Some("test"),
+        "test" => Some("test"),
         "lint" | "check" | "vet" => Some("lint"),
         "format" | "fmt" => Some("format"),
-        "build" | "compile" => Some("build"),
-        "verify" => Some("check"),
+        "build" => Some("build"),
         _ => None,
     }
 }
@@ -1564,6 +1593,15 @@ fn within_window(left: &Position, right: &Position, window_seconds: i64) -> bool
         })
 }
 
+fn rework_window_label(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds % 60 == 0 {
+        format!("{}-minute", seconds / 60)
+    } else {
+        format!("{seconds}-second")
+    }
+}
+
 fn has_kind_transition(activities: &[Activity]) -> bool {
     activities
         .windows(2)
@@ -1586,11 +1624,69 @@ fn turn_is_complete(data: &CanonicalData, session_id: &str, turn_id: Option<&str
     data.records.iter().any(|record| {
         record.session_id.as_deref() == Some(session_id)
             && turn_id.is_none_or(|id| record.turn_id.as_deref() == Some(id))
-            && matches!(
-                record.original_nested_type.as_deref(),
-                Some("turn_complete" | "turn_aborted" | "task_complete")
-            )
+            && record.is_terminal
     })
+}
+
+fn snapshot_for_evidence<'a>(
+    data: &'a CanonicalData,
+    evidence: &EvidenceRef,
+) -> Option<&'a InstructionSnapshot> {
+    let session_id = evidence.session_id.as_deref()?;
+    let mut snapshots = data.instruction_snapshots.iter().filter(|snapshot| {
+        snapshot.session_id.as_deref() == Some(session_id)
+            && snapshot.content.is_some()
+            && !snapshot_is_unavailable(snapshot)
+    });
+    let exact = snapshots.clone().find(|snapshot| {
+        snapshot.provenance.path == evidence.source.path
+            && snapshot.provenance.line == evidence.source.line
+    });
+    if exact.is_some() {
+        return exact;
+    }
+    let turn_id = data.records.iter().find_map(|record| {
+        (record.provenance.path == evidence.source.path
+            && record.provenance.line == evidence.source.line)
+            .then_some(record.turn_id.as_deref())
+            .flatten()
+    })?;
+    snapshots.find(|snapshot| snapshot.turn_id.as_deref() == Some(turn_id))
+}
+
+fn snapshots_for_finding<'a>(
+    data: &'a CanonicalData,
+    finding: &Finding,
+) -> (
+    BTreeMap<String, Vec<&'a InstructionSnapshot>>,
+    BTreeSet<String>,
+) {
+    let mut selected = BTreeMap::new();
+    let mut missing_sessions = BTreeSet::new();
+    for session_id in evidence_sessions(finding) {
+        let mut snapshots = Vec::new();
+        for evidence in finding
+            .evidence
+            .iter()
+            .filter(|evidence| evidence.session_id.as_deref() == Some(session_id.as_str()))
+        {
+            let Some(snapshot) = snapshot_for_evidence(data, evidence) else {
+                missing_sessions.insert(session_id.clone());
+                continue;
+            };
+            if !snapshots
+                .iter()
+                .any(|existing: &&InstructionSnapshot| existing.provenance == snapshot.provenance)
+            {
+                snapshots.push(snapshot);
+            }
+        }
+        if snapshots.is_empty() {
+            missing_sessions.insert(session_id.clone());
+        }
+        selected.insert(session_id, snapshots);
+    }
+    (selected, missing_sessions)
 }
 
 fn instruction_join_findings(
@@ -1609,17 +1705,11 @@ fn instruction_join_findings(
         if session_ids.is_empty() {
             continue;
         }
-        let snapshots = session_ids
-            .iter()
-            .flat_map(|session_id| {
-                data.instruction_snapshots
-                    .iter()
-                    .filter(move |snapshot| snapshot.session_id.as_deref() == Some(session_id))
-            })
-            .collect::<Vec<_>>();
-        let available_snapshots = snapshots
-            .iter()
-            .filter(|snapshot| snapshot.content.is_some() && !snapshot_is_unavailable(snapshot))
+        let (snapshots_by_session, missing_sessions) = snapshots_for_finding(data, finding);
+        let available_snapshots = snapshots_by_session
+            .values()
+            .flatten()
+            .copied()
             .collect::<Vec<_>>();
         if available_snapshots.is_empty() {
             continue;
@@ -1627,7 +1717,7 @@ fn instruction_join_findings(
         let historical_match = available_snapshots.iter().any(|snapshot| {
             guidance_matches(finding, snapshot.content.as_deref().unwrap_or_default())
         });
-        if !historical_match {
+        if missing_sessions.is_empty() && !historical_match {
             let mut evidence = finding.evidence.clone();
             for snapshot in &available_snapshots {
                 push_evidence(
@@ -1684,57 +1774,58 @@ fn instruction_join_findings(
             else {
                 continue;
             };
-            let Some(snapshot) = snapshots.iter().find(|snapshot| {
-                snapshot.session_id.as_deref() == Some(session_id)
-                    && snapshot.content.is_some()
-                    && !snapshot_is_unavailable(snapshot)
-            }) else {
+            if missing_sessions.contains(session_id) {
+                continue;
+            }
+            let Some(snapshots) = snapshots_by_session.get(session_id) else {
                 continue;
             };
-            if let Some((path, old_hash, new_hash)) = stale_file(join, snapshot) {
-                let mut evidence = finding.evidence.clone();
-                push_evidence(
-                    &mut evidence,
-                    evidence_for(
-                        Some(session_id.clone()),
-                        snapshot.provenance.clone(),
-                        EvidenceRole::InstructionSnapshot,
-                        snapshot.content.as_deref(),
-                        options,
-                    ),
-                );
-                push_evidence(
-                    &mut evidence,
-                    evidence_for(
-                        Some(session_id.clone()),
-                        join.provenance.clone(),
-                        EvidenceRole::InstructionFile,
-                        Some(&format!("{} -> {}", path.display(), new_hash)),
-                        options,
-                    ),
-                );
-                findings.push(Finding {
-                    kind: FindingType::Stale,
-                    severity: FindingSeverity::Medium,
-                    confidence: FindingConfidence::High,
-                    scope: FindingScope::Instruction(path.clone()),
-                    key: format!("{}|{}|{}", finding.key, path.display(), old_hash),
-                    summary: format!(
-                        "Current instruction file {} differs from the snapshot associated with the evidence",
-                        path.display()
-                    ),
-                    evidence,
-                    occurrences: 1,
-                    distinct_sessions: 1,
-                    affected_paths: finding.affected_paths.clone(),
-                    observed_commands: Vec::new(),
-                    sequence: Vec::new(),
-                    suggested_action: "Review the historical/current instruction difference before changing guidance".to_owned(),
-                    limitations: vec![
-                        "The comparison used stored snapshot/file hashes; current source files were not reopened by the lens".to_owned(),
-                    ],
-                    verification_status: None,
-                });
+            for snapshot in snapshots {
+                if let Some((path, old_hash, new_hash)) = stale_file(join, snapshot) {
+                    let mut evidence = finding.evidence.clone();
+                    push_evidence(
+                        &mut evidence,
+                        evidence_for(
+                            Some(session_id.clone()),
+                            snapshot.provenance.clone(),
+                            EvidenceRole::InstructionSnapshot,
+                            snapshot.content.as_deref(),
+                            options,
+                        ),
+                    );
+                    push_evidence(
+                        &mut evidence,
+                        evidence_for(
+                            Some(session_id.clone()),
+                            join.provenance.clone(),
+                            EvidenceRole::InstructionFile,
+                            Some(&format!("{} -> {}", path.display(), new_hash)),
+                            options,
+                        ),
+                    );
+                    findings.push(Finding {
+                        kind: FindingType::Stale,
+                        severity: FindingSeverity::Medium,
+                        confidence: FindingConfidence::High,
+                        scope: FindingScope::Instruction(path.clone()),
+                        key: format!("{}|{}|{}", finding.key, path.display(), old_hash),
+                        summary: format!(
+                            "Current instruction file {} differs from the snapshot associated with the evidence",
+                            path.display()
+                        ),
+                        evidence,
+                        occurrences: 1,
+                        distinct_sessions: 1,
+                        affected_paths: finding.affected_paths.clone(),
+                        observed_commands: Vec::new(),
+                        sequence: Vec::new(),
+                        suggested_action: "Review the historical/current instruction difference before changing guidance".to_owned(),
+                        limitations: vec![
+                            "The comparison used stored snapshot/file hashes; current source files were not reopened by the lens".to_owned(),
+                        ],
+                        verification_status: None,
+                    });
+                }
             }
 
             if let Some(path) = overscoped_path(join, finding) {
@@ -1873,6 +1964,7 @@ fn instruction_duplicate_findings(data: &CanonicalData, options: &AnalysisOption
             if files.len() < 2 {
                 continue;
             }
+            let fingerprint = crate::instructions::content_hash(normalized.as_bytes());
             let mut evidence = Vec::new();
             for file in &files {
                 push_evidence(
@@ -1895,7 +1987,7 @@ fn instruction_duplicate_findings(data: &CanonicalData, options: &AnalysisOption
                     .clone()
                     .map(FindingScope::Instruction)
                     .unwrap_or_else(|| majority_scope(data, [join.session_id.as_str()])),
-                key: format!("{}|{}", join.session_id, normalized),
+                key: format!("{}|duplicate|{fingerprint}", join.session_id),
                 summary: format!(
                     "Equivalent normalized guidance is loaded from {} instruction files",
                     files.len()
@@ -1905,7 +1997,15 @@ fn instruction_duplicate_findings(data: &CanonicalData, options: &AnalysisOption
                 distinct_sessions: 1,
                 affected_paths: Vec::new(),
                 observed_commands: Vec::new(),
-                sequence: files.iter().map(|file| file.path.display().to_string()).collect(),
+                sequence: files
+                    .iter()
+                    .map(|file| {
+                        bounded_excerpt(
+                            &file.path.display().to_string(),
+                            options.excerpt_max_bytes,
+                        )
+                    })
+                    .collect(),
                 suggested_action: "Keep equivalent guidance in the narrowest appropriate scope and remove duplication during review".to_owned(),
                 limitations: vec![
                     "Equivalence is whitespace/case/punctuation normalization, not semantic equivalence".to_owned(),
@@ -1958,10 +2058,15 @@ fn stale_file(
 
 fn overscoped_path(join: &InstructionJoin, finding: &Finding) -> Option<PathBuf> {
     let target = finding.affected_paths.first()?;
-    let target = Path::new(target);
-    if !target.is_absolute() {
-        return None;
-    }
+    let target = PathBuf::from(normalize_path(target));
+    let target = if target.is_absolute() {
+        target
+    } else {
+        join.project_root
+            .as_ref()
+            .or(join.cwd.as_ref())?
+            .join(target)
+    };
     let nested = join
         .resolution
         .chain
@@ -2240,35 +2345,6 @@ fn command_family(command: &str) -> String {
 }
 
 fn command_tokens(command: &str) -> Vec<String> {
-    if let Ok(value) = serde_json::from_str::<Value>(command) {
-        if let Some(tokens) = value.as_array() {
-            return tokens
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect();
-        }
-        if let Some(object) = value.as_object() {
-            for key in ["cmd", "command", "argv", "args"] {
-                if let Some(value) = object.get(key) {
-                    let nested = if let Some(value) = value.as_str() {
-                        command_tokens(value)
-                    } else if let Some(values) = value.as_array() {
-                        values
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_owned)
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    if !nested.is_empty() {
-                        return nested;
-                    }
-                }
-            }
-        }
-    }
     command
         .split_whitespace()
         .map(|token| {
@@ -2355,25 +2431,6 @@ fn looks_volatile(value: &str) -> bool {
         || (has_digit && value.len() >= 12 && value.split('-').count() >= 3)
 }
 
-fn normalize_path(path: &str) -> String {
-    let path = path
-        .strip_prefix("file://")
-        .unwrap_or(path)
-        .replace('\\', "/");
-    let mut components = Vec::new();
-    for component in path.split('/') {
-        match component {
-            "" | "." => {}
-            ".." => {
-                components.pop();
-            }
-            value => components.push(value),
-        }
-    }
-    let prefix = if path.starts_with('/') { "/" } else { "" };
-    format!("{prefix}{}", components.join("/"))
-}
-
 fn path_is_excluded(path: &str, options: &AnalysisOptions) -> bool {
     options.excluded_path_prefixes.iter().any(|prefix| {
         let prefix = normalize_path(prefix);
@@ -2416,30 +2473,48 @@ fn limit_evidence(mut evidence: Vec<EvidenceRef>) -> Vec<EvidenceRef> {
 }
 
 fn bounded_excerpt(value: &str, max_bytes: usize) -> String {
-    let mut redacted = value.to_owned();
-    for marker in ["token=", "password=", "secret=", "api_key="] {
-        redacted = redact_assignment(&redacted, marker);
-    }
+    let redacted = redact_sensitive(value);
     let max_bytes = max_bytes.max(3);
     if redacted.len() <= max_bytes {
         return redacted;
     }
-    let mut end = max_bytes - 3;
-    while !redacted.is_char_boundary(end) {
+    let truncated = truncate_bytes(&redacted, max_bytes - 3);
+    format!("{truncated}...")
+}
+
+fn redact_sensitive(value: &str) -> String {
+    let mut redacted = value.to_owned();
+    for marker in ["token=", "password=", "secret=", "api_key="] {
+        redacted = redact_assignment(&redacted, marker);
+    }
+    redacted
+}
+
+fn truncate_bytes(value: &str, max_bytes: usize) -> String {
+    let end = value.len().min(max_bytes);
+    let mut end = end;
+    while !value.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}...", &redacted[..end])
+    value[..end].to_owned()
 }
 
 fn redact_assignment(value: &str, marker: &str) -> String {
-    let Some(start) = value.to_ascii_lowercase().find(marker) else {
-        return value.to_owned();
-    };
-    let value_start = start + marker.len();
-    let end = value[value_start..]
-        .find(char::is_whitespace)
-        .map_or(value.len(), |offset| value_start + offset);
-    format!("{}[redacted]{}", &value[..value_start], &value[end..])
+    let lower = value.to_ascii_lowercase();
+    let mut cursor = 0;
+    let mut redacted = String::with_capacity(value.len());
+    while let Some(offset) = lower.get(cursor..).and_then(|rest| rest.find(marker)) {
+        let start = cursor + offset;
+        let value_start = start + marker.len();
+        let end = value[value_start..]
+            .find(char::is_whitespace)
+            .map_or(value.len(), |offset| value_start + offset);
+        redacted.push_str(&value[cursor..value_start]);
+        redacted.push_str("[redacted]");
+        cursor = end;
+    }
+    redacted.push_str(&value[cursor..]);
+    redacted
 }
 
 fn parse_timestamp(value: &str) -> Option<i64> {
@@ -2520,7 +2595,8 @@ mod tests {
 
     use crate::instructions::snapshot_from_rollout;
     use crate::model::{
-        InstructionFileKind, InstructionFileState, InstructionResolution, ProjectRootStatus,
+        InstructionFileKind, InstructionFileState, InstructionResolution, OutcomeSource,
+        ProjectRootStatus,
     };
     use crate::normalize::normalize_rollout;
     use crate::rollout::{PlainJsonlReader, parse_rollout_reader};
@@ -2571,6 +2647,14 @@ mod tests {
                 .iter()
                 .all(|evidence| evidence.source.line.is_some())
         );
+        let knowledge = findings
+            .iter()
+            .find(|finding| finding.kind == FindingType::Knowledge)
+            .unwrap();
+        assert_eq!(knowledge.occurrences, 2);
+        assert_eq!(knowledge.distinct_sessions, 2);
+        assert!(knowledge.key.len() <= MAX_FACT_KEY_BYTES);
+        assert!(!knowledge.evidence.is_empty());
         let first_output = serde_json::to_string(&findings).unwrap();
         let second_output = serde_json::to_string(&analyze_default(&data)).unwrap();
         assert_eq!(first_output, second_output);
@@ -2602,9 +2686,9 @@ mod tests {
 
         let mut normalized_paths = fixture_data();
         normalized_paths.tool_results[0].command =
-            Some(r#"["cargo","test","/volatile/first/path","fixture-id-001"]"#.to_owned());
+            Some("cargo test /volatile/first/path fixture-id-001".to_owned());
         normalized_paths.tool_results[1].command =
-            Some(r#"["cargo","test","/volatile/second/path","fixture-id-002"]"#.to_owned());
+            Some("cargo test /volatile/second/path fixture-id-002".to_owned());
         let duplicate = normalized_paths.tool_results[0].clone();
         normalized_paths.tool_results.push(ToolResult {
             is_duplicate: true,
@@ -2638,6 +2722,31 @@ mod tests {
     }
 
     #[test]
+    fn bounded_fingerprints_redact_all_values_and_keep_marker_contract() {
+        let long = format!(
+            "Use token=first-token token=second-token {}",
+            "fact ".repeat(MAX_FACT_KEY_BYTES)
+        );
+        let fingerprint = correction_fact(&long).unwrap();
+        assert!(fingerprint.len() <= MAX_FACT_KEY_BYTES);
+        assert!(!fingerprint.contains("first-token"));
+        assert!(!fingerprint.contains("second-token"));
+        assert_eq!(correction_fact("The repo uses cargo test."), None);
+        assert_eq!(
+            classify_verification_command("env cargo test"),
+            Some("test".to_owned())
+        );
+        assert_eq!(
+            classify_verification_command("bash -lc \"cargo test\""),
+            Some("test".to_owned())
+        );
+        assert_eq!(classify_verification_command("custom-test"), None);
+        assert_eq!(classify_verification_command("cargo tests"), None);
+        let excerpt = bounded_excerpt("token=first token=second", 512);
+        assert_eq!(excerpt, "token=[redacted] token=[redacted]");
+    }
+
+    #[test]
     fn verification_requires_completion_and_recognizes_observed_commands() {
         let mut data = fixture_data();
         assert!(
@@ -2666,13 +2775,43 @@ mod tests {
                         evidence.session_id.as_deref() == Some("fixture-analysis-session-b")
                     })
                 })
+                .all(|finding| finding.verification_status == Some(VerificationStatus::Missing))
+        );
+        data.tool_results.push(ToolResult {
+            id: None,
+            call_id: Some("fixture-analysis-check".to_owned()),
+            session_id: Some("fixture-analysis-session-b".to_owned()),
+            turn_id: Some("fixture-analysis-turn-b".to_owned()),
+            command: Some("cargo test".to_owned()),
+            cwd: Some("/fixture/project".to_owned()),
+            stdout: None,
+            stderr: None,
+            duration_ms: None,
+            exit_code: Some(0),
+            status: Some("completed".to_owned()),
+            outcome: ToolOutcome::Succeeded,
+            outcome_source: OutcomeSource::ExitCode,
+            matched_call: true,
+            deduplication_key: None,
+            equivalent_to: None,
+            is_duplicate: false,
+            provenance: SourceRef::rollout(PathBuf::from("fixture-analysis.jsonl"), 17),
+        });
+        assert!(
+            analyze_verification(&data, &AnalysisOptions::default())
+                .iter()
+                .filter(|finding| {
+                    finding.evidence.iter().any(|evidence| {
+                        evidence.session_id.as_deref() == Some("fixture-analysis-session-b")
+                    })
+                })
                 .all(|finding| finding.verification_status != Some(VerificationStatus::Missing))
         );
 
         let mut incomplete = fixture_data();
         incomplete
             .records
-            .retain(|record| record.original_nested_type.as_deref() != Some("turn_complete"));
+            .retain(|record| !matches!(record.provenance.line, Some(8 | 16)));
         for turn in &mut incomplete.turns {
             turn.completed_at = None;
             turn.lifecycle
@@ -2682,6 +2821,57 @@ mod tests {
         assert!(findings
             .iter()
             .all(|finding| finding.verification_status == Some(VerificationStatus::NotObserved)));
+    }
+
+    #[test]
+    fn stuck_wrapper_filters_rework_and_window_summary_uses_options() {
+        let data = fixture_data();
+        assert!(
+            !stuck(&data).is_empty()
+                && stuck(&data)
+                    .iter()
+                    .all(|finding| finding.kind == FindingType::Stuck)
+        );
+        let options = AnalysisOptions {
+            rework_window_seconds: 180,
+            ..AnalysisOptions::default()
+        };
+        let findings = analyze_rework(&data, &options);
+        assert!(
+            findings
+                .iter()
+                .filter(|finding| finding.kind == FindingType::Rework)
+                .all(|finding| finding.summary.contains("3-minute rework window"))
+        );
+    }
+
+    #[test]
+    fn finding_order_uses_normalized_key_before_occurrences() {
+        let finding = |key: &str, occurrences| Finding {
+            kind: FindingType::Failure,
+            severity: FindingSeverity::Medium,
+            confidence: FindingConfidence::Medium,
+            scope: FindingScope::Global,
+            key: key.to_owned(),
+            summary: String::new(),
+            evidence: vec![EvidenceRef {
+                session_id: Some("session".to_owned()),
+                source: SourceRef::rollout(PathBuf::from("fixture.jsonl"), 1),
+                role: EvidenceRole::Observation,
+                excerpt: None,
+            }],
+            occurrences,
+            distinct_sessions: 1,
+            affected_paths: Vec::new(),
+            observed_commands: Vec::new(),
+            sequence: Vec::new(),
+            suggested_action: String::new(),
+            limitations: Vec::new(),
+            verification_status: None,
+        };
+        let mut findings = vec![finding("z", 2), finding("a", 1)];
+        sort_findings(&mut findings);
+        assert_eq!(findings[0].key, "a");
     }
 
     #[test]
@@ -2760,6 +2950,7 @@ mod tests {
         );
         let mut old_b = old.clone();
         old_b.session_id = Some("fixture-analysis-session-b".to_owned());
+        old_b.turn_id = Some("fixture-analysis-turn-b".to_owned());
         data.instruction_snapshots = vec![old, old_b];
         let base = Finding {
             kind: FindingType::Failure,
@@ -2771,23 +2962,33 @@ mod tests {
             evidence: data
                 .sessions
                 .iter()
-                .map(|session| EvidenceRef {
+                .enumerate()
+                .map(|(index, session)| EvidenceRef {
                     session_id: Some(session.id.clone()),
-                    source: session.provenance.clone(),
+                    source: SourceRef::rollout(
+                        PathBuf::from("fixture-analysis.jsonl"),
+                        if index == 0 { 5 } else { 14 },
+                    ),
                     role: EvidenceRole::Observation,
                     excerpt: None,
                 })
                 .collect(),
             occurrences: 2,
             distinct_sessions: 2,
-            affected_paths: vec!["/fixture/project/src/lib.rs".to_owned()],
+            affected_paths: vec!["src/lib.rs".to_owned()],
             observed_commands: vec!["cargo lint".to_owned()],
             sequence: Vec::new(),
             suggested_action: "synthetic".to_owned(),
             limitations: Vec::new(),
             verification_status: None,
         };
-        let findings = analyze_instructions(&data, &[base], &AnalysisOptions::default());
+        assert!(snapshot_for_evidence(&data, &base.evidence[0]).is_some());
+        assert!(snapshot_for_evidence(&data, &base.evidence[1]).is_some());
+        let findings = analyze_instructions(
+            &data,
+            std::slice::from_ref(&base),
+            &AnalysisOptions::default(),
+        );
         for kind in [
             FindingType::Gap,
             FindingType::Overscoped,
@@ -2800,6 +3001,19 @@ mod tests {
                 "missing {kind:?}"
             );
         }
+
+        let mut missing_session = data.clone();
+        missing_session.instruction_snapshots.pop();
+        let findings = analyze_instructions(
+            &missing_session,
+            std::slice::from_ref(&base),
+            &AnalysisOptions::default(),
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.kind != FindingType::Gap)
+        );
 
         data.instruction_snapshots.clear();
         let findings = analyze_instructions(&data, &[], &AnalysisOptions::default());

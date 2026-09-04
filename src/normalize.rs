@@ -11,7 +11,7 @@ use crate::model::{
     CanonicalData, CanonicalDiagnostic, DiagnosticKind, FileOperation, MAX_MESSAGE_BYTES,
     MAX_TOOL_OUTPUT_BYTES, MAX_TOOL_SUMMARY_BYTES, Message, MessageRole, OutcomeSource, Record,
     RecordKind, Session, SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn,
-    TurnLifecycleEvent, merge_session_fields,
+    TurnLifecycleEvent, merge_session_fields, normalize_path,
 };
 use crate::rollout::{
     KnownRecordType, ParseDiagnostic, RolloutInstructionContext, RolloutParseResult, RolloutRecord,
@@ -273,6 +273,8 @@ fn normalize_records_with_resolver(
             timestamp: record.timestamp.clone(),
             sequence,
             original_record_type,
+            is_error: is_error_nested_type(original_nested_type.as_deref()),
+            is_terminal: is_terminal_nested_type(original_nested_type.as_deref()),
             original_nested_type,
             kind: record_kind(record),
             provenance: source,
@@ -292,6 +294,7 @@ fn normalize_records_with_resolver(
 
 fn extract_file_operations(data: &mut CanonicalData) {
     let calls = data.tool_calls.clone();
+    let mut call_operations = HashSet::new();
     for call in &calls {
         let command = call
             .command
@@ -299,8 +302,9 @@ fn extract_file_operations(data: &mut CanonicalData) {
             .or(call.input_summary.as_deref())
             .unwrap_or_default();
         let timestamp = record_timestamp(data, &call.provenance);
+        let mut extracted = Vec::new();
         append_observed_file_operations(
-            &mut data.file_operations,
+            &mut extracted,
             call.session_id.clone(),
             call.turn_id.clone(),
             call.tool_name.as_deref().unwrap_or_default(),
@@ -308,6 +312,24 @@ fn extract_file_operations(data: &mut CanonicalData) {
             &call.provenance,
             timestamp,
         );
+        for operation in extracted {
+            let Some(call_id) = call.call_id.as_ref() else {
+                data.file_operations.push(operation);
+                continue;
+            };
+            let Some(session_id) = operation.session_id.as_ref() else {
+                continue;
+            };
+            if call_operations.insert((
+                session_id.clone(),
+                operation.turn_id.clone(),
+                call_id.clone(),
+                operation.path.clone(),
+                operation.operation.clone(),
+            )) {
+                data.file_operations.push(operation);
+            }
+        }
     }
     for result in &data.tool_results {
         if result.matched_call || result.is_duplicate {
@@ -416,6 +438,10 @@ fn append_observed_file_operations(
         }
     }
     for (operation, path) in observed {
+        let path = normalize_path(&path);
+        if path.is_empty() {
+            continue;
+        }
         operations.push(FileOperation {
             session_id: session_id.clone(),
             turn_id: turn_id.clone(),
@@ -425,6 +451,14 @@ fn append_observed_file_operations(
             provenance: provenance.clone(),
         });
     }
+}
+
+fn canonical_command_value(value: &Value) -> String {
+    let command = match value {
+        Value::String(value) => command_payload_text(value),
+        _ => command_payload_text(&value.to_string()),
+    };
+    bounded_to(&command, MAX_TOOL_SUMMARY_BYTES)
 }
 
 fn command_payload_text(command: &str) -> String {
@@ -442,10 +476,19 @@ fn command_payload_text(command: &str) -> String {
             .join(" ");
     }
     if let Some(object) = value.as_object() {
-        for key in ["cmd", "command", "patch", "path", "file_path", "filename"] {
+        for key in [
+            "cmd",
+            "command",
+            "argv",
+            "args",
+            "patch",
+            "path",
+            "file_path",
+            "filename",
+        ] {
             if let Some(value) = object.get(key) {
                 let text = if let Some(value) = value.as_str() {
-                    value.to_owned()
+                    command_payload_text(value)
                 } else {
                     command_payload_text(&value.to_string())
                 };
@@ -771,8 +814,8 @@ fn tool_call_from_payload(
             .or_else(|| payload.get("arguments"))
             .or_else(|| payload.get("query"))
             .or_else(|| payload.get("command"))
-            .map(value_summary),
-        command: payload.get("command").map(value_summary),
+            .map(canonical_command_value),
+        command: payload.get("command").map(canonical_command_value),
         cwd: string_field(payload, &["cwd"]),
         status: string_field(payload, &["status"]),
         provenance,
@@ -820,7 +863,7 @@ fn tool_result_from_payload(
         call_id: string_field(payload, &["call_id"]),
         session_id,
         turn_id,
-        command: payload.get("command").map(value_summary),
+        command: payload.get("command").map(canonical_command_value),
         cwd: string_field(payload, &["cwd"]),
         stdout,
         stderr,
@@ -1166,6 +1209,17 @@ fn is_lifecycle_type(kind: Option<&str>) -> bool {
     )
 }
 
+fn is_error_nested_type(kind: Option<&str>) -> bool {
+    matches!(kind, Some("error" | "stream_error" | "exec_error"))
+}
+
+fn is_terminal_nested_type(kind: Option<&str>) -> bool {
+    matches!(
+        kind,
+        Some("turn_complete" | "turn_aborted" | "task_complete")
+    )
+}
+
 fn parse_role(role: String) -> MessageRole {
     match role.as_str() {
         "user" => MessageRole::User,
@@ -1309,6 +1363,35 @@ mod tests {
         assert_eq!(
             data.instruction_joins[0].project_root_status,
             crate::model::ProjectRootStatus::Missing
+        );
+    }
+
+    #[test]
+    fn normalizes_and_deduplicates_paired_file_operations() {
+        let call = |path: &str, line| ToolCall {
+            id: None,
+            call_id: Some("fixture-paired-call".to_owned()),
+            session_id: Some("fixture-session".to_owned()),
+            turn_id: Some("fixture-turn".to_owned()),
+            tool_name: Some("apply_patch".to_owned()),
+            input_summary: None,
+            command: Some(format!("*** Update File: {path}")),
+            cwd: Some("/fixture/project".to_owned()),
+            status: None,
+            provenance: SourceRef::rollout(PathBuf::from("fixture.jsonl"), line),
+        };
+        let mut data = CanonicalData {
+            tool_calls: vec![call("src/lib.rs", 1), call("./src/lib.rs", 2)],
+            ..CanonicalData::default()
+        };
+
+        extract_file_operations(&mut data);
+
+        assert_eq!(data.file_operations.len(), 1);
+        assert_eq!(data.file_operations[0].path, "src/lib.rs");
+        assert_eq!(
+            canonical_command_value(&serde_json::json!({"argv": ["cargo", "test"]})),
+            "cargo test"
         );
     }
 

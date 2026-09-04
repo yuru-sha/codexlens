@@ -51,6 +51,25 @@ impl SourceRef {
     }
 }
 
+pub(crate) fn normalize_path(path: &str) -> String {
+    let path = path
+        .strip_prefix("file://")
+        .unwrap_or(path)
+        .replace('\\', "/");
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            value => components.push(value),
+        }
+    }
+    let prefix = if path.starts_with('/') { "/" } else { "" };
+    format!("{prefix}{}", components.join("/"))
+}
+
 impl From<SourceLocation> for SourceRef {
     fn from(source: SourceLocation) -> Self {
         Self::rollout(source.path, source.line)
@@ -329,6 +348,10 @@ pub struct Record {
     pub sequence: usize,
     pub original_record_type: Option<String>,
     pub original_nested_type: Option<String>,
+    #[serde(default)]
+    pub is_error: bool,
+    #[serde(default)]
+    pub is_terminal: bool,
     pub kind: RecordKind,
     pub provenance: SourceRef,
 }
