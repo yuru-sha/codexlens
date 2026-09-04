@@ -4,8 +4,8 @@ Analyze Codex sessions and turn recurring friction into actionable
 `AGENTS.md` improvements.
 
 > Early development: the repository currently contains the foundation
-> specification and CLI shape. Ingestion and lenses are tracked in the
-> follow-up issues.
+> specification, the Phase 1 ingestion library, and the CLI shape. Lenses and
+> reporting remain tracked in the follow-up issues.
 
 ## Goal
 

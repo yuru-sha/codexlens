@@ -1,0 +1,2 @@
+CREATE TABLE threads (id TEXT, rollout_path TEXT, created_at TEXT, updated_at TEXT, cwd TEXT, project_path TEXT, model TEXT, model_provider TEXT, archived INTEGER, source TEXT, thread_source TEXT, title TEXT, preview TEXT, parent_thread_id TEXT, cli_version TEXT, originator TEXT, history_mode TEXT, reasoning_effort TEXT);
+INSERT INTO threads VALUES ('fixture-current-session', '/fixture.jsonl', 'created', 'updated', '/fixture', '/project', 'model', 'provider', 1, 'source', 'thread', 'title', 'preview', 'parent', 'cli', 'originator', 'history', 'medium');
