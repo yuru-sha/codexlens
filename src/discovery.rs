@@ -84,7 +84,7 @@ pub fn resolve_home(explicit_home: Option<&Path>) -> io::Result<ResolvedHome> {
     )
 }
 
-pub fn resolve_home_from(
+fn resolve_home_from(
     explicit_home: Option<&Path>,
     environment_home: Option<&Path>,
     platform_home: Option<&Path>,
@@ -201,20 +201,28 @@ pub fn discover(options: &DiscoveryOptions) -> DiscoveryResult {
 fn platform_default_codex_home() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        let home = env::var_os("USERPROFILE").or_else(|| {
+        let user_profile = env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty());
+        let home = user_profile.or_else(|| {
             let drive = env::var_os("HOMEDRIVE")?;
             let path = env::var_os("HOMEPATH")?;
             let mut home = PathBuf::from(drive);
             home.push(path);
-            Some(home.into_os_string())
-        })?;
-        Some(PathBuf::from(home).join(".codex"))
+            Some(home)
+        });
+        codex_home_from_base(home)
     }
 
     #[cfg(not(windows))]
     {
-        env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"))
+        codex_home_from_base(env::var_os("HOME").map(PathBuf::from))
     }
+}
+
+fn codex_home_from_base(home: Option<PathBuf>) -> Option<PathBuf> {
+    let home = home.filter(|path| !path.as_os_str().is_empty())?;
+    Some(home.join(".codex"))
 }
 
 fn discover_state_files(home: &Path, root: &Path, result: &mut DiscoveryResult) {
@@ -274,25 +282,10 @@ fn walk_rollout_tree(
     inputs: &mut Vec<DiscoveredInput>,
     diagnostics: &mut Vec<DiscoveryDiagnostic>,
 ) -> bool {
-    let identity = match fs::canonicalize(path) {
-        Ok(identity) => identity,
-        Err(error) => {
-            diagnostics.push(DiscoveryDiagnostic {
-                path: path.to_path_buf(),
-                kind: diagnostic_kind_for_io(&error),
-                message: error.to_string(),
-            });
-            return false;
-        }
+    let identity = match canonical_path_within_root(path, root, diagnostics) {
+        Some(identity) => identity,
+        None => return false,
     };
-    if !identity.starts_with(root) {
-        diagnostics.push(DiscoveryDiagnostic {
-            path: path.to_path_buf(),
-            kind: DiagnosticKind::SymlinkEscapesRoot,
-            message: "symlink target is outside the configured Codex home".to_owned(),
-        });
-        return false;
-    }
     match fs::metadata(path) {
         Ok(metadata) if metadata.is_dir() => {}
         Ok(_) => return false,
@@ -403,25 +396,10 @@ fn add_input(
     inputs: &mut Vec<DiscoveredInput>,
     diagnostics: &mut Vec<DiscoveryDiagnostic>,
 ) {
-    let identity = match fs::canonicalize(path) {
-        Ok(identity) => identity,
-        Err(error) => {
-            diagnostics.push(DiscoveryDiagnostic {
-                path: path.to_path_buf(),
-                kind: diagnostic_kind_for_io(&error),
-                message: error.to_string(),
-            });
-            return;
-        }
+    let identity = match canonical_path_within_root(path, root, diagnostics) {
+        Some(identity) => identity,
+        None => return,
     };
-    if !identity.starts_with(root) {
-        diagnostics.push(DiscoveryDiagnostic {
-            path: path.to_path_buf(),
-            kind: DiagnosticKind::SymlinkEscapesRoot,
-            message: "symlink target is outside the configured Codex home".to_owned(),
-        });
-        return;
-    }
     match fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => inputs.push(DiscoveredInput {
             path: path.to_path_buf(),
@@ -447,6 +425,33 @@ fn is_state_database(path: &Path) -> bool {
         let name = name.to_string_lossy();
         name.starts_with("state_") && name.ends_with(".sqlite")
     })
+}
+
+fn canonical_path_within_root(
+    path: &Path,
+    root: &Path,
+    diagnostics: &mut Vec<DiscoveryDiagnostic>,
+) -> Option<PathBuf> {
+    let identity = match fs::canonicalize(path) {
+        Ok(identity) => identity,
+        Err(error) => {
+            diagnostics.push(DiscoveryDiagnostic {
+                path: path.to_path_buf(),
+                kind: diagnostic_kind_for_io(&error),
+                message: error.to_string(),
+            });
+            return None;
+        }
+    };
+    if !identity.starts_with(root) {
+        diagnostics.push(DiscoveryDiagnostic {
+            path: path.to_path_buf(),
+            kind: DiagnosticKind::SymlinkEscapesRoot,
+            message: "symlink target is outside the configured Codex home".to_owned(),
+        });
+        return None;
+    }
+    Some(identity)
 }
 
 fn reader_kind(path: &Path) -> Option<ReaderKind> {
@@ -498,11 +503,25 @@ mod tests {
         }
     }
 
-    fn file(path: &Path) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
+    const DISCOVERY_FIXTURE: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/discovery");
+
+    fn copy_fixture(temp: &TempDir) {
+        copy_tree(Path::new(DISCOVERY_FIXTURE), &temp.path);
+    }
+
+    fn copy_tree(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&source_path, &destination_path);
+            } else {
+                fs::copy(&source_path, &destination_path).unwrap();
+            }
         }
-        fs::write(path, []).unwrap();
     }
 
     fn options(home: &Path) -> DiscoveryOptions {
@@ -514,46 +533,55 @@ mod tests {
 
     #[test]
     fn resolves_explicit_then_environment_then_platform_default() {
-        let explicit = Path::new("/explicit/.codex");
-        let environment = Path::new("/environment/.codex");
-        let platform = Path::new("/platform/.codex");
+        let explicit = TempDir::new();
+        let environment = TempDir::new();
+        let platform = TempDir::new();
+        copy_fixture(&explicit);
+        copy_fixture(&environment);
+        copy_fixture(&platform);
 
         assert_eq!(
-            resolve_home_from(Some(explicit), Some(environment), Some(platform))
-                .unwrap()
-                .source,
+            resolve_home_from(
+                Some(&explicit.path),
+                Some(&environment.path),
+                Some(&platform.path),
+            )
+            .unwrap()
+            .source,
             HomeSource::Explicit
         );
         assert_eq!(
-            resolve_home_from(None, Some(environment), Some(platform))
+            resolve_home_from(None, Some(&environment.path), Some(&platform.path))
                 .unwrap()
-                .path,
-            environment
+                .source,
+            HomeSource::Environment
         );
         assert_eq!(
-            resolve_home_from(None, None, Some(platform)).unwrap().path,
-            platform
+            resolve_home_from(None, None, Some(&platform.path))
+                .unwrap()
+                .source,
+            HomeSource::PlatformDefault
         );
+    }
+
+    #[test]
+    fn empty_platform_home_is_not_current_directory() {
+        assert_eq!(codex_home_from_base(Some(PathBuf::new())), None);
     }
 
     #[test]
     fn discovers_sorted_unique_inputs_and_reader_selection() {
         let temp = TempDir::new();
-        let state_a = temp.path.join("state_a.sqlite");
-        let state_b = temp.path.join("state_b.sqlite");
-        let plain = temp.path.join("sessions").join("nested").join("a.jsonl");
-        let compressed = temp.path.join("sessions").join("z.jsonl.zst");
-        file(&state_b);
-        file(&state_a);
-        file(&plain);
-        file(&compressed);
+        copy_fixture(&temp);
+        let plain = temp.path.join("sessions").join("2026").join("a.jsonl");
+        let compressed = temp.path.join("sessions").join("2026").join("z.jsonl.zst");
         #[cfg(unix)]
         std::os::unix::fs::symlink(
             &plain,
             temp.path
                 .join("sessions")
-                .join("nested")
-                .join("alias.jsonl"),
+                .join("2026")
+                .join("zz-alias.jsonl"),
         )
         .unwrap();
 
@@ -600,30 +628,61 @@ mod tests {
     }
 
     #[test]
-    fn archive_discovery_is_opt_in_and_missing_inputs_are_diagnostic() {
+    fn archive_discovery_is_opt_in() {
         let temp = TempDir::new();
-        let normal = temp.path.join("sessions").join("normal.jsonl");
-        let archived = temp.path.join("archived_sessions").join("old.jsonl");
-        file(&normal);
-        file(&archived);
+        copy_fixture(&temp);
 
         let result = discover(&options(&temp.path));
-        assert_eq!(result.inputs.len(), 1);
-        assert!(!result.inputs[0].kind.is_archived());
+        assert_eq!(result.inputs.len(), 4);
+        assert!(result.inputs.iter().all(|input| !input.kind.is_archived()));
         assert!(
-            result
-                .diagnostics
+            !result
+                .inputs
                 .iter()
-                .any(|diagnostic| diagnostic.kind == DiagnosticKind::MissingInput
-                    && diagnostic.path.ends_with("state_*.sqlite"))
+                .any(|input| input.path.to_string_lossy().contains("archived_sessions"))
         );
 
         let result = discover(&DiscoveryOptions {
             explicit_home: Some(temp.path.clone()),
             include_archived: true,
         });
-        assert_eq!(result.inputs.len(), 2);
+        assert_eq!(result.inputs.len(), 5);
         assert!(result.inputs.iter().any(|input| input.kind.is_archived()));
+    }
+
+    #[test]
+    fn missing_state_does_not_hide_rollout_inputs() {
+        let temp = TempDir::new();
+        copy_fixture(&temp);
+        fs::remove_file(temp.path.join("state_a.sqlite")).unwrap();
+        fs::remove_file(temp.path.join("state_b.sqlite")).unwrap();
+
+        let result = discover(&options(&temp.path));
+        assert_eq!(result.inputs.len(), 2);
+        assert!(result.inputs.iter().all(|input| !input.kind.is_archived()));
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == DiagnosticKind::MissingInput
+                && diagnostic.path.ends_with("state_*.sqlite")
+        }));
+    }
+
+    #[test]
+    fn missing_rollout_does_not_hide_state_inputs() {
+        let temp = TempDir::new();
+        copy_fixture(&temp);
+        fs::remove_dir_all(temp.path.join("sessions")).unwrap();
+
+        let result = discover(&options(&temp.path));
+        assert_eq!(result.inputs.len(), 2);
+        assert!(
+            result
+                .inputs
+                .iter()
+                .all(|input| input.kind == InputKind::StateDatabase)
+        );
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == DiagnosticKind::MissingInput && diagnostic.path.ends_with("sessions")
+        }));
     }
 
     #[test]
@@ -648,12 +707,20 @@ mod tests {
 
         let root = TempDir::new();
         let outside = TempDir::new();
-        file(&outside.path.join("secret.jsonl"));
-        fs::create_dir_all(root.path.join("sessions")).unwrap();
-        symlink(&outside.path, root.path.join("sessions").join("outside")).unwrap();
+        copy_fixture(&root);
+        copy_fixture(&outside);
+        fs::remove_dir_all(root.path.join("sessions")).unwrap();
+        symlink(outside.path.join("sessions"), root.path.join("sessions")).unwrap();
 
         let result = discover(&options(&root.path));
-        assert!(result.inputs.is_empty());
+        let outside_sessions = fs::canonicalize(outside.path.join("sessions")).unwrap();
+        assert_eq!(result.inputs.len(), 2);
+        assert!(
+            result
+                .inputs
+                .iter()
+                .all(|input| !input.identity.starts_with(&outside_sessions))
+        );
         assert!(
             result
                 .diagnostics
