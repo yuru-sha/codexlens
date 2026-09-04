@@ -55,3 +55,17 @@ measured need.
   private repository paths, or personal identifiers.
 - Issue and PR examples must be synthetic and bounded.
 - Local SQLite stores are analysis artifacts, not repository fixtures.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues, managed with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository. See `docs/agents/domain.md`.
