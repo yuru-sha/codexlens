@@ -1,0 +1,8 @@
+{"timestamp":"2026-01-02T00:00:00.000Z","type":"session_meta","payload":{"thread_id":"fixture-thread-only"}}
+{"timestamp":"2026-01-02T00:00:01.000Z","type":"response_item","payload":{"type":"message","id":"fixture-missing-content","role":"assistant"}}
+{"timestamp":"2026-01-02T00:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-reused-call","name":"exec_command","input":{"cmd":"cargo test"}}}
+{"timestamp":"2026-01-02T00:00:03.000Z","type":"session_meta","payload":{"id":"fixture-second-session"}}
+{"timestamp":"2026-01-02T00:00:04.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-reused-call","output":"failed output text","status":"FAILED"}}
+{"timestamp":"2026-01-02T00:00:05.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-unmatched-call","output":"error output"}}
+{"timestamp":"2026-01-02T00:00:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":2}}}}
+{"timestamp":"2026-01-02T00:00:07.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":2}}}}

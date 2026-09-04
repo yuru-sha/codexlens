@@ -64,6 +64,17 @@ The store is the boundary between ingestion and reporting:
 - lenses read the store and emit findings;
 - reports render findings without reopening raw inputs.
 
+Incremental source identity is the canonical path plus byte length, modified
+time when available, and a streaming FNV-1a fingerprint. An unchanged identity
+is skipped. A changed identity replaces only that source's derived rows inside
+one transaction; a failed replacement rolls back the deletion and preserves
+the previous successful ingest.
+
+When discovered inputs include plain rollouts, state databases provide session
+metadata for rollout normalization and are not stored as separate session rows;
+this keeps one canonical stored session per rollout source. Direct state-only
+ingestion still persists state sessions when explicitly requested.
+
 Read commands may run an incremental analysis first. A future `--frozen`
 option can explicitly skip that refresh, but reporting must always make the
 freshness state visible.
@@ -186,6 +197,11 @@ The resolver must record:
 Historical analysis must never silently compare an old session with only
 today's files. If an exact historical snapshot is unavailable, the finding
 must say so.
+
+When a rollout and state index provide the same session, rollout
+`session_meta` values are authoritative because they belong to the event
+stream. State values fill missing fields; differing non-empty values are kept
+as a diagnostic and are not silently overwritten.
 
 The resolution rules follow the
 [official Codex AGENTS.md guide](https://developers.openai.com/codex/guides/agents-md).
