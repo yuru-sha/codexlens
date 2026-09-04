@@ -22,7 +22,7 @@ use crate::state::{
     StateDiagnostic, StateDiagnosticKind, StateReadResult, merge_state_results, read_state_database,
 };
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 const STATE_STORAGE_STANDALONE: &str = "standalone";
 const STATE_STORAGE_ENRICHMENT: &str = "enrichment";
@@ -853,6 +853,14 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             "#,
         )?;
     }
+    if current < 5 {
+        add_column_if_table_exists(&transaction, "records", "error_category TEXT")?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO schema_versions (version) VALUES (5)",
+            [],
+        )?;
+        transaction.execute_batch("PRAGMA user_version = 5;")?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -1142,7 +1150,7 @@ fn insert_record(
     let key = row_key(identity, &record.provenance, &format!("record:{index}"));
     let (kind, record_type, nested_type, raw_json) = record_kind_values(record);
     transaction.execute(
-        "INSERT OR REPLACE INTO records (record_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, turn_id, timestamp, sequence, kind, record_type, nested_type, raw_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT OR REPLACE INTO records (record_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, turn_id, timestamp, sequence, kind, record_type, nested_type, error_category, raw_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             key,
             identity,
@@ -1158,6 +1166,7 @@ fn insert_record(
             kind,
             record_type,
             nested_type,
+            record.error_category,
             raw_json,
         ],
     )?;

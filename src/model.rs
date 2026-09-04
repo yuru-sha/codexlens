@@ -286,6 +286,36 @@ pub enum ToolOutcome {
     Unknown,
 }
 
+impl ToolOutcome {
+    pub(crate) fn from_status(status: &str) -> Option<Self> {
+        let status = status
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        if matches!(
+            status.as_str(),
+            "success" | "succeeded" | "complete" | "completed" | "ok"
+        ) {
+            Some(Self::Succeeded)
+        } else if matches!(
+            status.as_str(),
+            "failure"
+                | "failed"
+                | "error"
+                | "cancelled"
+                | "canceled"
+                | "aborted"
+                | "timeout"
+                | "timed_out"
+        ) {
+            Some(Self::Failed)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutcomeSource {
     ExitCode,
@@ -353,6 +383,8 @@ pub struct Record {
     pub sequence: usize,
     pub original_record_type: Option<String>,
     pub original_nested_type: Option<String>,
+    #[serde(default)]
+    pub error_category: Option<String>,
     #[serde(default)]
     pub is_error: bool,
     #[serde(default)]

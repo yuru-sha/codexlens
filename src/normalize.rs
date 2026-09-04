@@ -267,15 +267,17 @@ fn normalize_records_with_resolver(
         }
 
         let (original_record_type, original_nested_type) = original_record_types(record);
+        let error_category = canonical_error_category(original_nested_type.as_deref());
         data.records.push(Record {
             session_id: current_session_id.clone(),
             turn_id: record_turn_id,
             timestamp: record.timestamp.clone(),
             sequence,
             original_record_type,
-            is_error: is_error_nested_type(original_nested_type.as_deref()),
+            is_error: error_category.is_some(),
             is_terminal: is_terminal_nested_type(original_nested_type.as_deref()),
             original_nested_type,
+            error_category,
             kind: record_kind(record),
             provenance: source,
         });
@@ -304,6 +306,10 @@ fn extract_file_operations(data: &mut CanonicalData) {
             .as_deref()
             .or(call.input_summary.as_deref())
             .unwrap_or_default();
+        let cwd = call.cwd.clone().or_else(|| {
+            context_cwd(data, call.session_id.as_deref(), call.turn_id.as_deref())
+                .map(str::to_owned)
+        });
         let timestamp = record_timestamp(data, &call.provenance);
         let mut extracted = Vec::new();
         append_observed_file_operations(
@@ -326,7 +332,7 @@ fn extract_file_operations(data: &mut CanonicalData) {
             if call_operations.insert((
                 session_id.clone(),
                 call_id.clone(),
-                operation.path.clone(),
+                operation_identity_path(&operation.path, cwd.as_deref()),
                 operation.operation.clone(),
             )) {
                 data.file_operations.push(operation);
@@ -352,6 +358,18 @@ fn extract_file_operations(data: &mut CanonicalData) {
         let tool_name = matched_call
             .and_then(|call| call.tool_name.as_deref())
             .unwrap_or_default();
+        let cwd = result
+            .cwd
+            .clone()
+            .or_else(|| matched_call.and_then(|call| call.cwd.clone()))
+            .or_else(|| {
+                context_cwd(
+                    data,
+                    result.session_id.as_deref(),
+                    result.turn_id.as_deref(),
+                )
+                .map(str::to_owned)
+            });
         let mut extracted = Vec::new();
         append_observed_file_operations(
             &mut extracted,
@@ -373,7 +391,7 @@ fn extract_file_operations(data: &mut CanonicalData) {
             if call_operations.insert((
                 session_id.clone(),
                 call_id.clone(),
-                operation.path.clone(),
+                operation_identity_path(&operation.path, cwd.as_deref()),
                 operation.operation.clone(),
             )) {
                 data.file_operations.push(operation);
@@ -492,6 +510,15 @@ fn append_observed_file_operations(
     }
 }
 
+fn operation_identity_path(path: &str, cwd: Option<&str>) -> String {
+    let path = normalize_path(path);
+    if path.starts_with('/') {
+        return path;
+    }
+    cwd.filter(|cwd| cwd.starts_with('/'))
+        .map_or(path.clone(), |cwd| normalize_path(&format!("{cwd}/{path}")))
+}
+
 fn likely_file_path(path: &str) -> bool {
     let path = path.trim();
     !path.is_empty()
@@ -566,6 +593,31 @@ fn record_timestamp(data: &CanonicalData, provenance: &SourceRef) -> Option<Stri
             record.provenance.path == provenance.path && record.provenance.line == provenance.line
         })
         .and_then(|record| record.timestamp.clone())
+}
+
+fn context_cwd<'a>(
+    data: &'a CanonicalData,
+    session_id: Option<&str>,
+    turn_id: Option<&str>,
+) -> Option<&'a str> {
+    if let Some(turn_id) = turn_id {
+        if let Some(cwd) = data
+            .turns
+            .iter()
+            .find(|turn| {
+                turn.id == turn_id && context_matches(turn.session_id.as_deref(), session_id)
+            })
+            .and_then(|turn| turn.cwd.as_deref())
+        {
+            return Some(cwd);
+        }
+    }
+    session_id.and_then(|session_id| {
+        data.sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| session.cwd.as_deref())
+    })
 }
 
 fn turn_context_snapshot(
@@ -991,13 +1043,13 @@ fn context_matches(left: Option<&str>, right: Option<&str>) -> bool {
 }
 
 fn call_is_failed(call: &ToolCall) -> bool {
-    call.status.as_deref().and_then(status_outcome) == Some(ToolOutcome::Failed)
+    call.status.as_deref().and_then(ToolOutcome::from_status) == Some(ToolOutcome::Failed)
 }
 
 fn result_is_failed(result: &ToolResult) -> bool {
     result.exit_code.is_some_and(|code| code != 0)
         || result.outcome == ToolOutcome::Failed
-        || result.status.as_deref().and_then(status_outcome) == Some(ToolOutcome::Failed)
+        || result.status.as_deref().and_then(ToolOutcome::from_status) == Some(ToolOutcome::Failed)
 }
 
 fn call_has_failed_result(results: &[ToolResult], call: &ToolCall) -> bool {
@@ -1072,50 +1124,13 @@ fn equivalent_results(left: &ToolResult, right: &ToolResult) -> bool {
     {
         return false;
     }
-    if left
-        .exit_code
-        .zip(right.exit_code)
-        .is_some_and(|(left, right)| left != right)
+    if left.outcome != ToolOutcome::Unknown
+        && right.outcome != ToolOutcome::Unknown
+        && left.outcome != right.outcome
     {
         return false;
     }
-    if left
-        .status
-        .as_deref()
-        .zip(right.status.as_deref())
-        .is_some_and(|(left, right)| {
-            !normalize_token(left).eq_ignore_ascii_case(&normalize_token(right))
-        })
-    {
-        return false;
-    }
-    if left
-        .command
-        .as_deref()
-        .zip(right.command.as_deref())
-        .is_some_and(|(left, right)| normalize_token(left) != normalize_token(right))
-    {
-        return false;
-    }
-    if left
-        .cwd
-        .as_deref()
-        .zip(right.cwd.as_deref())
-        .is_some_and(|(left, right)| left != right)
-    {
-        return false;
-    }
-    let left_output = combined_output(left);
-    let right_output = combined_output(right);
-    if !left_output.is_empty() && !right_output.is_empty() && left_output != right_output {
-        return false;
-    }
-    !left_output.is_empty()
-        || !right_output.is_empty()
-        || left.exit_code.is_some()
-        || right.exit_code.is_some()
-        || left.status.is_some()
-        || right.status.is_some()
+    true
 }
 
 fn result_key(result: &ToolResult) -> String {
@@ -1174,7 +1189,7 @@ fn classify_outcome(
             OutcomeSource::ExitCode,
         );
     }
-    if let Some(outcome) = status.and_then(status_outcome) {
+    if let Some(outcome) = status.and_then(ToolOutcome::from_status) {
         return (outcome, OutcomeSource::Status);
     }
     if output_indicates_failure(stdout, stderr) {
@@ -1200,23 +1215,6 @@ fn output_indicates_failure(stdout: Option<&str>, stderr: Option<&str>) -> bool 
         .join(" ")
         .to_ascii_lowercase();
     ERROR_MARKERS.iter().any(|marker| output.contains(marker))
-}
-
-fn status_outcome(status: &str) -> Option<ToolOutcome> {
-    let status = normalize_token(status).to_ascii_lowercase();
-    if matches!(
-        status.as_str(),
-        "success" | "succeeded" | "complete" | "completed" | "ok"
-    ) {
-        Some(ToolOutcome::Succeeded)
-    } else if matches!(
-        status.as_str(),
-        "failure" | "failed" | "error" | "cancelled" | "aborted"
-    ) {
-        Some(ToolOutcome::Failed)
-    } else {
-        None
-    }
 }
 
 fn record_kind(record: &RolloutRecord) -> RecordKind {
@@ -1325,8 +1323,13 @@ fn is_lifecycle_type(kind: Option<&str>) -> bool {
     )
 }
 
-fn is_error_nested_type(kind: Option<&str>) -> bool {
-    matches!(kind, Some("error" | "stream_error" | "exec_error"))
+fn canonical_error_category(kind: Option<&str>) -> Option<String> {
+    match kind {
+        Some("error") => Some("generic_error".to_owned()),
+        Some("stream_error") => Some("stream_error".to_owned()),
+        Some("exec_error") => Some("exec_error".to_owned()),
+        _ => None,
+    }
 }
 
 fn is_terminal_nested_type(kind: Option<&str>) -> bool {
@@ -1531,11 +1534,19 @@ mod tests {
             r#"{"type":"session_meta","payload":{"id":"fixture-patch-session","cwd":"/fixture/project","project":"/fixture/project"}}
 {"type":"turn_context","payload":{"turn_id":"fixture-patch-turn","cwd":"/fixture/project"}}
 {"type":"event_msg","payload":{"type":"patch_apply_begin","call_id":"fixture-patch-call","patch":"*** Update File: src/lib.rs\n@@\n-old\n+new\n"}}
-{"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"fixture-patch-call","patch":"*** Update File: src/lib.rs\n@@\n-old\n+new\n","status":"completed"}}"#,
+{"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"fixture-patch-call","patch":"*** Update File: /fixture/project/src/lib.rs\n@@\n-old\n+new\n","status":"completed","output":"applied"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-patch-call","command":{"path":"/fixture/project/src/lib.rs"},"status":"completed","output":"applied with different wording"}}"#,
         );
 
         assert_eq!(data.tool_calls.len(), 1);
-        assert_eq!(data.tool_results.len(), 1);
+        assert_eq!(data.tool_results.len(), 2);
+        assert_eq!(
+            data.tool_results
+                .iter()
+                .filter(|result| !result.is_duplicate)
+                .count(),
+            1
+        );
         assert_eq!(data.file_operations.len(), 1);
 
         data.tool_calls[0].turn_id = None;

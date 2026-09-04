@@ -979,7 +979,7 @@ fn failure_events(data: &CanonicalData) -> Vec<FailureEvent> {
             family,
             category,
             structured: result.exit_code.is_some_and(|code| code != 0)
-                || result.status.as_deref().is_some_and(status_is_failed),
+                || result.outcome == ToolOutcome::Failed,
             description,
             position: position_for_source(data, &result.provenance, None),
             source: result.provenance.clone(),
@@ -993,10 +993,8 @@ fn failure_events(data: &CanonicalData) -> Vec<FailureEvent> {
             continue;
         };
         let category = record
-            .original_nested_type
-            .as_deref()
-            .map(normalize_fragment)
-            .filter(|category| !category.is_empty())
+            .error_category
+            .clone()
             .unwrap_or_else(|| "error".to_owned());
         let key = format!("event|event|{category}");
         events.push(FailureEvent {
@@ -1031,17 +1029,11 @@ fn failure_activities(data: &CanonicalData) -> Vec<Activity> {
 }
 
 fn result_is_failed(result: &ToolResult) -> bool {
-    if let Some(exit_code) = result.exit_code {
-        return exit_code != 0;
-    }
-    result.outcome == ToolOutcome::Failed || result.status.as_deref().is_some_and(status_is_failed)
+    result.exit_code.is_some_and(|code| code != 0) || result.outcome == ToolOutcome::Failed
 }
 
 fn status_is_failed(status: &str) -> bool {
-    matches!(
-        normalize_fragment(status).as_str(),
-        "failed" | "failure" | "error" | "cancelled" | "canceled" | "timeout" | "timed_out"
-    )
+    ToolOutcome::from_status(status) == Some(ToolOutcome::Failed)
 }
 
 fn failure_category(result: &ToolResult) -> String {
@@ -1649,10 +1641,7 @@ fn turn_is_complete(data: &CanonicalData, session_id: &str, turn_id: Option<&str
         if data.turns.iter().any(|turn| {
             turn.session_id.as_deref() == Some(session_id)
                 && turn.id == turn_id
-                && (turn.completed_at.is_some()
-                    || turn.lifecycle.iter().any(|event| {
-                        matches!(event.kind.as_str(), "turn_complete" | "turn_aborted")
-                    }))
+                && turn.completed_at.is_some()
         }) {
             return true;
         }
@@ -1752,7 +1741,10 @@ fn instruction_join_findings(
             guidance_matches(finding, snapshot.content.as_deref().unwrap_or_default())
         });
         if !available_snapshots.is_empty() && missing_sessions.is_empty() && !historical_match {
-            let mut evidence = finding.evidence.clone();
+            let mut evidence = reserve_evidence_slots(
+                &finding.evidence,
+                available_snapshots.len().min(DEFAULT_MAX_EVIDENCE),
+            );
             for snapshot in &available_snapshots {
                 push_evidence(
                     &mut evidence,
@@ -1814,7 +1806,7 @@ fn instruction_join_findings(
                 if let Some(snapshots) = snapshots_by_session.get(session_id) {
                     for snapshot in snapshots {
                         if let Some((path, old_hash, new_hash)) = stale_file(join, snapshot) {
-                            let mut evidence = finding.evidence.clone();
+                            let mut evidence = reserve_evidence_slots(&finding.evidence, 2);
                             push_evidence(
                                 &mut evidence,
                                 evidence_for(
@@ -1864,7 +1856,7 @@ fn instruction_join_findings(
 
             if current_instruction_is_usable(join) {
                 if let Some(path) = overscoped_path(join, finding) {
-                    let mut evidence = finding.evidence.clone();
+                    let mut evidence = reserve_evidence_slots(&finding.evidence, 1);
                     push_evidence(
                         &mut evidence,
                         evidence_for(
@@ -2120,8 +2112,15 @@ fn overscoped_path(join: &InstructionJoin, finding: &Finding) -> Option<PathBuf>
         .chain
         .iter()
         .filter(|file| file.scope == InstructionScope::ProjectNested)
-        .any(|file| target.starts_with(file.path.parent().unwrap_or(file.path.as_path())));
-    if !nested {
+        .filter(|file| target.starts_with(file.path.parent().unwrap_or(file.path.as_path())))
+        .collect::<Vec<_>>();
+    if nested.is_empty()
+        || nested.iter().any(|file| {
+            file.content
+                .as_deref()
+                .is_some_and(|content| guidance_matches(finding, content))
+        })
+    {
         return None;
     }
     join.resolution
@@ -2221,10 +2220,8 @@ fn annotate_snapshot_limitations(data: &CanonicalData, findings: &mut [Finding])
     for finding in findings {
         let sessions = evidence_sessions(finding);
         let incomplete_evidence = sessions.len() < finding.distinct_sessions;
-        let missing_snapshot = sessions.iter().any(|session_id| {
-            !data.instruction_snapshots.iter().any(|snapshot| {
-                snapshot.session_id.as_deref() == Some(session_id) && snapshot_is_usable(snapshot)
-            })
+        let missing_snapshot = finding.evidence.iter().any(|evidence| {
+            evidence.session_id.is_some() && snapshot_for_evidence(data, evidence).is_none()
         });
         if (incomplete_evidence || missing_snapshot)
             && !finding
@@ -2505,7 +2502,17 @@ fn strip_command_wrappers(tokens: &mut Vec<String>) {
         let Some(first) = tokens.first().map(String::as_str) else {
             return;
         };
-        if matches!(first, "env" | "sudo" | "command") {
+        if first == "env" {
+            tokens.remove(0);
+            strip_wrapper_arguments(tokens, &["-C", "--chdir", "-u", "--unset"]);
+            continue;
+        }
+        if first == "sudo" {
+            tokens.remove(0);
+            strip_wrapper_arguments(tokens, &["-C", "--chdir", "-u", "--user", "-g", "--group"]);
+            continue;
+        }
+        if first == "command" {
             tokens.remove(0);
             continue;
         }
@@ -2520,6 +2527,29 @@ fn strip_command_wrappers(tokens: &mut Vec<String>) {
             }
         }
         return;
+    }
+}
+
+fn strip_wrapper_arguments(tokens: &mut Vec<String>, options_with_values: &[&str]) {
+    loop {
+        let Some(first) = tokens.first() else {
+            return;
+        };
+        if first == "--" {
+            tokens.remove(0);
+            return;
+        }
+        if first.contains('=') {
+            tokens.remove(0);
+            continue;
+        }
+        if !first.starts_with('-') {
+            return;
+        }
+        let option = tokens.remove(0);
+        if options_with_values.contains(&option.as_str()) && !tokens.is_empty() {
+            tokens.remove(0);
+        }
     }
 }
 
@@ -2622,6 +2652,12 @@ fn limit_evidence(mut evidence: Vec<EvidenceRef>) -> Vec<EvidenceRef> {
     evidence
 }
 
+fn reserve_evidence_slots(evidence: &[EvidenceRef], slots: usize) -> Vec<EvidenceRef> {
+    let mut evidence = evidence.to_vec();
+    evidence.truncate(DEFAULT_MAX_EVIDENCE.saturating_sub(slots));
+    evidence
+}
+
 fn bounded_excerpt(value: &str, max_bytes: usize) -> String {
     let redacted = redact_sensitive(value);
     let max_bytes = max_bytes.max(3);
@@ -2637,7 +2673,18 @@ fn redact_sensitive(value: &str) -> String {
     for marker in ["token=", "password=", "secret=", "api_key="] {
         redacted = redact_assignment(&redacted, marker);
     }
-    for name in ["token", "password", "secret", "api_key", "api-key"] {
+    for name in [
+        "token",
+        "password",
+        "secret",
+        "api_key",
+        "api-key",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "secret_key",
+        "private_key",
+    ] {
         redacted = redact_named_value(&redacted, name);
     }
     redacted
@@ -3018,6 +3065,25 @@ mod tests {
                 .iter()
                 .any(|limitation| limitation == MISSING_SNAPSHOT_LIMITATION)
         );
+
+        let mut missing_one_turn = fixture_data();
+        missing_one_turn.instruction_snapshots.retain(|snapshot| {
+            snapshot.session_id.as_deref() == Some("fixture-analysis-session-a")
+        });
+        missing_one_turn
+            .instruction_snapshots
+            .push(snapshot_from_rollout(
+                Some("fixture-analysis-session-b".to_owned()),
+                Some("fixture-analysis-unrelated-turn".to_owned()),
+                Some("Run cargo build."),
+                SourceRef::rollout(PathBuf::from("fixture-analysis.jsonl"), 99),
+            ));
+        assert!(
+            analyze_failures(&missing_one_turn, &options)[0]
+                .limitations
+                .iter()
+                .any(|limitation| limitation == MISSING_SNAPSHOT_LIMITATION)
+        );
     }
 
     #[test]
@@ -3064,6 +3130,14 @@ mod tests {
             Some("test".to_owned())
         );
         assert_eq!(
+            classify_verification_command("env FOO=bar cargo test"),
+            Some("test".to_owned())
+        );
+        assert_eq!(
+            classify_verification_command("sudo -u runner cargo test"),
+            Some("test".to_owned())
+        );
+        assert_eq!(
             classify_verification_command("bash -lc \"cargo test\""),
             Some("test".to_owned())
         );
@@ -3081,6 +3155,12 @@ mod tests {
         );
         assert!(!structured.contains("json-secret"));
         assert!(!structured.contains("json-password"));
+        let compound = bounded_excerpt(
+            r#"tool {"access_token": "access-secret", "client_secret": "client-secret"}"#,
+            512,
+        );
+        assert!(!compound.contains("access-secret"));
+        assert!(!compound.contains("client-secret"));
         let cli = bounded_excerpt("tool --token cli-secret --api-key cli-key", 512);
         assert!(!cli.contains("cli-secret"));
         assert!(!cli.contains("cli-key"));
@@ -3379,12 +3459,7 @@ mod tests {
             std::slice::from_ref(&base),
             &AnalysisOptions::default(),
         );
-        for kind in [
-            FindingType::Gap,
-            FindingType::Overscoped,
-            FindingType::Duplicate,
-            FindingType::Stale,
-        ] {
+        for kind in [FindingType::Gap, FindingType::Duplicate, FindingType::Stale] {
             assert!(
                 findings.iter().any(|finding| finding.kind == kind),
                 "missing {kind:?}"
@@ -3485,7 +3560,13 @@ mod tests {
                 .find(|file| file.scope == InstructionScope::ProjectNested)
                 .cloned()
                 .unwrap();
-            join.resolution.chain = vec![global.clone(), nested];
+            join.resolution.chain = vec![
+                global.clone(),
+                InstructionFile {
+                    content: Some("Local path notes.".to_owned()),
+                    ..nested
+                },
+            ];
         }
         let findings = analyze_instructions(
             &global_data,
