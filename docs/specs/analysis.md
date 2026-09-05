@@ -1,6 +1,6 @@
 # Analysis and findings specification
 
-Status: foundation baseline for deterministic MVP lenses.
+Status: current contract for deterministic MVP lenses and reporting.
 
 ## 1. Analysis contract
 
@@ -201,8 +201,16 @@ snapshot is unavailable; it should say that comparison is inconclusive.
 
 The output is useful without a database query. It includes the analyzed
 period, session count, freshness, finding counts, and a bounded evidence
-sample. Machine-readable output is a later CLI issue and must keep stdout
-free of progress text.
+sample. The `codexlens doctor` command accepts an optional `--limit COUNT` to
+cap findings per scope. Machine-readable output is a later CLI issue and must
+keep stdout free of progress text.
+
+The `analyze` command renders all lens findings. `failures`, `corrections`,
+`rework`, `verification`, `knowledge`, and `instructions` render one lens
+through the same report shape. `stuck` aliases `rework`, and `rediscovery`
+aliases `knowledge`. `sessions` lists stored session metadata and freshness.
+All of these commands read an existing derived store and do not reopen raw
+inputs.
 
 ## 10. `optimize`
 
@@ -216,9 +224,12 @@ The initial advisor renders proposals only. A proposal must state:
 - why the action is scoped there;
 - limitations and a review reminder.
 
-`optimize --diff` produces a unified diff in Phase 4. `--apply` is
+The current `optimize --diff` command produces a unified diff for high-
+confidence proposals and reports skipped proposals explicitly. `--apply` is
 intentionally excluded until safe write semantics, backups, patch validation,
-and explicit user confirmation are specified.
+scope checks, recovery, and explicit user confirmation are specified. The
+command reads recommended instruction files but never writes, renames, or
+deletes them.
 
 ## 11. Phase 4 advisor contract
 

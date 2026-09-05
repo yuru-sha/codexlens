@@ -562,3 +562,67 @@ fn reporting_commands_reject_same_version_mismatched_schema_without_writing() {
 
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn readme_documents_current_cli_surface_and_mvp_boundaries() {
+    let readme =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
+    let readme_lower = readme.to_ascii_lowercase();
+
+    assert!(readme.contains("## CLI surface"));
+    for args in REPORTING_COMMANDS {
+        let command = args.join(" ");
+        assert!(
+            readme.contains(&format!("| `{command}` |")),
+            "README is missing the `{command}` command"
+        );
+    }
+
+    let examples: Vec<_> = readme
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("cargo run -- "))
+        .collect();
+    assert!(!examples.is_empty(), "README has no runnable CLI examples");
+
+    let store = fixture_store();
+    let store_path = store.to_string_lossy().into_owned();
+    for example in examples {
+        let args: Vec<_> = example
+            .split_whitespace()
+            .map(|arg| {
+                if arg == ".codexlens.sqlite" {
+                    store_path.clone()
+                } else {
+                    arg.to_owned()
+                }
+            })
+            .collect();
+        let output = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "README example is not accepted: cargo run -- {example}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let _ = fs::remove_file(store);
+
+    for boundary in [
+        "existing derived SQLite store",
+        "local-only",
+        "deterministic",
+        "evidence-backed",
+        "does not modify the supplied store or target files",
+        "temporary migrated copy",
+        "`optimize --apply`",
+        "compressed rollout readers",
+        "`--frozen`",
+    ] {
+        assert!(
+            readme_lower.contains(&boundary.to_ascii_lowercase()),
+            "README is missing MVP boundary: {boundary}"
+        );
+    }
+}
