@@ -1900,6 +1900,12 @@ mod tests {
                 }
             ))
         ));
+        let mut changed_source = move_proposal.clone();
+        changed_source.expected_source_hash = Some(crate::instructions::content_hash(b"other\n"));
+        assert!(matches!(
+            render_diff(&changed_source),
+            Err(DiffError::ChangedSource(path)) if path == source_path
+        ));
         let mut changed_target = move_proposal.clone();
         changed_target.expected_target_hash = Some(crate::instructions::content_hash(b"other\n"));
         assert!(matches!(
