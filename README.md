@@ -38,15 +38,27 @@ files, or claim billing accuracy.
 
 ## Current status
 
-The reporting commands read an existing derived store (default:
-`.codexlens.sqlite`). `doctor` does not reopen raw rollout or state inputs;
-`optimize --diff` additionally reads the recommended instruction files to
-render a diff, but never writes them:
+The reporting commands open an existing derived store read-only (default:
+`.codexlens.sqlite`) and never reopen raw rollout or state inputs:
 
 ```bash
+cargo run -- analyze --store .codexlens.sqlite
+cargo run -- sessions --store .codexlens.sqlite
+cargo run -- failures --store .codexlens.sqlite
+cargo run -- corrections --store .codexlens.sqlite
+cargo run -- rework --store .codexlens.sqlite
+cargo run -- verification --store .codexlens.sqlite
+cargo run -- knowledge --store .codexlens.sqlite
+cargo run -- instructions --store .codexlens.sqlite
 cargo run -- doctor --store .codexlens.sqlite
 cargo run -- optimize --diff --store .codexlens.sqlite
 ```
+
+`analyze` reports all findings; the other analysis commands report one lens.
+`rework` also covers stuck activity and accepts the `stuck` alias, while
+`knowledge` accepts `rediscovery`. Analysis and doctor reports include store
+freshness and bounded evidence. Missing or invalid stores return an actionable
+error. Older supported store schemas are migrated only in a temporary copy.
 
 The Phase 3 lenses and Phase 4 advisor are exposed from the
 `codexlens::analysis` and `codexlens::advisor` modules. The lenses consume
