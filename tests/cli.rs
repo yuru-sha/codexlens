@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use codexlens::rollout::RolloutParseOptions;
-use codexlens::store::Store;
-use rusqlite::Connection;
+use codexlens::store::{SCHEMA_VERSION, Store};
+use rusqlite::{Connection, params};
 
 fn fixture_store() -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -105,6 +105,67 @@ fn reporting_commands_reject_uninitialized_store_without_writing() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("schema version"), "{stderr}");
+    assert!(stderr.len() < 512);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn reporting_commands_reject_incomplete_schema_history_without_writing() {
+    let path = std::env::temp_dir().join(format!(
+        "codexlens-cli-{}-incomplete-schema-history.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let store = Store::open(&path).unwrap();
+    store
+        .connection()
+        .execute(
+            "DELETE FROM schema_versions WHERE version = ?1",
+            params![SCHEMA_VERSION],
+        )
+        .unwrap();
+    drop(store);
+    let before = std::fs::read(&path).unwrap();
+
+    let output = run("analyze", &path);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("schema history"), "{stderr}");
+    assert!(stderr.len() < 512);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn reporting_commands_reject_same_version_mismatched_schema_without_writing() {
+    let path = std::env::temp_dir().join(format!(
+        "codexlens-cli-{}-mismatched-schema.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let store = Store::open(&path).unwrap();
+    store
+        .connection()
+        .execute(
+            "ALTER TABLE sessions RENAME COLUMN project TO foreign_project",
+            [],
+        )
+        .unwrap();
+    drop(store);
+    let before = std::fs::read(&path).unwrap();
+
+    let output = run("analyze", &path);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing column sessions.project"),
+        "{stderr}"
+    );
     assert!(stderr.len() < 512);
     assert_eq!(std::fs::read(&path).unwrap(), before);
 

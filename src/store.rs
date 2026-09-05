@@ -1587,7 +1587,47 @@ fn validate_reporting_schema(connection: &Connection) -> Result<()> {
             bail!("store is not a codexlens derived store: missing table {table}");
         }
     }
+    for version in 1..=SCHEMA_VERSION {
+        let exists = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version = ?1)",
+            params![version],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if !exists {
+            bail!("store schema history is incomplete: missing version {version}");
+        }
+    }
+    let expected = Store::in_memory()?;
+    for table in REPORTING_TABLES {
+        let actual_columns = table_info(connection, table)?;
+        let expected_columns = table_info(expected.connection(), table)?;
+        if actual_columns != expected_columns {
+            if let Some((column, ..)) = expected_columns
+                .iter()
+                .find(|expected| !actual_columns.iter().any(|actual| actual.0 == expected.0))
+            {
+                bail!("store is not a codexlens derived store: missing column {table}.{column}");
+            }
+            bail!("store is not a codexlens derived store: schema mismatch in table {table}");
+        }
+    }
     Ok(())
+}
+
+type TableColumn = (String, String, i64, Option<String>, i64);
+
+fn table_info(connection: &Connection, table: &str) -> Result<Vec<TableColumn>> {
+    let mut statement =
+        connection.prepare(&format!("PRAGMA table_info({})", quote_identifier(table)))?;
+    Ok(load_rows(&mut statement, |row| {
+        Ok((
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+        ))
+    })?)
 }
 
 fn add_provenance_columns(transaction: &Transaction<'_>, table: &str) -> Result<()> {
