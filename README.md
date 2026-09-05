@@ -75,6 +75,9 @@ The current binary has no ingestion or refresh command. Raw rollout/state
 ingestion remains the adapter and store boundary, and reporting never reopens
 those raw inputs.
 
+The final MVP readiness review, verification evidence, and next-phase entry
+condition are recorded in [docs/readiness/mvp.md](docs/readiness/mvp.md).
+
 The command examples below use an existing derived store at the default path:
 
 ```bash
@@ -100,13 +103,13 @@ recommended instruction files when rendering diffs. See [the architecture specif
 ## Deliberately deferred
 
 - `optimize --apply`: requires an explicit write-safety contract, backups,
-  patch validation, scope checks, and confirmation.
+  patch validation, scope checks, and confirmation. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 - Compressed rollout readers: plain JSONL is the current reader boundary;
-  compressed inputs are reported as unsupported.
+  compressed inputs are reported as unsupported. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 - `--frozen` reporting mode: skipping refresh is not a current CLI behavior;
-  it will be specified together with any future refresh workflow.
+  it will be specified together with any future refresh workflow. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 - Machine-readable output and live monitoring: neither is part of the MVP
-  command surface.
+  command surface. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 
 ## Status and roadmap
 
