@@ -1,15 +1,16 @@
 //! Failure lens.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::model::{CanonicalData, OutcomeSource, SourceRef, ToolOutcome, ToolResult};
 
 use super::{
     Activity, ActivityKind, AnalysisOptions, DEFAULT_EXCERPT_BYTES, DEFAULT_MIN_OCCURRENCES,
     DEFAULT_MIN_SESSIONS, EvidenceRole, Finding, FindingConfidence, FindingSeverity, FindingType,
-    annotate_snapshot_limitations, bounded_excerpt, command_family, distinct_sessions,
-    evidence_for, majority_scope, matching_call, normalize_fragment, normalize_tool,
-    position_for_source, push_evidence, sort_findings,
+    annotate_snapshot_limitations, bounded_excerpt, command_tokens, distinct_sessions,
+    evidence_for, majority_scope, matching_call, normalize_fragment, position_for_source,
+    push_evidence, redact_sensitive, sort_findings, strip_command_wrappers,
 };
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,62 @@ struct FailureEvent {
     description: String,
     position: super::Position,
     source: SourceRef,
+}
+
+fn command_family(command: &str) -> String {
+    let mut tokens = command_tokens(&redact_sensitive(command));
+    if tokens.is_empty() {
+        return "unknown_command".to_owned();
+    }
+    strip_command_wrappers(&mut tokens);
+    if tokens.is_empty() {
+        return "unknown_command".to_owned();
+    }
+    let executable = Path::new(&tokens[0])
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&tokens[0])
+        .to_ascii_lowercase();
+    let mut family = vec![executable];
+    for token in tokens.iter().skip(1) {
+        let normalized = token.to_ascii_lowercase();
+        if token.starts_with('-') || !SAFE_COMMAND_WORDS.contains(&normalized.as_str()) {
+            continue;
+        }
+        family.push(normalized);
+        if family.len() == 3 {
+            break;
+        }
+    }
+    family.join(" ")
+}
+
+const SAFE_COMMAND_WORDS: &[&str] = &[
+    "build",
+    "check",
+    "clippy",
+    "diff",
+    "eslint",
+    "fmt",
+    "format",
+    "lint",
+    "mypy",
+    "nextest",
+    "prettier",
+    "pytest",
+    "run",
+    "test",
+    "typecheck",
+    "vet",
+];
+
+fn normalize_tool(tool: &str) -> String {
+    let normalized = normalize_fragment(tool);
+    match normalized.as_str() {
+        "shell" | "exec" | "exec_command" => "exec_command".to_owned(),
+        "" => "unknown_tool".to_owned(),
+        _ => normalized,
+    }
 }
 
 pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
@@ -282,6 +339,11 @@ mod tests {
 
     #[test]
     fn failure_events_preserve_structured_and_fallback_classification() {
+        assert_eq!(
+            command_family(r#"cargo test token="a b" fixture-id-001"#),
+            "cargo test"
+        );
+
         let mut output_only = fixture_data();
         for result in &mut output_only.tool_results {
             result.exit_code = None;

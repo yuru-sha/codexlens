@@ -7,9 +7,14 @@ use crate::model::CanonicalData;
 use super::{
     Activity, ActivityKind, AnalysisOptions, EditEvent, EvidenceRole, Finding, FindingConfidence,
     FindingSeverity, FindingType, Position, annotate_snapshot_limitations, bounded_excerpt,
-    compare_activity_positions, compare_positions, edit_events, evidence_for, failure,
-    limit_evidence, path_scope, push_evidence, sort_findings,
+    compare_activity_positions, compare_positions, edit_events, evidence_for, failure, path_scope,
+    push_evidence, sort_findings,
 };
+
+fn limit_evidence(mut evidence: Vec<super::EvidenceRef>) -> Vec<super::EvidenceRef> {
+    evidence.truncate(super::DEFAULT_MAX_EVIDENCE);
+    evidence
+}
 
 pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
     let edits = edit_events(data, options);

@@ -8,10 +8,9 @@ use crate::model::{CanonicalData, SourceRef, ToolCall};
 use super::{
     Activity, ActivityKind, AnalysisOptions, DEFAULT_EXCERPT_BYTES, EditEvent, EvidenceRole,
     Finding, FindingConfidence, FindingSeverity, FindingType, VerificationStatus,
-    annotate_snapshot_limitations, bounded_excerpt, call_has_observed_result,
-    compare_activity_positions, compare_positions, context_matches, edit_events, evidence_for,
-    majority_scope, matching_call, path_scope, position_for_source, push_evidence, sort_findings,
-    turn_is_complete, verification_kind,
+    annotate_snapshot_limitations, bounded_excerpt, command_tokens, compare_activity_positions,
+    compare_positions, context_matches, edit_events, evidence_for, majority_scope, matching_call,
+    path_scope, position_for_source, push_evidence, sort_findings, strip_command_wrappers,
 };
 
 #[derive(Debug, Clone)]
@@ -22,6 +21,135 @@ struct VerificationEvent {
     kind: String,
     position: super::Position,
     source: SourceRef,
+}
+
+pub(super) fn classify_command(command: &str) -> Option<String> {
+    let mut tokens = command_tokens(command);
+    strip_command_wrappers(&mut tokens);
+    let lower = tokens
+        .iter()
+        .map(|token| token.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if lower
+        .iter()
+        .any(|token| matches!(token.as_str(), "--help" | "-h" | "--version" | "-V"))
+    {
+        return None;
+    }
+    let first = lower.first()?.as_str();
+    let kind = match first {
+        "cargo" => lower.get(1).and_then(|value| match value.as_str() {
+            "test" | "nextest" => Some("test"),
+            "fmt" => Some("format"),
+            "clippy" | "check" => Some("check"),
+            "build" => Some("build"),
+            _ => None,
+        }),
+        "go" => lower.get(1).and_then(|value| match value.as_str() {
+            "test" => Some("test"),
+            "fmt" => Some("format"),
+            "vet" => Some("lint"),
+            "build" => Some("build"),
+            _ => None,
+        }),
+        "pytest" => Some("test"),
+        "ruff" => lower.get(1).and_then(|value| match value.as_str() {
+            "check" => Some("lint"),
+            "format" => Some("format"),
+            _ => None,
+        }),
+        "mypy" | "eslint" => Some("lint"),
+        "prettier" => Some("format"),
+        "python" | "python3" if lower.get(1).is_some_and(|value| value == "-m") => lower
+            .get(2)
+            .and_then(|value| (value == "pytest").then_some("test")),
+        "npm" | "pnpm" | "yarn" | "bun" => command_manager_kind(&lower),
+        "make" | "just" => lower.iter().skip(1).find_map(|value| target_kind(value)),
+        "git" if lower.get(1).is_some_and(|value| value == "diff") => lower
+            .iter()
+            .any(|value| value == "--check")
+            .then_some("check"),
+        _ => None,
+    }?;
+    Some(kind.to_owned())
+}
+
+fn command_manager_kind(tokens: &[String]) -> Option<&'static str> {
+    let mut values = tokens.iter().skip(1);
+    let subcommand = values.next()?;
+    let target = if subcommand == "run" {
+        values.next().map(String::as_str).unwrap_or_default()
+    } else {
+        subcommand.as_str()
+    };
+    target_kind(target)
+}
+
+fn target_kind(target: &str) -> Option<&'static str> {
+    match target {
+        "test" => Some("test"),
+        "lint" | "check" | "vet" => Some("lint"),
+        "format" | "fmt" => Some("format"),
+        "build" => Some("build"),
+        _ => None,
+    }
+}
+
+fn same_call(left: &ToolCall, right: &ToolCall) -> bool {
+    left.call_id == right.call_id
+        && left.session_id == right.session_id
+        && left.turn_id == right.turn_id
+        && left.provenance == right.provenance
+}
+
+fn call_has_observed_result(data: &CanonicalData, call: &ToolCall) -> bool {
+    if let Some(call_id) = call.call_id.as_ref() {
+        return data.tool_results.iter().any(|result| {
+            !result.is_duplicate
+                && result.call_id.as_ref() == Some(call_id)
+                && matching_call(data, result).is_some_and(|candidate| same_call(candidate, call))
+        });
+    }
+
+    let no_id_calls = data
+        .tool_calls
+        .iter()
+        .filter(|candidate| {
+            candidate.call_id.is_none()
+                && context_matches(candidate.session_id.as_deref(), call.session_id.as_deref())
+                && context_matches(candidate.turn_id.as_deref(), call.turn_id.as_deref())
+        })
+        .count();
+    if no_id_calls != 1 {
+        return false;
+    }
+    data.tool_results
+        .iter()
+        .filter(|result| {
+            !result.is_duplicate
+                && result.call_id.is_none()
+                && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
+                && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
+        })
+        .count()
+        == 1
+}
+
+fn turn_is_complete(data: &CanonicalData, session_id: &str, turn_id: Option<&str>) -> bool {
+    if let Some(turn_id) = turn_id {
+        if data.turns.iter().any(|turn| {
+            turn.session_id.as_deref() == Some(session_id)
+                && turn.id == turn_id
+                && turn.completed_at.is_some()
+        }) {
+            return true;
+        }
+    }
+    data.records.iter().any(|record| {
+        record.session_id.as_deref() == Some(session_id)
+            && context_matches(record.turn_id.as_deref(), turn_id)
+            && record.is_terminal
+    })
 }
 
 pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
@@ -253,7 +381,7 @@ fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
             continue;
         }
         let command = result.command.as_deref().unwrap_or_default();
-        let Some(kind) = verification_kind(command) else {
+        let Some(kind) = classify_command(command) else {
             continue;
         };
         events.push(VerificationEvent {
@@ -283,7 +411,7 @@ fn verification_event_for_call(data: &CanonicalData, call: &ToolCall) -> Option<
         .as_deref()
         .or(call.input_summary.as_deref())
         .unwrap_or_default();
-    let kind = verification_kind(command)?;
+    let kind = classify_command(command)?;
     Some(VerificationEvent {
         session_id,
         turn_id: call.turn_id.clone(),

@@ -11,9 +11,9 @@ use crate::model::{
 use super::{
     AnalysisOptions, CORRECTION_MARKERS, DEFAULT_MAX_EVIDENCE, DISCOVERY_MARKERS, EvidenceRole,
     Finding, FindingConfidence, FindingScope, FindingSeverity, FindingType, VerificationStatus,
-    bounded_excerpt, bounded_fingerprint, evidence_for, evidence_sessions, instruction_scope,
-    majority_scope, normalize_fact, normalize_guidance, push_evidence, reserve_evidence_slots,
-    resolve_instruction_path, snapshot_for_evidence, sort_findings,
+    bounded_excerpt, bounded_fingerprint, evidence_for, evidence_sessions, majority_path,
+    majority_scope, normalize_fact, path_scope, push_evidence, resolve_instruction_path,
+    snapshot_for_evidence, sort_findings,
 };
 
 pub(super) fn analyze(
@@ -30,6 +30,39 @@ pub(super) fn analyze(
 }
 
 type InstructionSnapshotEvidence<'a> = (SourceRef, &'a InstructionSnapshot);
+
+fn instruction_scope(
+    data: &crate::model::CanonicalData,
+    finding: &Finding,
+    sessions: &[String],
+) -> FindingScope {
+    let session_ids = sessions.iter().map(String::as_str).collect::<Vec<_>>();
+    if let Some(path) = finding.affected_paths.first() {
+        return path_scope(data, &session_ids, path);
+    }
+    let nearest = sessions
+        .iter()
+        .filter_map(|session_id| {
+            data.instruction_joins
+                .iter()
+                .find(|join| join.session_id == *session_id)
+                .and_then(|join| join.nearest_path.as_ref())
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    majority_path(nearest)
+        .map(FindingScope::Instruction)
+        .unwrap_or_else(|| finding.scope.clone())
+}
+
+fn reserve_evidence_slots(
+    evidence: &[super::EvidenceRef],
+    slots: usize,
+) -> Vec<super::EvidenceRef> {
+    let mut evidence = evidence.to_vec();
+    evidence.truncate(super::DEFAULT_MAX_EVIDENCE.saturating_sub(slots));
+    evidence
+}
 
 fn snapshots_for_finding<'a>(
     data: &'a crate::model::CanonicalData,
@@ -348,7 +381,7 @@ fn instruction_duplicate_findings(
             let Some(content) = file.content.as_deref() else {
                 continue;
             };
-            let normalized = normalize_guidance(content);
+            let normalized = normalize_fact(content);
             if !normalized.is_empty() {
                 let fingerprint = crate::instructions::content_hash(normalized.as_bytes());
                 contents.entry(fingerprint).or_default().push(file);
@@ -495,11 +528,11 @@ fn overscoped_path(join: &InstructionJoin, finding: &Finding) -> Option<PathBuf>
 
 fn guidance_matches(finding: &Finding, content: &str) -> bool {
     let raw_content = content;
-    let content = normalize_guidance(content);
+    let content = normalize_fact(content);
     if content.is_empty() {
         return false;
     }
-    let key = normalize_guidance(&finding.key);
+    let key = normalize_fact(&finding.key);
     if key.is_empty() {
         return false;
     }

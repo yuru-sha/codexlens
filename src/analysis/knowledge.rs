@@ -1,5 +1,6 @@
 //! Knowledge and rediscovery lens.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 
 use crate::model::{CanonicalData, SourceRef};
@@ -24,6 +25,12 @@ struct FactEvent {
     role: EvidenceRole,
 }
 
+fn compare_sources(left: &SourceRef, right: &SourceRef) -> Ordering {
+    left.path
+        .cmp(&right.path)
+        .then_with(|| left.line.cmp(&right.line))
+}
+
 pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
     let mut facts = correction_facts(data, options);
     let correction_sources = facts
@@ -41,7 +48,7 @@ pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Fi
     let mut findings = grouped
         .into_iter()
         .filter_map(|(key, mut facts)| {
-            facts.sort_by(|left, right| super::compare_sources(&left.source, &right.source));
+            facts.sort_by(|left, right| compare_sources(&left.source, &right.source));
             let sessions = distinct_sessions(facts.iter().map(|fact| fact.session_id.as_str()));
             if facts.len() < super::DEFAULT_MIN_OCCURRENCES
                 || sessions.len() < super::DEFAULT_MIN_SESSIONS
