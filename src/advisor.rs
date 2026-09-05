@@ -29,9 +29,10 @@ const DEFAULT_REPORT_EXCERPT_BYTES: usize = 256;
 #[serde(rename_all = "snake_case")]
 pub enum ProposalAction {
     Add,
-    /// Reserved for caller-supplied replacements with an approved old value.
+    /// Explicit-only; findings do not carry an approved replacement pair.
     Modify,
     Remove,
+    /// Explicit-only; the docs target must have a stored baseline hash.
     MoveToDocs,
     SplitScope,
 }
@@ -58,6 +59,7 @@ pub struct Proposal {
     pub evidence_count: usize,
     pub distinct_sessions: usize,
     pub confidence: FindingConfidence,
+    pub heuristic: String,
     pub evidence: Vec<EvidenceRef>,
     pub proposed_text: Option<String>,
     pub existing_text: Option<String>,
@@ -77,6 +79,8 @@ pub enum ProposalError {
     EmptyTarget,
     #[error("proposal observed problem is empty")]
     MissingObservedProblem,
+    #[error("proposal heuristic is empty")]
+    MissingHeuristic,
     #[error("proposal target rationale is empty")]
     MissingTargetRationale,
     #[error("proposal review reminder is empty")]
@@ -116,6 +120,9 @@ impl Proposal {
         if self.observed_problem.trim().is_empty() {
             return Err(ProposalError::MissingObservedProblem);
         }
+        if self.heuristic.trim().is_empty() {
+            return Err(ProposalError::MissingHeuristic);
+        }
         if self.target_rationale.trim().is_empty() {
             return Err(ProposalError::MissingTargetRationale);
         }
@@ -147,6 +154,13 @@ impl Proposal {
                         field: "source_path",
                     });
                 }
+                if self.action == ProposalAction::MoveToDocs && self.expected_target_hash.is_none()
+                {
+                    return Err(ProposalError::MissingActionField {
+                        action: self.action.as_str(),
+                        field: "expected_target_hash",
+                    });
+                }
                 required_text(self.existing_text.as_deref(), "existing_text")?;
                 required_text(self.proposed_text.as_deref(), "proposed_text")
             }
@@ -164,13 +178,13 @@ impl Proposal {
         }
 
         let (action, mut proposed_text) = proposal_advice(finding)?;
-        let mut target_path = recommendation.target_path.clone();
+        let target_path = recommendation.target_path.clone();
         let mut source_path = None;
         let mut existing_text = None;
-        let mut expected_target_hash = file_hash(data, &target_path);
+        let expected_target_hash = file_hash(data, &target_path);
         let mut expected_source_hash = None;
-        let mut target_scope = recommendation.target_scope.clone();
-        let mut target_rationale = recommendation.rationale.clone();
+        let target_scope = recommendation.target_scope.clone();
+        let target_rationale = recommendation.rationale.clone();
 
         match action {
             ProposalAction::Add => {}
@@ -180,23 +194,7 @@ impl Proposal {
                 existing_text.as_ref()?;
                 proposed_text = None;
             }
-            ProposalAction::MoveToDocs => {
-                let source = stored_file(data, &target_path)?;
-                let source_content = instruction_anchor(source.content.as_deref()?, finding)?;
-                let observed_fact = observed_fact(finding)?;
-                source_path = Some(target_path.clone());
-                expected_source_hash = source.content_hash.clone();
-                let project = project_for_scope(&recommendation.target_scope)?;
-                target_path = project.join("docs/knowledge.md");
-                target_scope = FindingScope::Project(project);
-                expected_target_hash = file_hash(data, &target_path);
-                existing_text = Some(source_content.clone());
-                proposed_text = Some(observed_fact);
-                target_rationale = format!(
-                    "The repeated fact is routed to the project docs page {} while the instruction file keeps a short link",
-                    target_path.display()
-                );
-            }
+            ProposalAction::MoveToDocs => return None,
             ProposalAction::SplitScope => {
                 let broad = match &finding.scope {
                     FindingScope::Instruction(path) => path.clone(),
@@ -230,6 +228,7 @@ impl Proposal {
             evidence_count: finding.occurrences,
             distinct_sessions: finding.distinct_sessions,
             confidence: recommendation.confidence,
+            heuristic: heuristic_for(finding).to_owned(),
             evidence,
             proposed_text,
             existing_text,
@@ -277,14 +276,12 @@ fn proposal_advice(finding: &Finding) -> Option<(ProposalAction, Option<String>)
                 .first()
                 .map(|command| format!("Before running {command}, verify the documented prerequisite.")),
         ),
-        FindingType::Correction | FindingType::Knowledge | FindingType::Gap => (
-            if finding.kind == FindingType::Knowledge && finding.suggested_action.contains("docs/") {
-                ProposalAction::MoveToDocs
-            } else {
-                ProposalAction::Add
-            },
+        FindingType::Correction | FindingType::Gap => (
+            ProposalAction::Add,
             Some(finding.suggested_action.clone()),
         ),
+        FindingType::Knowledge if finding.suggested_action.contains("docs/") => return None,
+        FindingType::Knowledge => (ProposalAction::Add, Some(finding.suggested_action.clone())),
         FindingType::Rework | FindingType::Stuck => (
             ProposalAction::Add,
             finding
@@ -315,16 +312,6 @@ fn proposal_advice(finding: &Finding) -> Option<(ProposalAction, Option<String>)
         action,
         text.map(|text| bounded_excerpt(&text, MAX_PROPOSAL_TEXT_BYTES)),
     ))
-}
-
-fn observed_fact(finding: &Finding) -> Option<String> {
-    finding
-        .evidence
-        .iter()
-        .filter_map(|evidence| evidence.excerpt.as_deref())
-        .map(str::trim)
-        .find(|excerpt| !excerpt.is_empty())
-        .map(|excerpt| bounded_excerpt(excerpt, MAX_PROPOSAL_TEXT_BYTES))
 }
 
 fn instruction_anchor(content: &str, finding: &Finding) -> Option<String> {
@@ -550,6 +537,10 @@ fn target_path_for_finding(data: &CanonicalData, finding: &Finding) -> PathBuf {
 }
 
 fn proposal_skip_reason(data: &CanonicalData, finding: &Finding) -> String {
+    if finding.kind == FindingType::Knowledge && finding.suggested_action.contains("docs/") {
+        return "move_to_docs is explicit-only because the docs target has no stored baseline hash"
+            .to_owned();
+    }
     if matches!(finding.kind, FindingType::Stale | FindingType::Truncated) {
         return format!(
             "finding type {} is unsupported by optimize --diff; no deterministic replacement text is available",
@@ -689,14 +680,6 @@ fn strict_majority<T: Ord>(counts: BTreeMap<T, usize>, total: usize) -> Option<T
     (count * 2 > total).then_some(value)
 }
 
-fn project_for_scope(scope: &FindingScope) -> Option<PathBuf> {
-    match scope {
-        FindingScope::Project(path) => Some(path.clone()),
-        FindingScope::Instruction(path) => path.parent().map(Path::to_path_buf),
-        _ => None,
-    }
-}
-
 fn project_scope_known(data: &CanonicalData, sessions: &[String]) -> bool {
     sessions.iter().all(|session_id| {
         data.instruction_joins
@@ -795,7 +778,7 @@ pub fn doctor(
             })
             .findings
             .push(DoctorFinding {
-                heuristic: heuristic_for(&sanitized.kind).to_owned(),
+                heuristic: heuristic_for(&sanitized).to_owned(),
                 finding: sanitized,
             });
     }
@@ -816,21 +799,27 @@ pub fn doctor(
     }
 }
 
-fn heuristic_for(kind: &FindingType) -> &'static str {
-    match kind {
-        FindingType::Failure => "repeated failed tool outcome",
-        FindingType::Correction => "repeated explicit correction marker",
-        FindingType::Rework => "repeated file operation within the short rework window",
-        FindingType::Stuck => "failure and edit burst within one short window",
-        FindingType::Verification => "recognized verification command after a change",
-        FindingType::Knowledge => "repeated bounded lexical fact across sessions",
-        FindingType::Gap => "repeated evidence without matching instruction text",
-        FindingType::Overscoped => {
+fn heuristic_for(finding: &Finding) -> &'static str {
+    match (&finding.kind, finding.verification_status) {
+        (FindingType::Failure, _) => "repeated failed tool outcome",
+        (FindingType::Correction, _) => "repeated explicit correction marker",
+        (FindingType::Rework, _) => "repeated file operation within the short rework window",
+        (FindingType::Stuck, _) => "failure and edit burst within one short window",
+        (FindingType::Verification, Some(VerificationStatus::Missing)) => {
+            "absence of a recognized verification command after a change"
+        }
+        (FindingType::Verification, Some(VerificationStatus::NotObserved)) => {
+            "verification outcome was not observed in the available rollout"
+        }
+        (FindingType::Verification, None) => "recognized verification status heuristic",
+        (FindingType::Knowledge, _) => "repeated bounded lexical fact across sessions",
+        (FindingType::Gap, _) => "repeated evidence without matching instruction text",
+        (FindingType::Overscoped, _) => {
             "path-specific evidence covered only by broader instruction scope"
         }
-        FindingType::Duplicate => "equivalent normalized guidance in multiple scopes",
-        FindingType::Stale => "current instruction hash differs from stored snapshot",
-        FindingType::Truncated => "instruction chain reached the configured byte limit",
+        (FindingType::Duplicate, _) => "equivalent normalized guidance in multiple scopes",
+        (FindingType::Stale, _) => "current instruction hash differs from stored snapshot",
+        (FindingType::Truncated, _) => "instruction chain reached the configured byte limit",
     }
 }
 
@@ -1131,7 +1120,11 @@ pub fn render_diff(proposal: &Proposal) -> Result<String, DiffError> {
                 false,
             )?;
             let source_replacement = match proposal.action {
-                ProposalAction::MoveToDocs => move_to_docs_link(&proposal.target_path),
+                ProposalAction::MoveToDocs => move_to_docs_link(
+                    source_path,
+                    &proposal.target_path,
+                    proposal.existing_text.as_deref().unwrap_or_default(),
+                ),
                 ProposalAction::SplitScope => String::new(),
                 _ => unreachable!("source update is only used for move/split actions"),
             };
@@ -1221,13 +1214,14 @@ pub fn render_diffs(proposals: &[Proposal]) -> DiffBatch {
 pub fn render_proposal_summary(rendered: &RenderedDiff) -> String {
     let proposal = &rendered.proposal;
     let mut output = format!(
-        "Proposal {} {}\nObserved: {}\nEvidence: {} occurrences across {} sessions\nConfidence: {}\nTarget: {}\n",
+        "Proposal {} {}\nObserved: {}\nEvidence: {} occurrences across {} sessions\nConfidence: {}\nHeuristic: {}\nTarget: {}\n",
         proposal.action.as_str(),
         proposal.target_path.display(),
         proposal.observed_problem,
         proposal.evidence_count,
         proposal.distinct_sessions,
         proposal.confidence.as_str(),
+        proposal.heuristic,
         proposal.target_rationale,
     );
     for limitation in &proposal.limitations {
@@ -1324,12 +1318,39 @@ fn normalized_lines(content: &str) -> Vec<&str> {
     lines
 }
 
-fn move_to_docs_link(path: &Path) -> String {
-    let path = path.to_string_lossy().into_owned();
-    let link = path
-        .find("docs/")
-        .map_or_else(|| path.clone(), |index| path[index..].to_owned());
-    format!("See [the detailed fact]({link}).")
+fn move_to_docs_link(source_path: &Path, target_path: &Path, existing_text: &str) -> String {
+    let source_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
+    let link = relative_path(source_dir, target_path);
+    let line_ending = if existing_text.ends_with("\r\n") {
+        "\r\n"
+    } else if existing_text.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
+    format!("See [the detailed fact]({}).{line_ending}", link.display())
+}
+
+fn relative_path(from: &Path, to: &Path) -> PathBuf {
+    let from = from.components().collect::<Vec<_>>();
+    let to = to.components().collect::<Vec<_>>();
+    let common = from
+        .iter()
+        .zip(&to)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = PathBuf::new();
+    for _ in &from[common..] {
+        relative.push("..");
+    }
+    for component in &to[common..] {
+        relative.push(component.as_os_str());
+    }
+    if relative.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        relative
+    }
 }
 
 fn replace_once(content: &str, old: &str, new: &str, path: &Path) -> Result<String, DiffError> {
@@ -1530,6 +1551,7 @@ mod tests {
             evidence_count: 1,
             distinct_sessions: 1,
             confidence: FindingConfidence::High,
+            heuristic: "synthetic heuristic".to_owned(),
             evidence: vec![EvidenceRef {
                 session_id: Some("session".to_owned()),
                 source: source(1),
@@ -1766,6 +1788,21 @@ mod tests {
     }
 
     #[test]
+    fn verification_heuristic_describes_status() {
+        let mut value = finding(FindingScope::Global, FindingType::Verification, None);
+        value.verification_status = Some(VerificationStatus::Missing);
+        assert_eq!(
+            heuristic_for(&value),
+            "absence of a recognized verification command after a change"
+        );
+        value.verification_status = Some(VerificationStatus::NotObserved);
+        assert_eq!(
+            heuristic_for(&value),
+            "verification outcome was not observed in the available rollout"
+        );
+    }
+
+    #[test]
     fn proposal_validation_rejects_unbounded_evidence() {
         let path = PathBuf::from("/fixture/project/AGENTS.md");
         let mut value = proposal(&path, ProposalAction::Add);
@@ -1778,7 +1815,7 @@ mod tests {
         let target = temp_file("AGENTS.md");
         let source_path = temp_file("source.md");
         std::fs::write(&target, "old guidance\n").unwrap();
-        std::fs::write(&source_path, "move this\n").unwrap();
+        std::fs::write(&source_path, "move this\nkeep next\n").unwrap();
         let before_target = std::fs::read_to_string(&target).unwrap();
         let add = proposal(&target, ProposalAction::Add);
         assert!(render_diff(&add).unwrap().contains("+new guidance"));
@@ -1807,9 +1844,24 @@ mod tests {
         move_proposal.source_path = Some(source_path.clone());
         move_proposal.existing_text = Some("move this\n".to_owned());
         move_proposal.proposed_text = Some("move this\n".to_owned());
+        move_proposal.expected_target_hash = Some(crate::instructions::content_hash(b"docs\n"));
         let move_diff = render_diff(&move_proposal).unwrap();
-        assert!(move_diff.contains("+move this"));
-        assert!(move_diff.contains("+See [the detailed fact]("));
+        let docs_name = docs.file_name().unwrap().to_string_lossy();
+        assert!(move_diff.contains(&format!(
+            "+See [the detailed fact]({docs_name}).\n+keep next"
+        )));
+
+        let mut missing_target_baseline = move_proposal.clone();
+        missing_target_baseline.expected_target_hash = None;
+        assert!(matches!(
+            render_diff(&missing_target_baseline),
+            Err(DiffError::InvalidProposal(
+                ProposalError::MissingActionField {
+                    action: "move_to_docs",
+                    field: "expected_target_hash"
+                }
+            ))
+        ));
 
         let mut split = proposal(&target, ProposalAction::SplitScope);
         split.source_path = Some(source_path.clone());
@@ -1850,11 +1902,19 @@ mod tests {
         let proposal = Proposal::from_finding(&data, &value).unwrap();
         assert_eq!(proposal.evidence_count, 2);
         assert_eq!(proposal.evidence[0].source.kind, SourceKind::Rollout);
-        assert!(proposal.proposed_text.unwrap().len() <= MAX_PROPOSAL_TEXT_BYTES);
+        assert!(proposal.proposed_text.as_deref().unwrap().len() <= MAX_PROPOSAL_TEXT_BYTES);
+        assert_eq!(proposal.heuristic, "repeated explicit correction marker");
+        assert!(
+            render_proposal_summary(&RenderedDiff {
+                proposal,
+                diff: String::new(),
+            })
+            .contains("Heuristic: repeated explicit correction marker")
+        );
     }
 
     #[test]
-    fn move_to_docs_uses_observed_fact_and_verified_anchor() {
+    fn knowledge_move_to_docs_is_explicit_only() {
         let path = "/fixture/project/AGENTS.md";
         let data = data_with_join(vec![file(
             path,
@@ -1870,16 +1930,30 @@ mod tests {
         value.evidence[0].excerpt = Some("observed fact".to_owned());
         value.suggested_action = "Keep the detailed fact in docs/knowledge.md".to_owned();
 
-        let proposal = Proposal::from_finding(&data, &value).unwrap();
-        assert_eq!(proposal.existing_text.as_deref(), Some("observed fact\n"));
-        assert_eq!(proposal.proposed_text.as_deref(), Some("observed fact"));
+        let plan = proposals_for_findings(&data, &[value]);
+        assert!(plan.proposals.is_empty());
+        assert_eq!(plan.skipped.len(), 1);
+        assert!(plan.skipped[0].reason.contains("explicit-only"));
+    }
 
-        let unrelated = data_with_join(vec![file(
-            path,
-            InstructionScope::ProjectRoot,
-            "unrelated line\n",
-        )]);
-        assert!(Proposal::from_finding(&unrelated, &value).is_none());
+    #[test]
+    fn move_to_docs_link_is_relative_and_keeps_line_ending() {
+        assert_eq!(
+            move_to_docs_link(
+                Path::new("/work/docs/project/AGENTS.md"),
+                Path::new("/work/docs/project/docs/knowledge.md"),
+                "old\n",
+            ),
+            "See [the detailed fact](docs/knowledge.md).\n"
+        );
+        assert_eq!(
+            move_to_docs_link(
+                Path::new("/work/project/src/AGENTS.md"),
+                Path::new("/work/project/docs/knowledge.md"),
+                "old\r\n",
+            ),
+            "See [the detailed fact](../docs/knowledge.md).\r\n"
+        );
     }
 
     #[test]

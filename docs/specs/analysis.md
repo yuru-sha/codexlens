@@ -253,8 +253,9 @@ global/project/nested groups. Evidence excerpts are bounded and redacted.
 unified diffs plus an evidence summary. Missing, changed, unreadable,
 unsupported, conflicting, and no-op proposals are explicit skipped results.
 Only high-confidence proposals are rendered. Findings do not synthesize
-`modify` proposals because they do not contain an approved replacement body;
-that action remains available for explicitly constructed, validated proposals.
+`modify` or `move_to_docs` proposals because they do not contain an approved
+replacement pair and the docs target has no stored baseline; both actions
+remain available for explicitly constructed, validated proposals.
 The command never writes, renames, or deletes files.
 
 ## 12. Deterministic testing
