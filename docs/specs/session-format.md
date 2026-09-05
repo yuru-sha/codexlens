@@ -17,7 +17,8 @@ The adapter discovers, without following symlinks outside an explicit root:
 - `state_*.sqlite` directly under Codex home;
 - `sessions/**/*.jsonl`;
 - optionally `archived_sessions/**` when the user requests archived history;
-- `.jsonl.zst` through the same reader contract when encountered.
+- `.jsonl.zst` paths may be discovered, but current ingestion reports
+  compressed input as unsupported.
 
 Discovery is best-effort. A missing state database must not prevent rollout
 ingestion, and a missing rollout must not prevent state metadata ingestion.
@@ -125,21 +126,21 @@ The useful logical fields are:
 
 The database may be split across multiple `state_*.sqlite` files. The
 canonical session identity is the stable thread/session ID, not the database
-filename. If metadata conflicts with a rollout's `session_meta`, keep the
-conflict as a diagnostic and apply the documented precedence rule once the
-state adapter issue defines it; do not silently overwrite evidence.
+filename. When metadata conflicts with a rollout's `session_meta`, rollout
+values are authoritative, state values fill missing fields, and differing
+non-empty values remain diagnostics; evidence is not silently overwritten.
 
 ## 6. Reader abstraction
 
 The parser consumes a reader that yields `(line_number, bytes)`:
 
 - `PlainJsonlReader`: required first;
-- `ZstdJsonlReader`: supported through the same boundary when compressed
-  rollout files are encountered.
+- `ZstdJsonlReader`: deferred; current ingestion reports compressed rollout
+  input as unsupported.
 
 Compression support must not leak into normalization or lenses. It is an I/O
-choice. The initial foundation does not add a compression dependency until
-the reader issue needs it.
+choice. The MVP keeps the plain reader boundary and does not add a compression
+dependency until a future compressed-reader issue needs it.
 
 Large lines must be streamed. The adapter may enforce a configurable maximum
 line size and report an oversized-line diagnostic rather than allocating

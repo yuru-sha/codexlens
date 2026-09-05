@@ -1,6 +1,6 @@
 # Architecture specification
 
-Status: foundation baseline for the `codexlens` MVP.
+Status: current architecture for the `codexlens` MVP.
 
 ## 1. Product boundary
 
@@ -11,6 +11,11 @@ scoped proposal for improving `AGENTS.md` or nearby project documentation.
 
 The product is an evidence tool, not a replacement for Codex, a hosted
 analytics service, or a general-purpose agent-log platform.
+
+The current binary is a read-only reporting surface over an existing derived
+SQLite store. It does not ingest or refresh raw rollout/state inputs, and it
+does not apply advisor proposals. The supported command surface and examples
+are documented in the [README](../../README.md).
 
 ## 2. Goals
 
@@ -75,9 +80,11 @@ metadata for rollout normalization and are not stored as separate session rows;
 this keeps one canonical stored session per rollout source. Direct state-only
 ingestion still persists state sessions when explicitly requested.
 
-Read commands may run an incremental analysis first. A future `--frozen`
-option can explicitly skip that refresh, but reporting must always make the
-freshness state visible.
+Reporting commands consume the existing derived store in read-only mode. They
+do not reopen raw rollout/state inputs or refresh the store. Analysis,
+`sessions`, and `doctor` reports make the recorded freshness state visible;
+`optimize --diff` reports proposal and diff state instead. A future `--frozen`
+mode is deferred until a refresh workflow exists.
 
 ## 5. Components
 
@@ -86,7 +93,7 @@ freshness state visible.
 The adapter owns:
 
 - `CODEX_HOME` and file discovery;
-- plain JSONL reading and a future compressed reader;
+- plain JSONL reading; compressed rollout readers are deferred;
 - `state_*.sqlite` thread metadata;
 - rollout envelope and event-shape decoding;
 - `AGENTS.md`/override discovery;
@@ -156,7 +163,10 @@ Their contracts and conservative heuristics are defined in
 ### Advisor and report
 
 `doctor` is the compact aggregate view. `optimize --diff` groups findings into
-review-only candidate changes and renders unified diffs.
+review-only candidate changes and renders unified diffs without writing the
+target files. The other reporting commands select one lens or list stored
+sessions; `analyze` selects all lenses. `rework`/`stuck` and
+`knowledge`/`rediscovery` are command aliases.
 
 MVP output must include:
 
@@ -168,7 +178,7 @@ MVP output must include:
 - a suggested action that is explicitly a proposal.
 
 `optimize --apply` is out of scope until a separate issue defines backup,
-patch validation, scope checks, and recovery behavior.
+patch validation, scope checks, recovery behavior, and explicit confirmation.
 
 ## 6. Instruction resolution
 
@@ -254,6 +264,10 @@ implementation available in the
 3. Instructions: resolver, config settings, and effective snapshots.
 4. Lenses: deterministic findings over stored evidence.
 5. Advisor: `doctor`, proposal generation, and `optimize --diff`.
+
+Phases 0 through 4, including the reporting command integration, are complete
+for the MVP. Compressed readers, `--frozen`, machine-readable output, live
+monitoring, and `optimize --apply` remain deliberately deferred.
 
 Every phase must leave the repository buildable and its behavior covered by
 focused deterministic tests.
