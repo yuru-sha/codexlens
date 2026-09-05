@@ -736,6 +736,8 @@ fn post_mvp_contract_spec_tracks_each_deferred_boundary() {
         "allowed roots and file classes",
         "existing regular file with no symlink",
         "source_path field is not an independent authority",
+        "canonical selected-path set",
+        "unselected same-name",
         "Backups are local, scoped to the validated write set",
         "one transaction over the complete proposal batch",
         "multi-proposal failure",
@@ -743,6 +745,7 @@ fn post_mvp_contract_spec_tracks_each_deferred_boundary() {
     ] {
         assert!(spec.contains(marker), "missing contract marker: {marker}");
     }
+    assert!(!spec.contains("a configured fallback"));
 }
 
 #[test]

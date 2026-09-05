@@ -402,12 +402,17 @@ The allowed roots and file classes come from the resolved instruction scope,
 not from either proposal path alone:
 
 - Global scope permits only the canonical configured `$CODEX_HOME` root and
-  selected global instruction filenames (`AGENTS.override.md`, `AGENTS.md`, or
-  a configured fallback).
+  the selected global instruction path (`AGENTS.override.md` or `AGENTS.md`)
+  from the effective instruction resolution.
 - Project and instruction scopes permit only the canonical resolved project
-  root and selected instruction filenames. A `move_to_docs` target may also be
-  an existing Markdown documentation file under that project root (`docs/` or
-  `README.md`); other file classes are rejected.
+  root and the selected instruction paths from the effective instruction
+  resolution. A `move_to_docs` target may also be an existing Markdown
+  documentation file under that project root (`docs/` or `README.md`); other
+  file classes are rejected.
+- Every instruction-path write must match the canonical selected-path set for
+  the proposal's effective instruction resolution. An unavailable or ambiguous
+  resolution, or an unselected same-name file, is rejected; filename matching
+  alone is insufficient.
 - Every write-set path must be an existing regular file with no symlink
   component. Raw `..` traversal is rejected before canonicalization; every
   component is canonicalized and a result outside its allowed root is
