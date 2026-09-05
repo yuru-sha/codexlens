@@ -29,7 +29,7 @@ behavior of `optimize --diff`.
 
 ## Review result
 
-- The user-facing public surface is limited to canonical-data lenses,
+- The CLI's user-facing reporting surface is limited to canonical-data lenses,
   derived-store reports, and review-only proposal diffs; ingestion and store
   APIs remain library boundaries rather than CLI reporting behavior.
 - Finding and report ordering is deterministic; evidence retains source paths
@@ -37,9 +37,9 @@ behavior of `optimize --diff`.
 - Reporting reads the derived store without reopening raw rollout/state input.
   `optimize --diff` reads target instruction files but never writes them.
 - No blocking issue remains for the current MVP reporting path. The
-  corrections/findings persistence wording in the architecture specification
-  needs an explicit decision before a future phase relies on persisted lens
-  output; that clarification is tracked in [#54](https://github.com/yuru-sha/codexlens/issues/54).
+  architecture specification now records that corrections/findings are
+  derived in memory; any future persisted lens output needs an explicit
+  schema decision tracked in [#54](https://github.com/yuru-sha/codexlens/issues/54).
 
 ## Deferred work
 
@@ -49,9 +49,9 @@ readers, refresh/frozen-mode behavior, machine-readable output, live
 monitoring, and `optimize --apply`. They remain deferred because each expands
 an input, runtime, output, or write boundary that needs its own contract.
 
-The store-schema wording for `corrections` and `findings` is tracked
-separately in [#54](https://github.com/yuru-sha/codexlens/issues/54); the
-current CLI derives those results in memory from canonical data.
+The store-schema wording for `corrections` and `findings` is clarified in
+[#54](https://github.com/yuru-sha/codexlens/issues/54); the current CLI
+derives those results in memory from canonical data.
 
 ## Next-phase entry condition
 
