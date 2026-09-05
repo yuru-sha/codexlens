@@ -1862,6 +1862,12 @@ mod tests {
                 }
             ))
         ));
+        let mut changed_target = move_proposal.clone();
+        changed_target.expected_target_hash = Some(crate::instructions::content_hash(b"other\n"));
+        assert!(matches!(
+            render_diff(&changed_target),
+            Err(DiffError::ChangedTarget(path)) if path == docs
+        ));
 
         let mut split = proposal(&target, ProposalAction::SplitScope);
         split.source_path = Some(source_path.clone());
