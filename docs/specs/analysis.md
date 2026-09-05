@@ -216,11 +216,51 @@ The initial advisor renders proposals only. A proposal must state:
 - why the action is scoped there;
 - limitations and a review reminder.
 
-`optimize --diff` may produce a unified diff in Phase 4. `--apply` is
+`optimize --diff` produces a unified diff in Phase 4. `--apply` is
 intentionally excluded until safe write semantics, backups, patch validation,
 and explicit user confirmation are specified.
 
-## 11. Deterministic testing
+## 11. Phase 4 advisor contract
+
+An advisor proposal is a typed, serializable value independent of rollout
+field names and SQL. It contains:
+
+- target scope and path;
+- one of `add`, `modify`, `remove`, `move_to_docs`, or `split_scope`;
+- the observed problem, occurrence/session counts, confidence, evidence
+  references, and limitations;
+- the bounded proposed/replaced text needed by the diff renderer;
+- a target rationale and an explicit review reminder.
+
+Proposals are advisory. A proposal without evidence, a review reminder, or
+the text required by its action is invalid.
+Every mutating action carries the expected target-content hash; move and split
+proposals additionally carry the expected source-content hash.
+
+Scope selection uses the evidence sessions and stored instruction joins:
+
+1. path-specific evidence selects the strict-majority nearest applicable
+   instruction file;
+2. a strict project majority selects the project-root instruction file;
+3. cross-project or explicitly global evidence selects the strict-majority
+   global instruction file;
+4. missing or ambiguous scope evidence suppresses the recommendation or
+   lowers confidence.
+
+`doctor` reads only the derived SQLite store, reports the analyzed period,
+session count, recorded freshness, finding counts, and deterministic
+global/project/nested groups. Evidence excerpts are bounded and redacted.
+
+`optimize --diff` reads the recommended target files and emits reviewable
+unified diffs plus an evidence summary. Missing, changed, unreadable,
+unsupported, conflicting, and no-op proposals are explicit skipped results.
+Only high-confidence proposals are rendered. Findings do not synthesize
+`modify` or `move_to_docs` proposals because they do not contain an approved
+replacement pair and the docs target has no stored baseline; both actions
+remain available for explicitly constructed, validated proposals.
+The command never writes, renames, or deletes files.
+
+## 12. Deterministic testing
 
 Every lens gets small synthetic fixtures with at least one positive and one
 negative case. Tests must assert the finding type, scope, counts, confidence

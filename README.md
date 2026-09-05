@@ -4,8 +4,7 @@ Analyze Codex sessions and turn recurring friction into actionable
 `AGENTS.md` improvements.
 
 > Early development: the repository contains the foundation, ingestion,
-> instruction capture, and deterministic Phase 3 lenses. Reporting remains
-> tracked in the Phase 4 issues.
+> instruction capture, deterministic lenses, and the Phase 4 advisor.
 
 ## Goal
 
@@ -39,16 +38,20 @@ files, or claim billing accuracy.
 
 ## Current status
 
-The initial CLI exposes the planned command names so the public interface can
-be discussed before implementation:
+The reporting commands read an existing derived store (default:
+`.codexlens.sqlite`). `doctor` does not reopen raw rollout or state inputs;
+`optimize --diff` additionally reads the recommended instruction files to
+render a diff, but never writes them:
 
 ```bash
-cargo run -- --help
+cargo run -- doctor --store .codexlens.sqlite
+cargo run -- optimize --diff --store .codexlens.sqlite
 ```
 
-The Phase 3 lenses are exposed from the `codexlens::analysis` module and accept
-canonical data without reopening source files. See [the architecture
-specification](docs/specs/architecture.md),
+The Phase 3 lenses and Phase 4 advisor are exposed from the
+`codexlens::analysis` and `codexlens::advisor` modules. The lenses consume
+canonical data without reopening source files; the advisor reads only the
+recommended instruction files when rendering diffs. See [the architecture specification](docs/specs/architecture.md),
 [the session format contract](docs/specs/session-format.md), and
 [the analysis contract](docs/specs/analysis.md).
 

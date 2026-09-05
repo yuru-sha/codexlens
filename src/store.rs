@@ -1,10 +1,12 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Row, Statement, Transaction, params};
+use serde::{Deserialize, Serialize};
 
 use crate::discovery::{DiscoveredInput, InputKind, ReaderKind, codex_home_for_source};
 use crate::instructions::{
@@ -12,9 +14,12 @@ use crate::instructions::{
     snapshot_from_resolution,
 };
 use crate::model::{
-    CanonicalData, CanonicalDiagnostic, DiagnosticKind, FileOperation, InstructionFile,
-    InstructionJoin, InstructionScope, InstructionSnapshot, Message, Record, RecordKind, Session,
-    SourceKind, SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn,
+    CANONICAL_SCHEMA_VERSION, CanonicalData, CanonicalDiagnostic, DiagnosticKind, FileOperation,
+    InstructionDiagnostic, InstructionFile, InstructionFileKind, InstructionFileState,
+    InstructionJoin, InstructionScope, InstructionSnapshot, InstructionSnapshotAccuracy,
+    InstructionSnapshotEntry, InstructionSnapshotSource, Message, MessageRole, OutcomeSource,
+    ProjectRootStatus, Record, RecordKind, Session, SourceKind, SourceRef, TokenUsage, ToolCall,
+    ToolOutcome, ToolResult, Turn, TurnLifecycleEvent,
 };
 use crate::normalize::{normalize_rollout, normalize_rollout_with_instructions};
 use crate::rollout::{ParseDiagnosticKind, RolloutParseOptions, parse_rollout};
@@ -60,6 +65,41 @@ pub struct IngestSummary {
     pub diagnostics: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FreshnessState {
+    Empty,
+    Recorded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreFreshness {
+    pub state: FreshnessState,
+    pub source_count: usize,
+    pub latest_ingested_at: Option<String>,
+}
+
+impl StoreFreshness {
+    pub fn recorded(source_count: usize, latest_ingested_at: Option<String>) -> Self {
+        Self {
+            state: FreshnessState::Recorded,
+            source_count,
+            latest_ingested_at,
+        }
+    }
+}
+
+impl std::fmt::Display for StoreFreshness {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (&self.state, &self.latest_ingested_at) {
+            (FreshnessState::Empty, _) => formatter.write_str("empty"),
+            (FreshnessState::Recorded, Some(timestamp)) => {
+                write!(formatter, "recorded at {timestamp}")
+            }
+            (FreshnessState::Recorded, None) => formatter.write_str("recorded"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct IngestBatchOptions<'a> {
     storage_mode: Option<&'a str>,
@@ -90,6 +130,36 @@ impl Store {
 
     pub fn connection(&self) -> &Connection {
         &self.connection
+    }
+
+    /// Load only the derived canonical store; raw rollout/state inputs are not reopened.
+    pub fn load_canonical(&self) -> Result<CanonicalData> {
+        load_canonical(&self.connection)
+    }
+
+    pub fn freshness(&self) -> Result<StoreFreshness> {
+        let source_count =
+            self.connection
+                .query_row("SELECT COUNT(*) FROM ingested_files", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let latest_ingested_at = self.connection.query_row(
+            "SELECT MAX(ingested_at) FROM (\n                SELECT ingested_at FROM sessions\n                UNION ALL SELECT ingested_at FROM turns\n                UNION ALL SELECT ingested_at FROM records\n                UNION ALL SELECT ingested_at FROM messages\n                UNION ALL SELECT ingested_at FROM tool_calls\n                UNION ALL SELECT ingested_at FROM tool_results\n                UNION ALL SELECT ingested_at FROM file_operations\n                UNION ALL SELECT ingested_at FROM token_usage\n                UNION ALL SELECT ingested_at FROM diagnostics\n                UNION ALL SELECT ingested_at FROM instruction_snapshots\n                UNION ALL SELECT ingested_at FROM instruction_files\n                UNION ALL SELECT ingested_at FROM instruction_joins\n            )",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+        Ok(if source_count == 0 {
+            StoreFreshness {
+                state: FreshnessState::Empty,
+                source_count: 0,
+                latest_ingested_at,
+            }
+        } else {
+            StoreFreshness::recorded(
+                usize::try_from(source_count).unwrap_or(usize::MAX),
+                latest_ingested_at,
+            )
+        })
     }
 
     pub fn migrate(&mut self) -> Result<()> {
@@ -563,6 +633,597 @@ impl Store {
         }
         transaction.commit()?;
         Ok(())
+    }
+}
+
+fn load_canonical(connection: &Connection) -> Result<CanonicalData> {
+    let mut data = CanonicalData {
+        sessions: load_sessions(connection)?,
+        turns: load_turns(connection)?,
+        records: load_records(connection)?,
+        messages: load_messages(connection)?,
+        tool_calls: load_tool_calls(connection)?,
+        tool_results: load_tool_results(connection)?,
+        file_operations: load_file_operations(connection)?,
+        token_usage: load_token_usage(connection)?,
+        diagnostics: load_diagnostics(connection)?,
+        ..CanonicalData::default()
+    };
+
+    load_instruction_snapshots(connection, &mut data.instruction_snapshots)?;
+    let files = load_instruction_files(connection)?;
+    load_instruction_joins(connection, files, &mut data.instruction_joins)?;
+    Ok(data)
+}
+
+fn load_sessions(connection: &Connection) -> Result<Vec<Session>> {
+    let mut statement = connection.prepare(
+        "SELECT session_id, source_path, source_line, source_kind, ingested_at, parser_schema_version,
+                created_at, updated_at, cwd, project, model, provider, source, thread_source,
+                rollout_path, archive_state, title, preview, parent_id, cli_version, originator,
+                history_mode, reasoning_effort
+         FROM sessions ORDER BY session_id, source_identity",
+    )?;
+    Ok(load_rows(&mut statement, |row| {
+        Ok(Session {
+            id: row.get(0)?,
+            provenance: source_from_row(row, 1, 2, 3, 4, 5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+            cwd: row.get(8)?,
+            project: row.get(9)?,
+            model: row.get(10)?,
+            provider: row.get(11)?,
+            source: row.get(12)?,
+            thread_source: row.get(13)?,
+            rollout_path: row.get(14)?,
+            archive_state: row.get::<_, Option<i64>>(15)?.map(|value| value != 0),
+            title: row.get(16)?,
+            preview: row.get(17)?,
+            parent_id: row.get(18)?,
+            cli_version: row.get(19)?,
+            originator: row.get(20)?,
+            history_mode: row.get(21)?,
+            reasoning_effort: row.get(22)?,
+        })
+    })?)
+}
+
+fn load_turns(connection: &Connection) -> Result<Vec<Turn>> {
+    let mut statement = connection.prepare(
+        "SELECT source_path, source_line, source_kind, ingested_at, parser_schema_version,
+                session_id, turn_id, started_at, completed_at, cwd, model, reasoning_effort,
+                sequence, lifecycle_json
+         FROM turns ORDER BY sequence, turn_key",
+    )?;
+    Ok(load_rows(&mut statement, |row| {
+        Ok(Turn {
+            provenance: source_from_row(row, 0, 1, 2, 3, 4)?,
+            session_id: row.get(5)?,
+            id: row.get(6)?,
+            started_at: row.get(7)?,
+            completed_at: row.get(8)?,
+            cwd: row.get(9)?,
+            model: row.get(10)?,
+            reasoning_effort: row.get(11)?,
+            sequence: usize_from_i64(row.get(12)?, "turn sequence")?,
+            lifecycle: serde_json::from_str::<Vec<TurnLifecycleEvent>>(&row.get::<_, String>(13)?)
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        13,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+        })
+    })?)
+}
+
+fn load_records(connection: &Connection) -> Result<Vec<Record>> {
+    let mut statement = connection.prepare(
+        "SELECT source_path, source_line, source_kind, ingested_at, parser_schema_version,
+                session_id, turn_id, timestamp, sequence, kind, record_type, nested_type,
+                error_category, is_error, is_terminal, raw_json
+         FROM records ORDER BY sequence, record_key",
+    )?;
+    Ok(load_rows(&mut statement, |row| {
+        let kind: String = row.get(9)?;
+        let record_type: Option<String> = row.get(10)?;
+        let nested_type: Option<String> = row.get(11)?;
+        let raw_json: Option<String> = row.get(15)?;
+        Ok(Record {
+            provenance: source_from_row(row, 0, 1, 2, 3, 4)?,
+            session_id: row.get(5)?,
+            turn_id: row.get(6)?,
+            timestamp: row.get(7)?,
+            sequence: usize_from_i64(row.get(8)?, "record sequence")?,
+            original_record_type: record_type.clone(),
+            original_nested_type: nested_type.clone(),
+            error_category: row.get(12)?,
+            is_error: row.get::<_, i64>(13)? != 0,
+            is_terminal: row.get::<_, i64>(14)? != 0,
+            kind: record_kind_from_db(&kind, record_type, nested_type, raw_json),
+        })
+    })?)
+}
+
+fn load_messages(connection: &Connection) -> Result<Vec<Message>> {
+    let mut statement = connection.prepare(
+        "SELECT source_path, source_line, source_kind, ingested_at, parser_schema_version,
+                message_id, session_id, turn_id, role, content, timestamp
+         FROM messages ORDER BY source_path, source_line, message_key",
+    )?;
+    Ok(load_rows(&mut statement, |row| {
+        Ok(Message {
+            provenance: source_from_row(row, 0, 1, 2, 3, 4)?,
+            id: row.get(5)?,
+            session_id: row.get(6)?,
+            turn_id: row.get(7)?,
+            role: row.get::<_, Option<String>>(8)?.map(message_role_from_db),
+            content: row.get(9)?,
+            timestamp: row.get(10)?,
+        })
+    })?)
+}
+
+fn load_tool_calls(connection: &Connection) -> Result<Vec<ToolCall>> {
+    let mut statement = connection.prepare(
+        "SELECT source_path, source_line, source_kind, ingested_at, parser_schema_version,
+                item_id, call_id, session_id, turn_id, tool_name, input_summary, command, cwd, status
+         FROM tool_calls ORDER BY source_path, source_line, call_key",
+    )?;
+    Ok(load_rows(&mut statement, |row| {
+        Ok(ToolCall {
+            provenance: source_from_row(row, 0, 1, 2, 3, 4)?,
+            id: row.get(5)?,
+            call_id: row.get(6)?,
+            session_id: row.get(7)?,
+            turn_id: row.get(8)?,
+            tool_name: row.get(9)?,
+            input_summary: row.get(10)?,
+            command: row.get(11)?,
+            cwd: row.get(12)?,
+            status: row.get(13)?,
+        })
+    })?)
+}
+
+fn load_tool_results(connection: &Connection) -> Result<Vec<ToolResult>> {
+    let mut statement = connection.prepare(
+        "SELECT source_path, source_line, source_kind, ingested_at, parser_schema_version,
+                result_id, call_id, session_id, turn_id, command, cwd, stdout, stderr, duration_ms,
+                exit_code, status, outcome, outcome_source, matched_call, deduplication_key,
+                equivalent_to_path, equivalent_to_line, is_duplicate
+         FROM tool_results ORDER BY source_path, source_line, result_key",
+    )?;
+    Ok(load_rows(&mut statement, |row| {
+        let equivalent_path: Option<String> = row.get(20)?;
+        let equivalent_line = row
+            .get::<_, Option<i64>>(21)?
+            .and_then(|value| usize::try_from(value).ok());
+        let equivalent_to = equivalent_path.map(|path| SourceRef {
+            kind: SourceKind::Rollout,
+            path: PathBuf::from(path),
+            line: equivalent_line,
+            ingested_at: None,
+            parser_schema_version: CANONICAL_SCHEMA_VERSION,
+        });
+        Ok(ToolResult {
+            provenance: source_from_row(row, 0, 1, 2, 3, 4)?,
+            id: row.get(5)?,
+            call_id: row.get(6)?,
+            session_id: row.get(7)?,
+            turn_id: row.get(8)?,
+            command: row.get(9)?,
+            cwd: row.get(10)?,
+            stdout: row.get(11)?,
+            stderr: row.get(12)?,
+            duration_ms: row.get(13)?,
+            exit_code: row.get(14)?,
+            status: row.get(15)?,
+            outcome: tool_outcome_from_db(&row.get::<_, String>(16)?),
+            outcome_source: outcome_source_from_db(&row.get::<_, String>(17)?),
+            matched_call: row.get::<_, i64>(18)? != 0,
+            deduplication_key: row.get(19)?,
+            equivalent_to,
+            is_duplicate: row.get::<_, i64>(22)? != 0,
+        })
+    })?)
+}
+
+fn load_file_operations(connection: &Connection) -> Result<Vec<FileOperation>> {
+    let mut statement = connection.prepare(
+        "SELECT source_path, source_line, source_kind, ingested_at, parser_schema_version,
+                session_id, turn_id, path, operation, timestamp
+         FROM file_operations ORDER BY session_id, timestamp, source_path, source_line, operation_key",
+    )?;
+    Ok(load_rows(&mut statement, |row| {
+        Ok(FileOperation {
+            provenance: source_from_row(row, 0, 1, 2, 3, 4)?,
+            session_id: row.get(5)?,
+            turn_id: row.get(6)?,
+            path: row.get(7)?,
+            operation: row.get(8)?,
+            timestamp: row.get(9)?,
+        })
+    })?)
+}
+
+fn load_token_usage(connection: &Connection) -> Result<Vec<TokenUsage>> {
+    let mut statement = connection.prepare(
+        "SELECT source_path, source_line, source_kind, ingested_at, parser_schema_version,
+                session_id, turn_id, timestamp, input_tokens, cached_input_tokens,
+                output_tokens, reasoning_output_tokens, sequence
+         FROM token_usage ORDER BY sequence, source_path, source_line, usage_key",
+    )?;
+    Ok(load_rows(&mut statement, |row| {
+        Ok(TokenUsage {
+            provenance: source_from_row(row, 0, 1, 2, 3, 4)?,
+            session_id: row.get(5)?,
+            turn_id: row.get(6)?,
+            timestamp: row.get(7)?,
+            input_tokens: row
+                .get::<_, Option<i64>>(8)?
+                .and_then(|value| u64::try_from(value).ok()),
+            cached_input_tokens: row
+                .get::<_, Option<i64>>(9)?
+                .and_then(|value| u64::try_from(value).ok()),
+            output_tokens: row
+                .get::<_, Option<i64>>(10)?
+                .and_then(|value| u64::try_from(value).ok()),
+            reasoning_output_tokens: row
+                .get::<_, Option<i64>>(11)?
+                .and_then(|value| u64::try_from(value).ok()),
+            sequence: usize_from_i64(row.get(12)?, "token sequence")?,
+        })
+    })?)
+}
+
+fn load_diagnostics(connection: &Connection) -> Result<Vec<CanonicalDiagnostic>> {
+    let mut statement = connection.prepare(
+        "SELECT source_path, source_line, source_kind, ingested_at, parser_schema_version,
+                kind, message
+         FROM diagnostics ORDER BY source_path, source_line, diagnostic_key",
+    )?;
+    Ok(load_rows(&mut statement, |row| {
+        Ok(CanonicalDiagnostic {
+            source: source_from_row(row, 0, 1, 2, 3, 4)?,
+            kind: diagnostic_kind_from_db(&row.get::<_, String>(5)?),
+            message: row.get(6)?,
+        })
+    })?)
+}
+
+fn load_rows<T, F>(statement: &mut Statement<'_>, mapper: F) -> rusqlite::Result<Vec<T>>
+where
+    F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
+{
+    statement.query_map([], mapper)?.collect()
+}
+
+fn source_from_row(
+    row: &Row<'_>,
+    path: usize,
+    line: usize,
+    kind: usize,
+    ingested_at: usize,
+    parser_schema_version: usize,
+) -> rusqlite::Result<SourceRef> {
+    Ok(SourceRef {
+        kind: source_kind_from_db(&row.get::<_, String>(kind)?),
+        path: PathBuf::from(row.get::<_, String>(path)?),
+        line: row
+            .get::<_, Option<i64>>(line)?
+            .and_then(|value| usize::try_from(value).ok()),
+        ingested_at: row.get(ingested_at)?,
+        parser_schema_version: u32::try_from(row.get::<_, i64>(parser_schema_version)?)
+            .unwrap_or(CANONICAL_SCHEMA_VERSION),
+    })
+}
+
+fn usize_from_i64(value: i64, field: &str) -> rusqlite::Result<usize> {
+    usize::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Integer,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{field}: {error}"),
+            )),
+        )
+    })
+}
+
+fn source_kind_from_db(value: &str) -> SourceKind {
+    if value == "state" {
+        SourceKind::State
+    } else {
+        SourceKind::Rollout
+    }
+}
+
+fn record_kind_from_db(
+    kind: &str,
+    record_type: Option<String>,
+    nested_type: Option<String>,
+    raw_json: Option<String>,
+) -> RecordKind {
+    match kind {
+        "session_metadata" => RecordKind::SessionMetadata,
+        "turn_context" => RecordKind::TurnContext,
+        "response_item" => RecordKind::ResponseItem,
+        "event_message" => RecordKind::EventMessage,
+        "compacted" => RecordKind::Compacted,
+        "world_state" => RecordKind::WorldState,
+        _ => RecordKind::Unknown {
+            record_type,
+            nested_type,
+            raw_json: raw_json.unwrap_or_default(),
+        },
+    }
+}
+
+fn message_role_from_db(value: String) -> MessageRole {
+    match value.as_str() {
+        "user" => MessageRole::User,
+        "assistant" => MessageRole::Assistant,
+        _ => MessageRole::Other(value),
+    }
+}
+
+fn tool_outcome_from_db(value: &str) -> ToolOutcome {
+    match value {
+        "succeeded" => ToolOutcome::Succeeded,
+        "failed" => ToolOutcome::Failed,
+        _ => ToolOutcome::Unknown,
+    }
+}
+
+fn outcome_source_from_db(value: &str) -> OutcomeSource {
+    match value {
+        "exit_code" => OutcomeSource::ExitCode,
+        "status" => OutcomeSource::Status,
+        "output_text" => OutcomeSource::OutputText,
+        _ => OutcomeSource::Unknown,
+    }
+}
+
+fn diagnostic_kind_from_db(value: &str) -> DiagnosticKind {
+    match value {
+        "malformed_json" => DiagnosticKind::MalformedJson,
+        "oversized_line" => DiagnosticKind::OversizedLine,
+        "unreadable" => DiagnosticKind::Unreadable,
+        "state_schema_mismatch" => DiagnosticKind::StateSchemaMismatch,
+        "state_query" => DiagnosticKind::StateQuery,
+        "metadata_conflict" => DiagnosticKind::MetadataConflict,
+        _ => DiagnosticKind::UnsupportedReader,
+    }
+}
+
+fn load_instruction_snapshots(
+    connection: &Connection,
+    snapshots: &mut Vec<InstructionSnapshot>,
+) -> Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT s.source_path, s.source_line, s.source_kind, s.ingested_at, s.parser_schema_version,
+                s.session_id, s.turn_id, s.snapshot_source, s.accuracy, s.content_hash,
+                s.byte_count, s.effective_chain_hash, s.truncated, s.chain_json, b.content
+         FROM instruction_snapshots AS s
+         LEFT JOIN instruction_blobs AS b ON b.blob_key = s.blob_key
+         ORDER BY s.session_id, s.turn_id, s.snapshot_key",
+    )?;
+    let rows = load_rows(&mut statement, |row| {
+        let source = snapshot_source_from_db(&row.get::<_, String>(7)?);
+        let accuracy = snapshot_accuracy_from_db(&row.get::<_, String>(8)?);
+        let chain =
+            serde_json::from_str::<Vec<InstructionSnapshotEntry>>(&row.get::<_, String>(13)?)
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        13,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+        Ok(InstructionSnapshot {
+            provenance: source_from_row(row, 0, 1, 2, 3, 4)?,
+            session_id: row.get(5)?,
+            turn_id: row.get(6)?,
+            source,
+            accuracy,
+            content: row.get(14)?,
+            content_hash: row.get(9)?,
+            byte_count: usize_from_i64(row.get(10)?, "snapshot byte count")?,
+            chain,
+            effective_chain_hash: row.get(11)?,
+            truncated: row.get::<_, i64>(12)? != 0,
+        })
+    })?;
+    snapshots.extend(rows);
+    Ok(())
+}
+
+fn load_instruction_files(
+    connection: &Connection,
+) -> Result<BTreeMap<String, Vec<InstructionFile>>> {
+    let mut files = BTreeMap::new();
+    let mut statement = connection.prepare(
+        "SELECT f.source_path, f.source_line, f.source_kind, f.ingested_at, f.parser_schema_version,
+                f.session_id, f.path, f.scope, f.file_kind, f.state, f.chain_position,
+                f.content_hash, f.byte_count, f.diagnostic, b.content
+         FROM instruction_files AS f
+         LEFT JOIN instruction_blobs AS b ON b.blob_key = f.blob_key
+         ORDER BY f.session_id, f.chain_position, f.path, f.file_key",
+    )?;
+    let rows = load_rows(&mut statement, |row| {
+        Ok((
+            row.get::<_, String>(5)?,
+            InstructionFile {
+                path: PathBuf::from(row.get::<_, String>(6)?),
+                scope: instruction_scope_from_db(&row.get::<_, String>(7)?),
+                kind: instruction_file_kind_from_db(&row.get::<_, String>(8)?),
+                state: instruction_file_state_from_db(&row.get::<_, String>(9)?),
+                chain_position: row
+                    .get::<_, Option<i64>>(10)?
+                    .and_then(|value| usize::try_from(value).ok()),
+                content: row.get(14)?,
+                content_hash: row.get(11)?,
+                byte_count: usize_from_i64(row.get(12)?, "instruction byte count")?,
+                diagnostic: row.get(13)?,
+            },
+            source_from_row(row, 0, 1, 2, 3, 4)?,
+        ))
+    })?;
+    for (session_id, file, _) in rows {
+        files.entry(session_id).or_insert_with(Vec::new).push(file);
+    }
+    Ok(files)
+}
+
+fn load_instruction_joins(
+    connection: &Connection,
+    files_by_session: BTreeMap<String, Vec<InstructionFile>>,
+    joins: &mut Vec<InstructionJoin>,
+) -> Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT source_path, source_line, source_kind, ingested_at, parser_schema_version,
+                session_id, cwd, project_root, project_root_status, nearest_path, nearest_scope,
+                effective_chain_hash, chain_json, diagnostics_json
+         FROM instruction_joins ORDER BY session_id, join_key",
+    )?;
+    let rows = load_rows(&mut statement, |row| {
+        let session_id: String = row.get(5)?;
+        let entries =
+            serde_json::from_str::<Vec<InstructionSnapshotEntry>>(&row.get::<_, String>(12)?)
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        12,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+        let diagnostics =
+            serde_json::from_str::<Vec<InstructionDiagnostic>>(&row.get::<_, String>(13)?)
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        13,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+        let files = files_by_session
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default();
+        let chain = entries
+            .iter()
+            .map(|entry| {
+                files
+                    .iter()
+                    .find(|file| {
+                        file.path == entry.path && file.chain_position == Some(entry.chain_position)
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| InstructionFile {
+                        path: entry.path.clone(),
+                        scope: entry.scope.unwrap_or(InstructionScope::ProjectNested),
+                        kind: entry.kind.clone(),
+                        state: entry.state,
+                        chain_position: Some(entry.chain_position),
+                        content: None,
+                        content_hash: entry.content_hash.clone(),
+                        byte_count: entry.byte_count,
+                        diagnostic: None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let effective_content = chain
+            .iter()
+            .filter_map(|file| file.content.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let effective_content = (!effective_content.is_empty()).then_some(effective_content);
+        Ok(InstructionJoin {
+            provenance: source_from_row(row, 0, 1, 2, 3, 4)?,
+            session_id,
+            cwd: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
+            project_root: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
+            project_root_status: project_root_status_from_db(&row.get::<_, String>(8)?),
+            nearest_path: row.get::<_, Option<String>>(9)?.map(PathBuf::from),
+            nearest_scope: row
+                .get::<_, Option<String>>(10)?
+                .map(|value| instruction_scope_from_db(&value)),
+            resolution: crate::model::InstructionResolution {
+                project_root: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
+                cwd: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
+                project_root_status: project_root_status_from_db(&row.get::<_, String>(8)?),
+                files,
+                chain: chain.clone(),
+                effective_content,
+                effective_chain_hash: row.get(11)?,
+                byte_count: chain
+                    .iter()
+                    .map(|file| file.content.as_ref().map_or(0, String::len))
+                    .sum(),
+                truncated: chain
+                    .iter()
+                    .any(|file| file.state == InstructionFileState::Truncated),
+                diagnostics,
+            },
+        })
+    })?;
+    joins.extend(rows);
+    Ok(())
+}
+
+fn instruction_scope_from_db(value: &str) -> InstructionScope {
+    match value {
+        "global" => InstructionScope::Global,
+        "project_nested" => InstructionScope::ProjectNested,
+        _ => InstructionScope::ProjectRoot,
+    }
+}
+
+fn instruction_file_kind_from_db(value: &str) -> InstructionFileKind {
+    match value {
+        "override" => InstructionFileKind::Override,
+        "standard" => InstructionFileKind::Standard,
+        "observed" => InstructionFileKind::Observed,
+        _ => InstructionFileKind::Fallback(String::new()),
+    }
+}
+
+fn instruction_file_state_from_db(value: &str) -> InstructionFileState {
+    match value {
+        "selected" => InstructionFileState::Selected,
+        "empty" => InstructionFileState::Empty,
+        "missing" => InstructionFileState::Missing,
+        "truncated" => InstructionFileState::Truncated,
+        _ => InstructionFileState::Unreadable,
+    }
+}
+
+fn project_root_status_from_db(value: &str) -> ProjectRootStatus {
+    match value {
+        "known" => ProjectRootStatus::Known,
+        "missing" => ProjectRootStatus::Missing,
+        "conflict" => ProjectRootStatus::Conflict,
+        _ => ProjectRootStatus::Unavailable,
+    }
+}
+
+fn snapshot_source_from_db(value: &str) -> InstructionSnapshotSource {
+    match value {
+        "rollout" => InstructionSnapshotSource::Rollout,
+        "filesystem_at_ingest" => InstructionSnapshotSource::FilesystemAtIngest,
+        _ => InstructionSnapshotSource::Unavailable,
+    }
+}
+
+fn snapshot_accuracy_from_db(value: &str) -> InstructionSnapshotAccuracy {
+    match value {
+        "observed" => InstructionSnapshotAccuracy::Observed,
+        "reconstructed" => InstructionSnapshotAccuracy::Reconstructed,
+        _ => InstructionSnapshotAccuracy::Unavailable,
     }
 }
 
@@ -1308,6 +1969,7 @@ fn insert_tool_result(
             result.stderr,
             result.duration_ms,
             result.exit_code,
+            result.status,
             outcome_name(result.outcome),
             outcome_source_name(result.outcome_source),
             i64::from(result.matched_call),
@@ -1914,6 +2576,12 @@ mod tests {
         assert_eq!(snapshot.3, i64::try_from(instruction_text.len()).unwrap());
         assert_eq!(snapshot.2, snapshot.4);
         assert!(snapshot.5.contains("Observed"));
+        let loaded = store.load_canonical().unwrap();
+        assert_eq!(loaded.instruction_snapshots.len(), 2);
+        assert_eq!(
+            loaded.instruction_snapshots[0].content.as_deref(),
+            Some(instruction_text)
+        );
         let _ = fs::remove_file(source);
     }
 
@@ -1967,6 +2635,15 @@ mod tests {
                 )
                 .unwrap(),
             3
+        );
+        let loaded = store.load_canonical().unwrap();
+        assert_eq!(loaded.instruction_joins.len(), 1);
+        assert!(
+            loaded.instruction_joins[0]
+                .resolution
+                .chain
+                .iter()
+                .any(|file| file.content.as_deref() == Some("nested instruction"))
         );
         assert_eq!(
             store
@@ -2521,6 +3198,43 @@ mod tests {
             1
         );
         let _ = fs::remove_file(rollout_source);
+    }
+
+    #[test]
+    fn load_canonical_round_trips_derived_store_for_reporting() {
+        let source = temp_path("load.jsonl");
+        copy_fixture("analysis", "lenses.jsonl", &source);
+        let mut store = Store::in_memory().unwrap();
+        let summary = store
+            .ingest_rollout_file(&source, &RolloutParseOptions::default())
+            .unwrap();
+
+        let data = store.load_canonical().unwrap();
+        assert_eq!(data.sessions.len(), summary.sessions);
+        assert_eq!(data.records.len(), summary.records);
+        assert_eq!(data.messages.len(), summary.messages);
+        assert_eq!(data.tool_calls.len(), summary.tool_calls);
+        assert_eq!(data.tool_results.len(), summary.tool_results);
+        assert_eq!(data.file_operations.len(), 4);
+        assert_eq!(store.freshness().unwrap().source_count, 1);
+        let findings = crate::analysis::analyze_default(&data);
+        for kind in [
+            crate::analysis::FindingType::Failure,
+            crate::analysis::FindingType::Correction,
+            crate::analysis::FindingType::Rework,
+            crate::analysis::FindingType::Verification,
+            crate::analysis::FindingType::Knowledge,
+        ] {
+            assert!(findings.iter().any(|finding| finding.kind == kind));
+        }
+        assert_eq!(
+            data.tool_results
+                .iter()
+                .filter(|result| result.outcome == ToolOutcome::Failed)
+                .count(),
+            2
+        );
+        let _ = fs::remove_file(source);
     }
 
     fn copy_fixture(category: &str, name: &str, destination: &Path) {
