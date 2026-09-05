@@ -134,10 +134,15 @@ contain these logical areas:
 | `token_usage` | deduplicated usage snapshots |
 | `instruction_files` | discovered instruction sources and scope |
 | `instruction_snapshots` | historical effective-chain content/hash |
-| `corrections` | detected user corrections and evidence |
-| `findings` | reproducible analysis results |
+| `corrections` | in-memory lens output for detected user corrections and evidence |
+| `findings` | in-memory lens output for reproducible analysis results |
 | `ingested_files` | incremental-ingest identity and diagnostics |
 | `schema_versions` | store migration state |
+
+In the current MVP, `corrections` and `findings` are logical analysis outputs,
+not persisted SQLite tables. Lenses derive them from canonical data loaded
+from the store, and reports render those results directly. Persisting lens
+outputs requires a separate schema and migration decision.
 
 Unknown records are kept in `records` (or a dedicated table) as raw JSON in
 the local store only. Reports do not print them unless explicitly requested.
