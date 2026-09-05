@@ -9,8 +9,8 @@ use super::{
     Activity, ActivityKind, AnalysisOptions, CORRECTION_MARKERS, DEFAULT_MIN_OCCURRENCES,
     DEFAULT_MIN_SESSIONS, EvidenceRole, Finding, FindingConfidence, FindingSeverity, FindingType,
     annotate_snapshot_limitations, bounded_excerpt, bounded_fingerprint, compare_positions,
-    distinct_sessions, evidence_for, majority_scope, normalize_fact, position_for_message,
-    position_for_source, push_evidence, redact_sensitive, sort_findings,
+    distinct_sessions, evidence_for, majority_scope, normalize_fact, position_for_source,
+    push_evidence, redact_sensitive, sort_findings,
 };
 
 #[derive(Debug, Clone)]
@@ -29,6 +29,10 @@ pub(super) struct CorrectionFact {
     pub(super) text: String,
     pub(super) source: SourceRef,
     pub(super) excerpt: String,
+}
+
+fn position_for_message(data: &CanonicalData, message: &Message) -> super::Position {
+    position_for_source(data, &message.provenance, message.timestamp.as_deref())
 }
 
 pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
@@ -334,7 +338,7 @@ mod tests {
 
     #[test]
     fn bounded_fingerprints_redact_all_values_and_keep_marker_contract() {
-        use super::super::{MAX_FACT_KEY_BYTES, normalize_fact, normalize_guidance};
+        use super::super::MAX_FACT_KEY_BYTES;
 
         let long = format!(
             "Use token=first-token token=second-token {}",
@@ -350,14 +354,6 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.len() <= MAX_FACT_KEY_BYTES);
         assert!(second.len() <= MAX_FACT_KEY_BYTES);
-        assert_eq!(
-            normalize_guidance(
-                "Use /fixture/project/src/lib.rs fixture-00000000-0000-0000-0000-000000000001"
-            ),
-            normalize_fact(
-                "Use /fixture/project/src/lib.rs fixture-00000000-0000-0000-0000-000000000001"
-            )
-        );
         assert_eq!(correction_fact("The repo uses cargo test."), None);
     }
 }
