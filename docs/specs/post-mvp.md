@@ -136,9 +136,11 @@ additional implicit refresh on an existing reporting command.
 
 - Refresh diagnostics are bounded and redact prompt, command, and output
   excerpts using the existing canonical/report limits.
-- Frozen and normal reports contain only derived-store data and permitted
-  bounded evidence; they do not transmit data or read outside the configured
-  input boundary.
+- Frozen and normal finding/session reports contain only derived-store data and
+  permitted bounded evidence; they do not transmit data or read outside the
+  configured input boundary. `optimize --diff` is the explicit read-only
+  exception: it may read the validated target instruction files needed to
+  render a proposal, as defined by the advisor contract.
 - Both workflows preserve the source read-only guarantee, including on parse,
   migration, and rollback errors.
 
@@ -390,36 +392,45 @@ history for the first implementation.
 ### Scope
 
 Keep `optimize --diff` review-only and read-only. A future `optimize --apply`
-may write only validated proposal targets in the allowed instruction scope;
-it must never write rollout files, state databases, source files, or the
-derived store as a side effect of applying a proposal.
+may write only the validated proposal write set in the allowed instruction
+scope. For `add`, `modify`, and `remove`, the write set is `target_path`; for
+`move_to_docs` and `split_scope`, it is both `source_path` and `target_path`.
+It must never write rollout files, state databases, or the derived store as a
+side effect of applying a proposal.
 
 Before any write, the implementation must:
 
 1. require an explicit confirmation step; interactive use confirms the exact
-   target set, while non-interactive use must provide `--yes` after the diff
-   was reviewed;
-2. re-read every target and verify its expected content hash;
-3. validate the generated patch against that exact target, with no fuzzy or
+   validated write set, while non-interactive use must provide `--yes` after
+   the diff was reviewed;
+2. re-read every file in the validated write set and verify its expected
+   content hash;
+3. validate the generated patch against that exact write set, with no fuzzy or
    partial application;
-4. validate target scope, regular-file status, and symlink/path boundaries;
-5. create recoverable backups before the first target write.
+4. validate every path in the write set for scope, regular-file status, and
+   symlink/path boundaries;
+5. create recoverable backups for every file in the write set before the first
+   write.
 
-Writes must be atomic per target. If any target write fails, the workflow must
-restore already changed targets from the backups, report recovery status, and
-return failure. Backups remain available after a successful run; the initial
-implementation must not delete them implicitly. A separate, explicit cleanup
-policy may be specified later. A successful result must identify the targets
-changed and the backup/recovery outcome.
+Writes must be atomic across each proposal write set. If any write in the
+workflow fails, it must restore every file already changed from the backups,
+report recovery status, and return failure. Backups remain available after a
+successful run; the initial implementation must not delete them implicitly. A
+separate, explicit cleanup policy may be specified later. A successful result
+must identify the files changed and the backup/recovery outcome.
 
 ### Compatibility tests
 
-- Missing confirmation, a changed target hash, an invalid patch, or a scope
-  violation performs no target write and no partial apply.
-- A synthetic multi-target failure restores every target changed before the
+- Missing confirmation, a changed target or source hash, an invalid patch, or
+  a scope violation performs no write to any file in the validated write set
+  and no partial apply.
+- A synthetic multi-file failure restores every file changed before the
   failure and leaves backups available for inspection.
-- A successful apply changes only the expected target bytes; `--diff` remains
-  byte-for-byte read-only and continues to render the same proposal.
+- Move and split proposals re-read, hash-check, back up, and roll back both
+  source and target paths.
+- A successful apply changes only the expected bytes in each validated write
+  set; `--diff` remains byte-for-byte read-only and continues to render the
+  same proposal.
 - Rollout/state files and the derived store are byte-for-byte unchanged by
   both successful and failed apply attempts.
 

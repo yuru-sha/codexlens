@@ -727,6 +727,12 @@ fn post_mvp_contract_spec_tracks_each_deferred_boundary() {
         "RenderedDiff",
         "SkippedProposal",
         "escape backslash",
+        "optimize --diff` is the explicit read-only",
+        "validated proposal write set",
+        "`source_path` and `target_path`",
+        "every file in the validated write set",
+        "atomic across each proposal write set",
+        "source and target paths",
     ] {
         assert!(spec.contains(marker), "missing contract marker: {marker}");
     }
