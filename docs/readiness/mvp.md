@@ -33,7 +33,8 @@ behavior of `optimize --diff`.
   derived-store reports, and review-only proposal diffs; ingestion and store
   APIs remain library boundaries rather than CLI reporting behavior.
 - Finding and report ordering is deterministic; evidence retains source paths
-  and line numbers, and reports bound/redact human-facing excerpts.
+  and line numbers where available, and reports bound/redact human-facing
+  excerpts.
 - Reporting reads the derived store without reopening raw rollout/state input.
   `optimize --diff` reads target instruction files but never writes them.
 - No blocking issue remains for the current MVP reporting path. The
