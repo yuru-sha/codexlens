@@ -579,6 +579,7 @@ fn readiness_document_tracks_the_mvp_boundary_and_entry_condition() {
         "optimize --apply",
         "compressed rollout",
         "#53",
+        "#54",
         "Next-phase entry condition",
         "read-only",
     ] {

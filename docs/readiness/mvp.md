@@ -18,8 +18,9 @@ cargo test --all-features
 cargo test --all-features --test cli
 ```
 
-The CI workflow runs the same gates with Rust 1.85.0 and 1.92.0. At review
-time, both checks passed for `main` at `2781536`.
+The CI workflow runs the same gates with Rust 1.85.0 and 1.92.0. The base
+branch was green at review time (`main` at `2781536`); the current head must
+pass the same matrix before this change is merged.
 
 CLI integration coverage exercises every supported reporting command with
 synthetic stores, including empty and minimal stores, aliases, deterministic
@@ -28,13 +29,17 @@ behavior of `optimize --diff`.
 
 ## Review result
 
-- Public interfaces are limited to canonical-data lenses, derived-store
-  reports, and review-only proposal diffs.
+- The user-facing public surface is limited to canonical-data lenses,
+  derived-store reports, and review-only proposal diffs; ingestion and store
+  APIs remain library boundaries rather than CLI reporting behavior.
 - Finding and report ordering is deterministic; evidence retains source paths
   and line numbers, and reports bound/redact human-facing excerpts.
 - Reporting reads the derived store without reopening raw rollout/state input.
   `optimize --diff` reads target instruction files but never writes them.
-- No blocking spec or standards finding remains for the MVP boundary.
+- No blocking issue remains for the current MVP reporting path. The
+  corrections/findings persistence wording in the architecture specification
+  needs an explicit decision before a future phase relies on persisted lens
+  output; that clarification is tracked in [#54](https://github.com/yuru-sha/codexlens/issues/54).
 
 ## Deferred work
 
@@ -43,6 +48,10 @@ The deferred capabilities and their rationale are tracked in
 readers, refresh/frozen-mode behavior, machine-readable output, live
 monitoring, and `optimize --apply`. They remain deferred because each expands
 an input, runtime, output, or write boundary that needs its own contract.
+
+The store-schema wording for `corrections` and `findings` is tracked
+separately in [#54](https://github.com/yuru-sha/codexlens/issues/54); the
+current CLI derives those results in memory from canonical data.
 
 ## Next-phase entry condition
 
