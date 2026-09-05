@@ -398,6 +398,26 @@ scope. For `add`, `modify`, and `remove`, the write set is `target_path`; for
 It must never write rollout files, state databases, or the derived store as a
 side effect of applying a proposal.
 
+The allowed roots and file classes come from the resolved instruction scope,
+not from either proposal path alone:
+
+- Global scope permits only the canonical configured `$CODEX_HOME` root and
+  selected global instruction filenames (`AGENTS.override.md`, `AGENTS.md`, or
+  a configured fallback).
+- Project and instruction scopes permit only the canonical resolved project
+  root and selected instruction filenames. A `move_to_docs` target may also be
+  an existing Markdown documentation file under that project root (`docs/` or
+  `README.md`); other file classes are rejected.
+- Every write-set path must be an existing regular file with no symlink
+  component. Raw `..` traversal is rejected before canonicalization; every
+  component is canonicalized and a result outside its allowed root is
+  rejected. Missing or ambiguous roots and `Path` scope are rejected.
+- For `move_to_docs` and `split_scope`, source and target must be distinct
+  canonical paths under the same resolved root; source must be a selected
+  instruction file and target must be a permitted instruction or documentation
+  file. The source_path field is not an independent authority to expand the
+  scope.
+
 Before any write, the implementation must:
 
 1. require an explicit confirmation step; interactive use confirms the exact
@@ -412,20 +432,27 @@ Before any write, the implementation must:
 5. create recoverable backups for every file in the write set before the first
    write.
 
-Writes must be atomic across each proposal write set. If any write in the
-workflow fails, it must restore every file already changed from the backups,
-report recovery status, and return failure. Backups remain available after a
-successful run; the initial implementation must not delete them implicitly. A
-separate, explicit cleanup policy may be specified later. A successful result
-must identify the files changed and the backup/recovery outcome.
+Writes are atomic across each proposal write set. A single `--apply` invocation
+is one transaction over the complete proposal batch: no proposal write set may
+remain committed if a later proposal fails. If any write in the workflow fails,
+it must restore every file changed in any prior or current write set from the
+backups, report recovery status, and return failure. Backups remain available
+after a successful run; the initial implementation must not delete them
+implicitly. A separate, explicit cleanup policy may be specified later. A
+successful result must identify the files changed and the backup/recovery
+outcome.
 
 ### Compatibility tests
 
+- An out-of-scope source path, raw `..` traversal, symlink component,
+  non-regular file, or missing/ambiguous root rejects the whole proposal batch
+  before any write.
 - Missing confirmation, a changed target or source hash, an invalid patch, or
   a scope violation performs no write to any file in the validated write set
   and no partial apply.
-- A synthetic multi-file failure restores every file changed before the
-  failure and leaves backups available for inspection.
+- A synthetic multi-proposal failure after an earlier proposal was written
+  restores every file in every changed write set and leaves backups available
+  for inspection.
 - Move and split proposals re-read, hash-check, back up, and roll back both
   source and target paths.
 - A successful apply changes only the expected bytes in each validated write
@@ -439,10 +466,10 @@ must identify the files changed and the backup/recovery outcome.
 - Confirmation, success, failure, backup, and recovery messages contain
   bounded paths and summaries, never raw session prompts, commands, outputs,
   tokens, or credentials.
-- Backups are local, scoped to the validated target, and are never uploaded or
-  copied into repository fixtures.
+- Backups are local, scoped to the validated write set, and are never uploaded
+  or copied into repository fixtures.
 - Recovery failures are explicit and actionable; the command never reports
-  success while a target or backup is in an unknown state.
+  success while any file or backup is in an unknown state.
 
 ## Entry gate for implementation issues
 

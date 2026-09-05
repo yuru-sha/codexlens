@@ -733,6 +733,13 @@ fn post_mvp_contract_spec_tracks_each_deferred_boundary() {
         "every file in the validated write set",
         "atomic across each proposal write set",
         "source and target paths",
+        "allowed roots and file classes",
+        "existing regular file with no symlink",
+        "source_path field is not an independent authority",
+        "Backups are local, scoped to the validated write set",
+        "one transaction over the complete proposal batch",
+        "multi-proposal failure",
+        "out-of-scope source path",
     ] {
         assert!(spec.contains(marker), "missing contract marker: {marker}");
     }
