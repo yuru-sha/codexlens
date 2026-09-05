@@ -22,7 +22,7 @@ use crate::state::{
     StateDiagnostic, StateDiagnosticKind, StateReadResult, merge_state_results, read_state_database,
 };
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 6;
 
 const STATE_STORAGE_STANDALONE: &str = "standalone";
 const STATE_STORAGE_ENRICHMENT: &str = "enrichment";
@@ -630,6 +630,9 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                 kind TEXT NOT NULL,
                 record_type TEXT,
                 nested_type TEXT,
+                error_category TEXT,
+                is_error INTEGER NOT NULL DEFAULT 0,
+                is_terminal INTEGER NOT NULL DEFAULT 0,
                 raw_json TEXT
             );
             CREATE TABLE IF NOT EXISTS messages (
@@ -853,6 +856,31 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             "#,
         )?;
     }
+    if current < 5 {
+        add_column_if_table_exists(&transaction, "records", "error_category TEXT")?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO schema_versions (version) VALUES (5)",
+            [],
+        )?;
+        transaction.execute_batch("PRAGMA user_version = 5;")?;
+    }
+    if current < 6 {
+        add_column_if_table_exists(
+            &transaction,
+            "records",
+            "is_error INTEGER NOT NULL DEFAULT 0",
+        )?;
+        add_column_if_table_exists(
+            &transaction,
+            "records",
+            "is_terminal INTEGER NOT NULL DEFAULT 0",
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO schema_versions (version) VALUES (6)",
+            [],
+        )?;
+        transaction.execute_batch("PRAGMA user_version = 6;")?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -882,6 +910,23 @@ fn add_column_if_table_exists(
         |row| row.get::<_, i64>(0),
     )? != 0;
     if exists {
+        let column = definition.split_whitespace().next().unwrap_or_default();
+        let has_column = {
+            let mut statement =
+                transaction.prepare(&format!("PRAGMA table_info({})", quote_identifier(table)))?;
+            let mut rows = statement.query([])?;
+            let mut found = false;
+            while let Some(row) = rows.next()? {
+                if row.get::<_, String>(1)? == column {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if has_column {
+            return Ok(());
+        }
         transaction.execute(
             &format!(
                 "ALTER TABLE {} ADD COLUMN {definition}",
@@ -1142,7 +1187,7 @@ fn insert_record(
     let key = row_key(identity, &record.provenance, &format!("record:{index}"));
     let (kind, record_type, nested_type, raw_json) = record_kind_values(record);
     transaction.execute(
-        "INSERT OR REPLACE INTO records (record_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, turn_id, timestamp, sequence, kind, record_type, nested_type, raw_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT OR REPLACE INTO records (record_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, turn_id, timestamp, sequence, kind, record_type, nested_type, error_category, is_error, is_terminal, raw_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             key,
             identity,
@@ -1158,6 +1203,9 @@ fn insert_record(
             kind,
             record_type,
             nested_type,
+            record.error_category,
+            i64::from(record.is_error),
+            i64::from(record.is_terminal),
             raw_json,
         ],
     )?;
@@ -1773,6 +1821,42 @@ mod tests {
                 .unwrap(),
             SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn records_persist_canonical_error_and_terminal_flags() {
+        let source = temp_path("record-flags.jsonl");
+        fs::write(
+            &source,
+            r#"{"type":"session_meta","payload":{"id":"fixture-record-session"}}
+{"type":"event_msg","payload":{"type":"error","message":"synthetic error"}}
+{"type":"event_msg","payload":{"type":"turn_complete","turn_id":"fixture-record-turn"}}"#,
+        )
+        .unwrap();
+        let mut store = Store::in_memory().unwrap();
+        store
+            .ingest_rollout_file(&source, &RolloutParseOptions::default())
+            .unwrap();
+
+        let error_flags = store
+            .connection()
+            .query_row(
+                "SELECT is_error, is_terminal FROM records WHERE nested_type = 'error'",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        let terminal_flags = store
+            .connection()
+            .query_row(
+                "SELECT is_error, is_terminal FROM records WHERE nested_type = 'turn_complete'",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(error_flags, (1, 0));
+        assert_eq!(terminal_flags, (0, 1));
+        let _ = fs::remove_file(source);
     }
 
     #[test]

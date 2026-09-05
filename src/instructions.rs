@@ -298,6 +298,17 @@ pub fn snapshot_from_resolution(
     resolution: &InstructionResolution,
     provenance: SourceRef,
 ) -> InstructionSnapshot {
+    if resolution
+        .files
+        .iter()
+        .any(|file| file.state == InstructionFileState::Unreadable)
+        || resolution
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == InstructionDiagnosticKind::Unreadable)
+    {
+        return unavailable_snapshot(session_id, turn_id, provenance);
+    }
     let Some(content) = resolution.effective_content.as_ref() else {
         return unavailable_snapshot(session_id, turn_id, provenance);
     };
@@ -802,6 +813,41 @@ mod tests {
         assert_eq!(result.chain[2].scope, InstructionScope::ProjectNested);
         assert_eq!(result.chain[3].chain_position, Some(3));
         assert!(result.effective_chain_hash.is_some());
+    }
+
+    #[test]
+    fn unreadable_instruction_candidate_makes_snapshot_unavailable() {
+        let temp = TempDir::new();
+        let root = temp.0.join("project");
+        let nested = root.join("src");
+        fs::create_dir_all(nested.join("AGENTS.override.md")).unwrap();
+        write(&root.join("AGENTS.md"), "root guidance");
+
+        let resolver = InstructionResolver::new(
+            None,
+            InstructionConfig {
+                project_doc_fallback_filenames: Vec::new(),
+                project_doc_max_bytes: 32 * 1024,
+            },
+        );
+        let resolution = resolver.resolve(Some(&root), Some(&nested));
+        assert!(resolution.effective_content.is_some());
+        assert!(
+            resolution
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.kind == InstructionDiagnosticKind::Unreadable)
+        );
+
+        let snapshot = snapshot_from_resolution(
+            Some("fixture-session".to_owned()),
+            Some("fixture-turn".to_owned()),
+            &resolution,
+            SourceRef::state(root.join("AGENTS.md")),
+        );
+        assert_eq!(snapshot.source, InstructionSnapshotSource::Unavailable);
+        assert_eq!(snapshot.accuracy, InstructionSnapshotAccuracy::Unavailable);
+        assert!(snapshot.content.is_none());
     }
 
     #[test]

@@ -3,9 +3,9 @@
 Analyze Codex sessions and turn recurring friction into actionable
 `AGENTS.md` improvements.
 
-> Early development: the repository contains the foundation, Phase 1 ingestion
-> library, and Phase 2 instruction resolver, snapshots, and joins. Lenses and
-> reporting remain tracked in the follow-up issues.
+> Early development: the repository contains the foundation, ingestion,
+> instruction capture, and deterministic Phase 3 lenses. Reporting remains
+> tracked in the Phase 4 issues.
 
 ## Goal
 
@@ -46,7 +46,9 @@ be discussed before implementation:
 cargo run -- --help
 ```
 
-See [the architecture specification](docs/specs/architecture.md),
+The Phase 3 lenses are exposed from the `codexlens::analysis` module and accept
+canonical data without reopening source files. See [the architecture
+specification](docs/specs/architecture.md),
 [the session format contract](docs/specs/session-format.md), and
 [the analysis contract](docs/specs/analysis.md).
 

@@ -56,6 +56,24 @@ that a threshold needs tuning.
 | stuck burst | at least 3 edits or a failure/edit loop in one window |
 | excerpt | bounded and redacted before human output |
 
+The correction lens uses only these case-insensitive marker forms after
+whitespace normalization: `use ...` (with an optional trailing `instead`),
+`please use ...`, `this project uses ...`, `this repo uses ...`, `this
+repository uses ...`, `the project uses ...`, `this/the project requires ...`
+(implemented as `this project requires`
+or `the project requires`), `remember that ...`, `note that ...`,
+`do not ...`, `don't ...`, and `never ...`. A question (including a trailing
+`?` or a question-word prefix) and a message without one of these markers is
+not a correction. The fingerprint is the bounded marker remainder with
+whitespace, case, volatile IDs, and paths normalized.
+
+The verification allowlist is intentionally small: observed `cargo` test,
+nextest, fmt, clippy, check, and build; `go` test, fmt, vet, and build;
+pytest, `python -m pytest`, ruff, mypy, eslint, prettier; npm/pnpm/yarn/bun
+test, lint, format, and build scripts; make/just test, lint, format, build,
+or check targets; and `git diff --check`. The lens does not infer a command
+from the project language.
+
 ## 3. `failures`
 
 ### Input
