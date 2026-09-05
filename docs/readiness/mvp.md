@@ -38,8 +38,9 @@ behavior of `optimize --diff`.
   `optimize --diff` reads target instruction files but never writes them.
 - No blocking issue remains for the current MVP reporting path. The
   architecture specification now records that corrections/findings are
-  derived in memory; any future persisted lens output needs an explicit
-  schema decision tracked in [#54](https://github.com/yuru-sha/codexlens/issues/54).
+  derived in memory; [#54](https://github.com/yuru-sha/codexlens/issues/54)
+  closed the clarification. Any future persisted lens output needs its own
+  explicit schema issue.
 
 ## Deferred work
 
@@ -49,9 +50,9 @@ readers, refresh/frozen-mode behavior, machine-readable output, live
 monitoring, and `optimize --apply`. They remain deferred because each expands
 an input, runtime, output, or write boundary that needs its own contract.
 
-The store-schema wording for `corrections` and `findings` is clarified in
-[#54](https://github.com/yuru-sha/codexlens/issues/54); the current CLI
-derives those results in memory from canonical data.
+The store-schema wording for `corrections` and `findings` was clarified and
+closed in [#54](https://github.com/yuru-sha/codexlens/issues/54); the current
+CLI derives those results in memory from canonical data.
 
 ## Next-phase entry condition
 
