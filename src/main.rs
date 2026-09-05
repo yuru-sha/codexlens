@@ -97,8 +97,14 @@ fn main() -> Result<()> {
                 bail!("optimize requires --diff; proposals are advisory and read-only");
             }
             let (data, findings, _) = load_analysis(&store)?;
-            let proposals = proposals_for_findings(&data, &findings);
-            let batch = render_diffs(&proposals);
+            let plan = proposals_for_findings(&data, &findings);
+            let mut batch = render_diffs(&plan.proposals);
+            batch.skipped.extend(plan.skipped);
+            batch.skipped.sort_by(|left, right| {
+                left.target_path
+                    .cmp(&right.target_path)
+                    .then_with(|| left.reason.cmp(&right.reason))
+            });
             for rendered in &batch.rendered {
                 println!("{}", render_proposal_summary(rendered));
             }

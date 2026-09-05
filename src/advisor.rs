@@ -29,6 +29,7 @@ const DEFAULT_REPORT_EXCERPT_BYTES: usize = 256;
 #[serde(rename_all = "snake_case")]
 pub enum ProposalAction {
     Add,
+    /// Reserved for caller-supplied replacements with an approved old value.
     Modify,
     Remove,
     MoveToDocs,
@@ -182,6 +183,7 @@ impl Proposal {
             ProposalAction::MoveToDocs => {
                 let source = stored_file(data, &target_path)?;
                 let source_content = instruction_anchor(source.content.as_deref()?, finding)?;
+                let observed_fact = observed_fact(finding)?;
                 source_path = Some(target_path.clone());
                 expected_source_hash = source.content_hash.clone();
                 let project = project_for_scope(&recommendation.target_scope)?;
@@ -189,7 +191,7 @@ impl Proposal {
                 target_scope = FindingScope::Project(project);
                 expected_target_hash = file_hash(data, &target_path);
                 existing_text = Some(source_content.clone());
-                proposed_text = Some(source_content);
+                proposed_text = Some(observed_fact);
                 target_rationale = format!(
                     "The repeated fact is routed to the project docs page {} while the instruction file keeps a short link",
                     target_path.display()
@@ -305,6 +307,8 @@ fn proposal_advice(finding: &Finding) -> Option<(ProposalAction, Option<String>)
             ),
         ),
         FindingType::Duplicate => (ProposalAction::Remove, None),
+        // ponytail: findings contain observed text, not an approved replacement pair;
+        // keep modify for explicitly constructed proposals until that contract exists.
         FindingType::Stale | FindingType::Truncated => return None,
     };
     Some((
@@ -313,14 +317,21 @@ fn proposal_advice(finding: &Finding) -> Option<(ProposalAction, Option<String>)
     ))
 }
 
+fn observed_fact(finding: &Finding) -> Option<String> {
+    finding
+        .evidence
+        .iter()
+        .filter_map(|evidence| evidence.excerpt.as_deref())
+        .map(str::trim)
+        .find(|excerpt| !excerpt.is_empty())
+        .map(|excerpt| bounded_excerpt(excerpt, MAX_PROPOSAL_TEXT_BYTES))
+}
+
 fn instruction_anchor(content: &str, finding: &Finding) -> Option<String> {
     let lines = content
         .split_inclusive('\n')
         .filter(|line| !line.trim().is_empty())
         .collect::<Vec<_>>();
-    if lines.len() == 1 {
-        return lines.first().map(|line| (*line).to_owned());
-    }
     let mut needles = finding
         .observed_commands
         .iter()
@@ -333,6 +344,15 @@ fn instruction_anchor(content: &str, finding: &Finding) -> Option<String> {
             .split('|')
             .map(str::trim)
             .filter(|part| part.len() >= 4)
+            .map(str::to_ascii_lowercase),
+    );
+    needles.extend(
+        finding
+            .evidence
+            .iter()
+            .filter_map(|evidence| evidence.excerpt.as_deref())
+            .map(str::trim)
+            .filter(|excerpt| excerpt.len() >= 4)
             .map(str::to_ascii_lowercase),
     );
     let matches = lines
@@ -475,18 +495,79 @@ pub fn recommend_scope(data: &CanonicalData, finding: &Finding) -> Option<ScopeR
     })
 }
 
-pub fn proposals_for_findings(data: &CanonicalData, findings: &[Finding]) -> Vec<Proposal> {
-    let mut proposals = findings
-        .iter()
-        .filter_map(|finding| Proposal::from_finding(data, finding))
-        .collect::<Vec<_>>();
-    proposals.sort_by(|left, right| {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalPlan {
+    pub proposals: Vec<Proposal>,
+    pub skipped: Vec<SkippedProposal>,
+}
+
+pub fn proposals_for_findings(data: &CanonicalData, findings: &[Finding]) -> ProposalPlan {
+    let mut plan = ProposalPlan {
+        proposals: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for finding in findings {
+        match Proposal::from_finding(data, finding) {
+            Some(proposal) if proposal.confidence == FindingConfidence::High => {
+                plan.proposals.push(proposal);
+            }
+            Some(proposal) => plan.skipped.push(SkippedProposal {
+                target_path: proposal.target_path,
+                reason: format!(
+                    "proposal confidence is {}; optimize --diff requires high-confidence proposals",
+                    proposal.confidence.as_str()
+                ),
+            }),
+            None => plan.skipped.push(SkippedProposal {
+                target_path: target_path_for_finding(data, finding),
+                reason: proposal_skip_reason(data, finding),
+            }),
+        }
+    }
+    plan.proposals.sort_by(|left, right| {
         left.target_path
             .cmp(&right.target_path)
             .then_with(|| left.action.as_str().cmp(right.action.as_str()))
             .then_with(|| left.observed_problem.cmp(&right.observed_problem))
     });
-    proposals
+    plan.skipped.sort_by(|left, right| {
+        left.target_path
+            .cmp(&right.target_path)
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+    plan
+}
+
+fn target_path_for_finding(data: &CanonicalData, finding: &Finding) -> PathBuf {
+    recommend_scope(data, finding)
+        .map(|recommendation| recommendation.target_path)
+        .unwrap_or_else(|| match &finding.scope {
+            FindingScope::Global => PathBuf::from("AGENTS.md"),
+            FindingScope::Project(path) => path.join("AGENTS.md"),
+            FindingScope::Instruction(path) => path.clone(),
+            FindingScope::Path(path) => PathBuf::from(path),
+        })
+}
+
+fn proposal_skip_reason(data: &CanonicalData, finding: &Finding) -> String {
+    if matches!(finding.kind, FindingType::Stale | FindingType::Truncated) {
+        return format!(
+            "finding type {} is unsupported by optimize --diff; no deterministic replacement text is available",
+            finding.kind.as_str()
+        );
+    }
+    if finding.evidence.is_empty() || finding.occurrences == 0 || finding.distinct_sessions == 0 {
+        return "finding has incomplete evidence; no safe proposal can be built".to_owned();
+    }
+    if finding.kind == FindingType::Verification
+        && finding.verification_status == Some(VerificationStatus::NotObserved)
+    {
+        return "verification was not observed; the proposal is incomplete".to_owned();
+    }
+    if recommend_scope(data, finding).is_none() {
+        return "scope recommendation is unavailable or ambiguous".to_owned();
+    }
+    "no safe proposal could be built from the stored evidence".to_owned()
 }
 
 fn evidence_sessions(finding: &Finding) -> Vec<String> {
@@ -667,7 +748,13 @@ impl Default for DoctorOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorGroup {
     pub scope: FindingScope,
-    pub findings: Vec<Finding>,
+    pub findings: Vec<DoctorFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoctorFinding {
+    pub finding: Finding,
+    pub heuristic: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -707,7 +794,10 @@ pub fn doctor(
                 findings: Vec::new(),
             })
             .findings
-            .push(sanitized);
+            .push(DoctorFinding {
+                heuristic: heuristic_for(&sanitized.kind).to_owned(),
+                finding: sanitized,
+            });
     }
     let mut groups = grouped.into_values().collect::<Vec<_>>();
     if let Some(limit) = options.max_findings_per_scope {
@@ -723,6 +813,24 @@ pub fn doctor(
         freshness,
         finding_counts,
         groups,
+    }
+}
+
+fn heuristic_for(kind: &FindingType) -> &'static str {
+    match kind {
+        FindingType::Failure => "repeated failed tool outcome",
+        FindingType::Correction => "repeated explicit correction marker",
+        FindingType::Rework => "repeated file operation within the short rework window",
+        FindingType::Stuck => "failure and edit burst within one short window",
+        FindingType::Verification => "recognized verification command after a change",
+        FindingType::Knowledge => "repeated bounded lexical fact across sessions",
+        FindingType::Gap => "repeated evidence without matching instruction text",
+        FindingType::Overscoped => {
+            "path-specific evidence covered only by broader instruction scope"
+        }
+        FindingType::Duplicate => "equivalent normalized guidance in multiple scopes",
+        FindingType::Stale => "current instruction hash differs from stored snapshot",
+        FindingType::Truncated => "instruction chain reached the configured byte limit",
     }
 }
 
@@ -870,7 +978,8 @@ pub fn render_doctor(report: &DoctorReport) -> String {
         output.push('[');
         output.push_str(&group.scope.to_string());
         output.push_str("]\n");
-        for finding in &group.findings {
+        for reported in &group.findings {
+            let finding = &reported.finding;
             output.push_str(&format!(
                 "- {} / {} / {}: {} ({} occurrences, {} sessions)\n",
                 finding.kind.as_str(),
@@ -880,6 +989,7 @@ pub fn render_doctor(report: &DoctorReport) -> String {
                 finding.occurrences,
                 finding.distinct_sessions
             ));
+            output.push_str(&format!("  heuristic: {}\n", reported.heuristic));
             output.push_str(&format!("  action: {}\n", finding.suggested_action));
             for evidence in &finding.evidence {
                 output.push_str("  evidence: ");
@@ -1056,6 +1166,9 @@ pub fn render_diffs(proposals: &[Proposal]) -> DiffBatch {
     });
     let mut path_counts = BTreeMap::<PathBuf, usize>::new();
     for proposal in &ordered {
+        if proposal.confidence != FindingConfidence::High {
+            continue;
+        }
         *path_counts.entry(proposal.target_path.clone()).or_default() += 1;
         if let Some(source) = &proposal.source_path {
             *path_counts.entry(source.clone()).or_default() += 1;
@@ -1066,6 +1179,16 @@ pub fn render_diffs(proposals: &[Proposal]) -> DiffBatch {
         skipped: Vec::new(),
     };
     for proposal in ordered {
+        if proposal.confidence != FindingConfidence::High {
+            result.skipped.push(SkippedProposal {
+                target_path: proposal.target_path,
+                reason: format!(
+                    "proposal confidence is {}; optimize --diff requires high-confidence proposals",
+                    proposal.confidence.as_str()
+                ),
+            });
+            continue;
+        }
         let conflict = path_counts
             .get(&proposal.target_path)
             .is_some_and(|count| *count > 1)
@@ -1628,12 +1751,17 @@ mod tests {
             report.groups[1].scope,
             FindingScope::Project(PathBuf::from("/fixture/project"))
         );
-        let excerpt = report.groups[0].findings[0].evidence[0]
+        let excerpt = report.groups[0].findings[0].finding.evidence[0]
             .excerpt
             .as_ref()
             .unwrap();
         assert!(excerpt.len() <= DEFAULT_REPORT_EXCERPT_BYTES);
         assert!(excerpt.contains("[redacted]"));
+        assert_eq!(
+            report.groups[0].findings[0].heuristic,
+            "repeated failed tool outcome"
+        );
+        assert!(render_doctor(&report).contains("heuristic: repeated failed tool outcome"));
         assert_eq!(report.freshness.source_count, 2);
     }
 
@@ -1693,6 +1821,11 @@ mod tests {
             render_diff(&modify),
             Err(DiffError::ChangedTarget(_))
         ));
+        let mut low_confidence = proposal(&target, ProposalAction::Add);
+        low_confidence.confidence = FindingConfidence::Medium;
+        let low_batch = render_diffs(&[low_confidence]);
+        assert!(low_batch.rendered.is_empty());
+        assert!(low_batch.skipped[0].reason.contains("high-confidence"));
         let conflict = render_diffs(&[add.clone(), add]);
         assert_eq!(conflict.rendered.len(), 0);
         assert_eq!(conflict.skipped.len(), 2);
@@ -1718,5 +1851,55 @@ mod tests {
         assert_eq!(proposal.evidence_count, 2);
         assert_eq!(proposal.evidence[0].source.kind, SourceKind::Rollout);
         assert!(proposal.proposed_text.unwrap().len() <= MAX_PROPOSAL_TEXT_BYTES);
+    }
+
+    #[test]
+    fn move_to_docs_uses_observed_fact_and_verified_anchor() {
+        let path = "/fixture/project/AGENTS.md";
+        let data = data_with_join(vec![file(
+            path,
+            InstructionScope::ProjectRoot,
+            "observed fact\nunrelated line\n",
+        )]);
+        let mut value = finding(
+            FindingScope::Project(PathBuf::from("/fixture/project")),
+            FindingType::Knowledge,
+            None,
+        );
+        value.key = "observed fact".to_owned();
+        value.evidence[0].excerpt = Some("observed fact".to_owned());
+        value.suggested_action = "Keep the detailed fact in docs/knowledge.md".to_owned();
+
+        let proposal = Proposal::from_finding(&data, &value).unwrap();
+        assert_eq!(proposal.existing_text.as_deref(), Some("observed fact\n"));
+        assert_eq!(proposal.proposed_text.as_deref(), Some("observed fact"));
+
+        let unrelated = data_with_join(vec![file(
+            path,
+            InstructionScope::ProjectRoot,
+            "unrelated line\n",
+        )]);
+        assert!(Proposal::from_finding(&unrelated, &value).is_none());
+    }
+
+    #[test]
+    fn proposal_plan_preserves_unsupported_findings_as_skipped() {
+        let path = PathBuf::from("/fixture/project/AGENTS.md");
+        let data = data_with_join(vec![file(
+            path.to_str().unwrap(),
+            InstructionScope::ProjectRoot,
+            "root",
+        )]);
+        let value = finding(
+            FindingScope::Instruction(path.clone()),
+            FindingType::Stale,
+            None,
+        );
+
+        let plan = proposals_for_findings(&data, &[value]);
+        assert!(plan.proposals.is_empty());
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].target_path, path);
+        assert!(plan.skipped[0].reason.contains("unsupported"));
     }
 }
