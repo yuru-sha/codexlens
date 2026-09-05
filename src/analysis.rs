@@ -15,6 +15,7 @@ use crate::model::{
 use serde::{Deserialize, Serialize};
 
 mod instructions;
+mod knowledge;
 
 pub const DEFAULT_REWORK_WINDOW_SECONDS: i64 = 10 * 60;
 pub const DEFAULT_EXCERPT_BYTES: usize = 512;
@@ -49,7 +50,6 @@ pub const DISCOVERY_MARKERS: &[&str] = &[
 ];
 
 const DEFAULT_MAX_EVIDENCE: usize = 12;
-const LONG_FACT_BYTES: usize = 240;
 const MAX_FACT_KEY_BYTES: usize = 128;
 const MISSING_SNAPSHOT_LIMITATION: &str = "An instruction snapshot was unavailable for at least one supporting session, so instruction comparison is inconclusive";
 
@@ -387,16 +387,6 @@ struct VerificationEvent {
     kind: String,
     position: Position,
     source: SourceRef,
-}
-
-#[derive(Debug, Clone)]
-struct FactEvent {
-    session_id: String,
-    key: String,
-    text: String,
-    source: SourceRef,
-    excerpt: String,
-    role: EvidenceRole,
 }
 
 pub fn analyze_failures(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
@@ -886,91 +876,7 @@ pub fn analyze_verification(data: &CanonicalData, options: &AnalysisOptions) -> 
 }
 
 pub fn analyze_knowledge(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
-    let mut facts = correction_facts(data, options);
-    let correction_sources = facts
-        .iter()
-        .map(|fact| (fact.source.path.clone(), fact.source.line))
-        .collect::<HashSet<_>>();
-    facts.extend(discovery_facts(data, options).into_iter().filter(|fact| {
-        !correction_sources.contains(&(fact.source.path.clone(), fact.source.line))
-    }));
-    let mut grouped: BTreeMap<String, Vec<FactEvent>> = BTreeMap::new();
-    for fact in facts {
-        grouped.entry(fact.key.clone()).or_default().push(fact);
-    }
-
-    let mut findings = grouped
-        .into_iter()
-        .filter_map(|(key, mut facts)| {
-            facts.sort_by(|left, right| compare_sources(&left.source, &right.source));
-            let sessions = distinct_sessions(facts.iter().map(|fact| fact.session_id.as_str()));
-            if facts.len() < DEFAULT_MIN_OCCURRENCES || sessions.len() < DEFAULT_MIN_SESSIONS {
-                return None;
-            }
-            let scope = majority_scope(data, facts.iter().map(|fact| fact.session_id.as_str()));
-            let target = instruction_target(data, sessions.iter().map(String::as_str));
-            let long = facts.iter().any(|fact| fact.text.len() > LONG_FACT_BYTES);
-            let mut evidence = Vec::new();
-            for fact in &facts {
-                push_evidence(
-                    &mut evidence,
-                    evidence_for(
-                        Some(fact.session_id.clone()),
-                        fact.source.clone(),
-                        fact.role.clone(),
-                        Some(&fact.excerpt),
-                        options,
-                    ),
-                );
-            }
-            let missing_snapshot = sessions.iter().any(|session| {
-                !data.instruction_snapshots.iter().any(|snapshot| {
-                    snapshot.session_id.as_deref() == Some(session) && snapshot_is_usable(snapshot)
-                })
-            });
-            let mut limitations = vec![
-                "This candidate uses repeated bounded lexical facts; it does not perform semantic summarization".to_owned(),
-            ];
-            if missing_snapshot {
-                limitations.push(MISSING_SNAPSHOT_LIMITATION.to_owned());
-            }
-            let suggested_action = if long {
-                format!(
-                    "Add a short index/link in {target} to a scoped page such as docs/knowledge.md; keep the detailed fact there"
-                )
-            } else {
-                format!("Add the concise fact to the narrowest applicable instruction file {target}")
-            };
-            Some(Finding {
-                kind: FindingType::Knowledge,
-                severity: if facts.len() >= 3 {
-                    FindingSeverity::High
-                } else {
-                    FindingSeverity::Medium
-                },
-                confidence: FindingConfidence::Medium,
-                scope,
-                key,
-                summary: format!(
-                    "A bounded project fact was rediscovered {} times across {} sessions",
-                    facts.len(),
-                    sessions.len()
-                ),
-                evidence,
-                occurrences: facts.len(),
-                distinct_sessions: sessions.len(),
-                affected_paths: Vec::new(),
-                observed_commands: Vec::new(),
-                sequence: Vec::new(),
-                suggested_action,
-                limitations,
-                verification_status: None,
-            })
-        })
-        .collect::<Vec<_>>();
-    annotate_snapshot_limitations(data, &mut findings);
-    sort_findings(&mut findings);
-    findings
+    knowledge::analyze(data, options)
 }
 
 fn failure_events(data: &CanonicalData) -> Vec<FailureEvent> {
@@ -1355,56 +1261,6 @@ fn bounded_fingerprint(value: &str) -> String {
         truncate_bytes(&normalized, MAX_FACT_KEY_BYTES.saturating_sub(suffix.len())),
         suffix
     )
-}
-
-fn correction_facts(data: &CanonicalData, options: &AnalysisOptions) -> Vec<FactEvent> {
-    correction_events(data)
-        .into_iter()
-        .map(|event| FactEvent {
-            session_id: event.session_id,
-            key: event.key,
-            text: event.text,
-            source: event.message.provenance.clone(),
-            excerpt: event.message.content.unwrap_or_default(),
-            role: EvidenceRole::Observation,
-        })
-        .map(|fact| FactEvent {
-            excerpt: bounded_excerpt(&fact.excerpt, options.excerpt_max_bytes),
-            ..fact
-        })
-        .collect()
-}
-
-fn discovery_facts(data: &CanonicalData, options: &AnalysisOptions) -> Vec<FactEvent> {
-    let mut facts = Vec::new();
-    for message in &data.messages {
-        let Some(session_id) = message.session_id.clone() else {
-            continue;
-        };
-        let Some(content) = message.content.as_deref() else {
-            continue;
-        };
-        let normalized = normalize_fact(content);
-        let Some(fact) = DISCOVERY_MARKERS
-            .iter()
-            .find_map(|marker| normalized.strip_prefix(marker))
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        if fact.is_empty() || content.trim_end().ends_with('?') {
-            continue;
-        }
-        facts.push(FactEvent {
-            session_id,
-            key: bounded_fingerprint(&fact),
-            text: fact,
-            source: message.provenance.clone(),
-            excerpt: bounded_excerpt(content, options.excerpt_max_bytes),
-            role: EvidenceRole::Observation,
-        });
-    }
-    facts
 }
 
 fn edit_events(data: &CanonicalData, options: &AnalysisOptions) -> Vec<EditEvent> {
@@ -1853,30 +1709,6 @@ fn evidence_sessions(finding: &Finding) -> Vec<String> {
     sessions.sort();
     sessions.dedup();
     sessions
-}
-
-fn instruction_target<'a, I>(data: &CanonicalData, sessions: I) -> String
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let sessions = sessions.into_iter().collect::<Vec<_>>();
-    let nearest = sessions
-        .iter()
-        .filter_map(|session_id| {
-            data.instruction_joins
-                .iter()
-                .find(|join| join.session_id == *session_id)
-                .and_then(|join| join.nearest_path.as_ref())
-                .cloned()
-        })
-        .collect::<Vec<_>>();
-    if let Some(path) = majority_path(nearest) {
-        return path.display().to_string();
-    }
-    if let Some(project) = majority_project(data, sessions.iter().copied()) {
-        return project.join("AGENTS.md").display().to_string();
-    }
-    "AGENTS.md".to_owned()
 }
 
 fn instruction_scope(data: &CanonicalData, finding: &Finding, sessions: &[String]) -> FindingScope {
