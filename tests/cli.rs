@@ -614,6 +614,8 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
         "local-only",
         "deterministic",
         "evidence-backed",
+        "does not modify the supplied store or target files",
+        "temporary migrated copy",
         "`optimize --apply`",
         "compressed rollout readers",
         "`--frozen`",

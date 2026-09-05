@@ -43,7 +43,9 @@ billing accuracy.
 The binary is a reporting surface over an existing derived SQLite store. It
 does not create or refresh that store from raw rollout or state inputs. Every
 command accepts `-s, --store PATH`, which defaults to `.codexlens.sqlite`.
-Reports are human-readable and read-only; `optimize --diff` also reads the
+Reports are human-readable and read-only with respect to the supplied store
+and target instruction files. Legacy-store reporting may create a temporary
+migrated copy, which is removed afterward; `optimize --diff` also reads the
 recommended instruction files in order to render a diff.
 
 | Command | Input | Output purpose | Read-only behavior |
@@ -59,7 +61,7 @@ recommended instruction files in order to render a diff.
 | `rediscovery` | derived store | alias for `knowledge` | reads the store only |
 | `instructions` | derived store | instruction-lens findings | reads the store only |
 | `doctor` | derived store | ranked findings grouped by scope | reads the store only |
-| `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | never writes, renames, or deletes files |
+| `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | does not modify the supplied store or target files; legacy stores use a temporary migrated copy |
 
 `doctor` accepts the optional `--limit COUNT` to cap findings per scope.
 `optimize` currently requires `--diff`; the command is advisory and
