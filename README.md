@@ -108,7 +108,9 @@ contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
 - Compressed rollout readers: plain JSONL is the current reader boundary;
   compressed inputs are reported as unsupported. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 - `--frozen` reporting mode: skipping refresh is not a current CLI behavior;
-  it will be specified together with any future refresh workflow. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
+  the refresh/frozen boundary is documented in
+  [docs/specs/post-mvp.md](docs/specs/post-mvp.md), and implementation remains deferred.
+  Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 - Machine-readable output and live monitoring: neither is part of the MVP
   command surface. Their entry contracts are documented in
   [docs/specs/post-mvp.md](docs/specs/post-mvp.md). Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).

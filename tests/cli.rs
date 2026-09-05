@@ -601,6 +601,8 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
     let readme_lower = readme.to_ascii_lowercase();
 
     assert!(readme.contains("## CLI surface"));
+    assert!(readme.contains("the refresh/frozen boundary is documented"));
+    assert!(readme.contains("implementation remains deferred"));
     for args in REPORTING_COMMANDS {
         let command = args.join(" ");
         assert!(
