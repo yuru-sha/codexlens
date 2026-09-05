@@ -7,6 +7,9 @@ Issue #53 tracks the capabilities that cross the MVP input, runtime, output,
 or write boundary. A feature issue must select one capability, implement its
 compatibility and privacy tests, and pass the relevant safety checks before it
 changes the current command surface.
+This contract-only document does not close the issue: the positive tests below
+remain acceptance criteria for the feature issues that implement each
+capability.
 
 ## Shared boundary
 
@@ -67,10 +70,12 @@ plain `.jsonl` source, then reuse the existing JSONL parser, normalizer, and
 store transaction. Compression details must not appear in canonical records,
 lenses, or reports.
 
-The source identity is computed from the compressed source bytes. A changed
-compressed source is replaced as one derived-source transaction; an unchanged
-source is skipped. Decompression must retain the existing maximum-line bound
-after decompression and must not allocate an unbounded line.
+The canonical source identity remains the canonical source path. The
+compressed source bytes provide the compressed-byte fingerprint used for change
+detection. A changed compressed source is replaced as one derived-source
+transaction; an unchanged source is skipped. Decompression must retain the
+existing maximum-line bound after decompression and must not allocate an
+unbounded line.
 
 ### Compatibility tests
 
@@ -246,8 +251,8 @@ by `Proposal` above.
 integers. `finding_counts` may omit zero-valued kinds. Arrays are ordered as
 documented below and never omitted when empty.
 
-The human-readable baseline is line-oriented UTF-8 with LF line endings, no
-ANSI control sequences, and exactly one final LF. Its grammar is:
+The future human-readable serializer contract is line-oriented UTF-8 with LF line endings,
+no ANSI control sequences, and exactly one final LF. Its grammar is:
 
 ```text
 Analyzed period: <unknown | timestamp | timestamp .. timestamp>\n
@@ -268,10 +273,15 @@ confidence, distinct sessions, normalized key, occurrences, kind/key, then
 scope). `sessions` uses `Store freshness`, `Sessions`, then one `- id` block
 with `created`, `updated`, `cwd`, and `project` lines. `optimize --diff` writes
 each `Proposal ...` summary and unified diff to stdout and each `Skipped ...`
-line to stderr. Bounded text is redacted before rendering; future multiline
-values must be escaped rather than creating extra grammar lines. The existing
-[`analysis.md`](analysis.md) and README command table remain authoritative for
-the command list and current examples.
+line to stderr. The existing [`analysis.md`](analysis.md) and README command
+table remain authoritative for the current command list and examples.
+
+This is a target contract for a future human-readable serializer, not a
+retroactive claim that every current renderer already escapes multiline values.
+The existing MVP human renderers remain the compatibility baseline until that
+serializer is implemented. For the future serializer, bounded text is
+redacted before rendering and multiline values must be escaped rather than
+creating extra grammar lines.
 
 The command-specific empty and alias forms are exact:
 
