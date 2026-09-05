@@ -51,6 +51,30 @@ impl SourceRef {
     }
 }
 
+pub(crate) fn normalize_path(path: &str) -> String {
+    let path = path
+        .strip_prefix("file://")
+        .unwrap_or(path)
+        .replace('\\', "/");
+    let absolute = path.starts_with('/');
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if components.last().is_some_and(|value| *value != "..") {
+                    components.pop();
+                } else if !absolute {
+                    components.push("..");
+                }
+            }
+            value => components.push(value),
+        }
+    }
+    let prefix = if absolute { "/" } else { "" };
+    format!("{prefix}{}", components.join("/"))
+}
+
 impl From<SourceLocation> for SourceRef {
     fn from(source: SourceLocation) -> Self {
         Self::rollout(source.path, source.line)
@@ -262,6 +286,36 @@ pub enum ToolOutcome {
     Unknown,
 }
 
+impl ToolOutcome {
+    pub(crate) fn from_status(status: &str) -> Option<Self> {
+        let status = status
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        if matches!(
+            status.as_str(),
+            "success" | "succeeded" | "complete" | "completed" | "ok"
+        ) {
+            Some(Self::Succeeded)
+        } else if matches!(
+            status.as_str(),
+            "failure"
+                | "failed"
+                | "error"
+                | "cancelled"
+                | "canceled"
+                | "aborted"
+                | "timeout"
+                | "timed_out"
+        ) {
+            Some(Self::Failed)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutcomeSource {
     ExitCode,
@@ -329,6 +383,12 @@ pub struct Record {
     pub sequence: usize,
     pub original_record_type: Option<String>,
     pub original_nested_type: Option<String>,
+    #[serde(default)]
+    pub error_category: Option<String>,
+    #[serde(default)]
+    pub is_error: bool,
+    #[serde(default)]
+    pub is_terminal: bool,
     pub kind: RecordKind,
     pub provenance: SourceRef,
 }

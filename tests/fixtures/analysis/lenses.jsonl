@@ -1,0 +1,16 @@
+{"timestamp":"2026-01-03T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-analysis-session-a","cwd":"/fixture/project","project":"/fixture/project"}}
+{"timestamp":"2026-01-03T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"fixture-analysis-turn-a","cwd":"/fixture/project","user_instructions":"Run cargo build."}}
+{"timestamp":"2026-01-03T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will apply the requested change."}]}}
+{"timestamp":"2026-01-03T00:01:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-analysis-patch-a1","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/lib.rs\\n@@\\n-old\\n+new\\n\"}"}}
+{"timestamp":"2026-01-03T00:02:00.000Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"fixture-analysis-failure-a","command":["cargo","test"],"stderr":"error: fixture failure","exit_code":1,"status":"failed"}}
+{"timestamp":"2026-01-03T00:03:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-analysis-patch-a2","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/lib.rs\\n@@\\n-old\\n+newer\\n\"}"}}
+{"timestamp":"2026-01-03T00:04:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Use cargo test instead."}]}}
+{"timestamp":"2026-01-03T00:05:00.000Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"fixture-analysis-turn-a"}}
+{"timestamp":"2026-01-04T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-analysis-session-b","cwd":"/fixture/project","project":"/fixture/project"}}
+{"timestamp":"2026-01-04T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"fixture-analysis-turn-b","cwd":"/fixture/project","user_instructions":"Run cargo build."}}
+{"timestamp":"2026-01-04T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will apply the requested change."}]}}
+{"timestamp":"2026-01-04T00:01:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-analysis-patch-b1","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/lib.rs\\n@@\\n-old\\n+new\\n\"}"}}
+{"timestamp":"2026-01-04T00:02:00.000Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"fixture-analysis-failure-b","command":["cargo","test"],"stderr":"error: fixture failure","exit_code":1,"status":"failed"}}
+{"timestamp":"2026-01-04T00:03:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-analysis-patch-b2","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/lib.rs\\n@@\\n-old\\n+newer\\n\"}"}}
+{"timestamp":"2026-01-04T00:04:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Use cargo test instead."}]}}
+{"timestamp":"2026-01-04T00:05:00.000Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"fixture-analysis-turn-b"}}
