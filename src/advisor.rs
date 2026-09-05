@@ -161,6 +161,12 @@ impl Proposal {
                         field: "expected_target_hash",
                     });
                 }
+                if self.expected_source_hash.is_none() {
+                    return Err(ProposalError::MissingActionField {
+                        action: self.action.as_str(),
+                        field: "expected_source_hash",
+                    });
+                }
                 required_text(self.existing_text.as_deref(), "existing_text")?;
                 required_text(self.proposed_text.as_deref(), "proposed_text")
             }
@@ -190,7 +196,11 @@ impl Proposal {
             ProposalAction::Add => {}
             ProposalAction::Remove => {
                 let file = stored_file(data, &target_path)?;
-                existing_text = instruction_anchor(file.content.as_deref()?, finding);
+                existing_text = if finding.kind == FindingType::Duplicate {
+                    duplicate_anchor(data, &target_path, finding)
+                } else {
+                    instruction_anchor(file.content.as_deref()?, finding)
+                };
                 existing_text.as_ref()?;
                 proposed_text = None;
             }
@@ -350,6 +360,21 @@ fn instruction_anchor(content: &str, finding: &Finding) -> Option<String> {
         })
         .collect::<Vec<_>>();
     (matches.len() == 1).then(|| matches[0].to_owned())
+}
+
+fn duplicate_anchor(data: &CanonicalData, target_path: &Path, finding: &Finding) -> Option<String> {
+    let duplicate_paths = finding
+        .evidence
+        .iter()
+        .filter(|evidence| evidence.role == crate::analysis::EvidenceRole::InstructionFile)
+        .map(|evidence| evidence.source.path.clone())
+        .collect::<BTreeSet<_>>();
+    if duplicate_paths.len() < 2 || !duplicate_paths.contains(target_path) {
+        return None;
+    }
+    let content = stored_file(data, target_path)?.content.as_deref()?;
+    (!content.trim().is_empty() && content.len() <= MAX_PROPOSAL_TEXT_BYTES)
+        .then(|| content.to_owned())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1844,6 +1869,8 @@ mod tests {
         move_proposal.source_path = Some(source_path.clone());
         move_proposal.existing_text = Some("move this\n".to_owned());
         move_proposal.proposed_text = Some("move this\n".to_owned());
+        move_proposal.expected_source_hash =
+            Some(crate::instructions::content_hash(b"move this\nkeep next\n"));
         move_proposal.expected_target_hash = Some(crate::instructions::content_hash(b"docs\n"));
         let move_diff = render_diff(&move_proposal).unwrap();
         let docs_name = docs.file_name().unwrap().to_string_lossy();
@@ -1862,6 +1889,17 @@ mod tests {
                 }
             ))
         ));
+        let mut missing_source_baseline = move_proposal.clone();
+        missing_source_baseline.expected_source_hash = None;
+        assert!(matches!(
+            render_diff(&missing_source_baseline),
+            Err(DiffError::InvalidProposal(
+                ProposalError::MissingActionField {
+                    action: "move_to_docs",
+                    field: "expected_source_hash"
+                }
+            ))
+        ));
         let mut changed_target = move_proposal.clone();
         changed_target.expected_target_hash = Some(crate::instructions::content_hash(b"other\n"));
         assert!(matches!(
@@ -1872,6 +1910,8 @@ mod tests {
         let mut split = proposal(&target, ProposalAction::SplitScope);
         split.source_path = Some(source_path.clone());
         split.existing_text = Some("move this\n".to_owned());
+        split.expected_source_hash =
+            Some(crate::instructions::content_hash(b"move this\nkeep next\n"));
         assert!(render_diff(&split).unwrap().contains("+new guidance"));
 
         modify.expected_target_hash = Some("changed".to_owned());
@@ -1940,6 +1980,48 @@ mod tests {
         assert!(plan.proposals.is_empty());
         assert_eq!(plan.skipped.len(), 1);
         assert!(plan.skipped[0].reason.contains("explicit-only"));
+    }
+
+    #[test]
+    fn duplicate_finding_uses_the_verified_duplicate_file_content() {
+        let root = PathBuf::from("/fixture/project/AGENTS.md");
+        let nested = PathBuf::from("/fixture/project/src/AGENTS.md");
+        let data = data_with_join(vec![
+            file(
+                root.to_str().unwrap(),
+                InstructionScope::ProjectRoot,
+                "same guidance\n",
+            ),
+            file(
+                nested.to_str().unwrap(),
+                InstructionScope::ProjectNested,
+                "same guidance\n",
+            ),
+        ]);
+        let mut value = finding(
+            FindingScope::Instruction(nested.clone()),
+            FindingType::Duplicate,
+            None,
+        );
+        value.evidence = vec![
+            EvidenceRef {
+                session_id: Some("session".to_owned()),
+                source: SourceRef::state(root),
+                role: EvidenceRole::InstructionFile,
+                excerpt: None,
+            },
+            EvidenceRef {
+                session_id: Some("session".to_owned()),
+                source: SourceRef::state(nested.clone()),
+                role: EvidenceRole::InstructionFile,
+                excerpt: None,
+            },
+        ];
+
+        let proposal = Proposal::from_finding(&data, &value).unwrap();
+        assert_eq!(proposal.action, ProposalAction::Remove);
+        assert_eq!(proposal.target_path, nested);
+        assert_eq!(proposal.existing_text.as_deref(), Some("same guidance\n"));
     }
 
     #[test]
