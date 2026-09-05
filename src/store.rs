@@ -140,6 +140,11 @@ impl Store {
         Ok(Self { connection })
     }
 
+    pub fn read_schema_version(path: &Path) -> Result<i64> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+    }
+
     pub fn open_read_only(path: &Path) -> Result<Self> {
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         validate_reporting_schema(&connection)?;
@@ -1619,7 +1624,7 @@ type TableColumn = (String, String, i64, Option<String>, i64);
 fn table_info(connection: &Connection, table: &str) -> Result<Vec<TableColumn>> {
     let mut statement =
         connection.prepare(&format!("PRAGMA table_info({})", quote_identifier(table)))?;
-    Ok(load_rows(&mut statement, |row| {
+    let mut columns: Vec<TableColumn> = load_rows(&mut statement, |row| {
         Ok((
             row.get(1)?,
             row.get(2)?,
@@ -1627,7 +1632,9 @@ fn table_info(connection: &Connection, table: &str) -> Result<Vec<TableColumn>> 
             row.get(4)?,
             row.get(5)?,
         ))
-    })?)
+    })?;
+    columns.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(columns)
 }
 
 fn add_provenance_columns(transaction: &Transaction<'_>, table: &str) -> Result<()> {

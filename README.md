@@ -58,7 +58,7 @@ cargo run -- optimize --diff --store .codexlens.sqlite
 `rework` also covers stuck activity and accepts the `stuck` alias, while
 `knowledge` accepts `rediscovery`. Analysis and doctor reports include store
 freshness and bounded evidence. Missing or invalid stores return an actionable
-error.
+error. Older supported store schemas are migrated only in a temporary copy.
 
 The Phase 3 lenses and Phase 4 advisor are exposed from the
 `codexlens::analysis` and `codexlens::advisor` modules. The lenses consume

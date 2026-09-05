@@ -112,6 +112,39 @@ fn reporting_commands_reject_uninitialized_store_without_writing() {
 }
 
 #[test]
+fn reporting_commands_migrate_legacy_store_without_writing_source() {
+    let path = std::env::temp_dir().join(format!(
+        "codexlens-cli-{}-legacy.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let store = Store::open(&path).unwrap();
+    store
+        .connection()
+        .execute_batch(
+            "ALTER TABLE records DROP COLUMN is_error;
+             ALTER TABLE records DROP COLUMN is_terminal;
+             DELETE FROM schema_versions WHERE version = 6;
+             PRAGMA user_version = 5;",
+        )
+        .unwrap();
+    drop(store);
+    let before = std::fs::read(&path).unwrap();
+
+    let output = run("analyze", &path);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Store freshness: empty"));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn reporting_commands_reject_incomplete_schema_history_without_writing() {
     let path = std::env::temp_dir().join(format!(
         "codexlens-cli-{}-incomplete-schema-history.sqlite",
