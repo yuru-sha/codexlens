@@ -187,3 +187,38 @@ where
     }
     "AGENTS.md".to_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use std::path::Path;
+
+    use crate::normalize::normalize_rollout;
+    use crate::rollout::{PlainJsonlReader, parse_rollout_reader};
+
+    fn fixture_data() -> CanonicalData {
+        let parsed = parse_rollout_reader(
+            Path::new("fixture-analysis.jsonl"),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../../tests/fixtures/analysis/lenses.jsonl"
+            ))),
+        );
+        normalize_rollout(&parsed)
+    }
+
+    #[test]
+    fn knowledge_requires_recurrence_across_sessions() {
+        let data = fixture_data();
+        let findings = analyze(&data, &AnalysisOptions::default());
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingType::Knowledge);
+        assert_eq!(findings[0].distinct_sessions, 2);
+
+        let mut one_session = data;
+        one_session
+            .messages
+            .retain(|message| message.session_id.as_deref() == Some("fixture-analysis-session-a"));
+        assert!(analyze(&one_session, &AnalysisOptions::default()).is_empty());
+    }
+}

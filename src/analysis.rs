@@ -2460,21 +2460,6 @@ mod tests {
     }
 
     #[test]
-    fn knowledge_requires_recurrence_across_sessions() {
-        let data = fixture_data();
-        assert_eq!(
-            analyze_knowledge(&data, &AnalysisOptions::default()).len(),
-            1
-        );
-
-        let mut one_session = data;
-        one_session
-            .messages
-            .retain(|message| message.session_id.as_deref() == Some("fixture-analysis-session-a"));
-        assert!(analyze_knowledge(&one_session, &AnalysisOptions::default()).is_empty());
-    }
-
-    #[test]
     fn failures_prefer_structured_results_and_do_not_report_one_session() {
         let data = fixture_data();
         let options = AnalysisOptions::default();
