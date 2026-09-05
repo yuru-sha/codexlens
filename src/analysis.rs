@@ -2823,7 +2823,7 @@ fn reserve_evidence_slots(evidence: &[EvidenceRef], slots: usize) -> Vec<Evidenc
     evidence
 }
 
-fn bounded_excerpt(value: &str, max_bytes: usize) -> String {
+pub(crate) fn bounded_excerpt(value: &str, max_bytes: usize) -> String {
     let redacted = redact_sensitive(value);
     let max_bytes = max_bytes.max(3);
     if redacted.len() <= max_bytes {

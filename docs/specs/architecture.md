@@ -155,8 +155,8 @@ Their contracts and conservative heuristics are defined in
 
 ### Advisor and report
 
-`doctor` is the compact aggregate view. `optimize` groups findings into
-candidate changes and renders a diff or proposal in a later phase.
+`doctor` is the compact aggregate view. `optimize --diff` groups findings into
+review-only candidate changes and renders unified diffs.
 
 MVP output must include:
 

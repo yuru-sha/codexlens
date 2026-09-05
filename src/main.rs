@@ -1,5 +1,14 @@
+use std::path::PathBuf;
+
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+
+use codexlens::advisor::{
+    DoctorOptions, doctor, proposals_for_findings, render_diffs, render_doctor,
+    render_proposal_summary,
+};
+use codexlens::analysis::analyze_default;
+use codexlens::store::Store;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -24,8 +33,29 @@ enum Command {
     #[command(alias = "rediscovery")]
     Knowledge,
     Instructions,
-    Doctor,
-    Optimize,
+    Doctor {
+        #[command(flatten)]
+        store: StoreOptions,
+        #[arg(long, value_name = "COUNT")]
+        limit: Option<usize>,
+    },
+    Optimize {
+        #[command(flatten)]
+        store: StoreOptions,
+        #[arg(long)]
+        diff: bool,
+    },
+}
+
+#[derive(Debug, Clone, Args)]
+struct StoreOptions {
+    #[arg(
+        long,
+        short = 's',
+        default_value = ".codexlens.sqlite",
+        value_name = "PATH"
+    )]
+    store: PathBuf,
 }
 
 impl Command {
@@ -39,18 +69,73 @@ impl Command {
             Self::Verification => "verification",
             Self::Knowledge => "knowledge",
             Self::Instructions => "instructions",
-            Self::Doctor => "doctor",
-            Self::Optimize => "optimize",
+            Self::Doctor { .. } => "doctor",
+            Self::Optimize { .. } => "optimize",
         }
     }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    bail!(
-        "codexlens {} is not implemented yet; see docs/specs/ for the implementation contract",
-        cli.command.name()
-    );
+    match cli.command {
+        Command::Doctor { store, limit } => {
+            let (data, findings, freshness) = load_analysis(&store)?;
+            let report = doctor(
+                &data,
+                &findings,
+                freshness,
+                &DoctorOptions {
+                    max_findings_per_scope: limit,
+                    ..DoctorOptions::default()
+                },
+            );
+            print!("{}", render_doctor(&report));
+            Ok(())
+        }
+        Command::Optimize { store, diff } => {
+            if !diff {
+                bail!("optimize requires --diff; proposals are advisory and read-only");
+            }
+            let (data, findings, _) = load_analysis(&store)?;
+            let proposals = proposals_for_findings(&data, &findings);
+            let batch = render_diffs(&proposals);
+            for rendered in &batch.rendered {
+                println!("{}", render_proposal_summary(rendered));
+            }
+            for skipped in &batch.skipped {
+                eprintln!(
+                    "Skipped {}: {}",
+                    skipped.target_path.display(),
+                    skipped.reason
+                );
+            }
+            if batch.rendered.is_empty() && batch.skipped.is_empty() {
+                println!("No applicable proposals.");
+            }
+            Ok(())
+        }
+        command => bail!(
+            "codexlens {} is not implemented yet; see docs/specs/ for the implementation contract",
+            command.name()
+        ),
+    }
+}
+
+fn load_analysis(
+    options: &StoreOptions,
+) -> Result<(
+    codexlens::model::CanonicalData,
+    Vec<codexlens::analysis::Finding>,
+    codexlens::store::StoreFreshness,
+)> {
+    if !options.store.is_file() {
+        bail!("store does not exist: {}", options.store.display());
+    }
+    let store = Store::open(&options.store)?;
+    let data = store.load_canonical()?;
+    let freshness = store.freshness()?;
+    let findings = analyze_default(&data);
+    Ok((data, findings, freshness))
 }
 
 #[cfg(test)]
