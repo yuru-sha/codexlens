@@ -7,7 +7,7 @@ use crate::model::{CanonicalData, SourceRef};
 use super::{
     AnalysisOptions, DISCOVERY_MARKERS, EvidenceRole, Finding, FindingConfidence, FindingSeverity,
     FindingType, MISSING_SNAPSHOT_LIMITATION, annotate_snapshot_limitations, bounded_excerpt,
-    bounded_fingerprint, correction_events, distinct_sessions, evidence_for, majority_path,
+    bounded_fingerprint, corrections, distinct_sessions, evidence_for, majority_path,
     majority_project, majority_scope, normalize_fact, push_evidence, snapshot_is_usable,
     sort_findings,
 };
@@ -115,19 +115,15 @@ pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Fi
 }
 
 fn correction_facts(data: &CanonicalData, options: &AnalysisOptions) -> Vec<FactEvent> {
-    correction_events(data)
+    corrections::facts(data, options)
         .into_iter()
         .map(|event| FactEvent {
             session_id: event.session_id,
             key: event.key,
             text: event.text,
-            source: event.message.provenance.clone(),
-            excerpt: event.message.content.unwrap_or_default(),
+            source: event.source,
+            excerpt: event.excerpt,
             role: EvidenceRole::Observation,
-        })
-        .map(|fact| FactEvent {
-            excerpt: bounded_excerpt(&fact.excerpt, options.excerpt_max_bytes),
-            ..fact
         })
         .collect()
 }
