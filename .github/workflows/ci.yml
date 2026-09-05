@@ -15,7 +15,7 @@ jobs:
         rust: [1.85.0, 1.92.0]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
         with:
           toolchain: ${{ matrix.rust }}
           components: clippy, rustfmt
