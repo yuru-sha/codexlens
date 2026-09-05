@@ -234,6 +234,8 @@ field names and SQL. It contains:
 
 Proposals are advisory. A proposal without evidence, a review reminder, or
 the text required by its action is invalid.
+Every mutating action carries the expected target-content hash; move and split
+proposals additionally carry the expected source-content hash.
 
 Scope selection uses the evidence sessions and stored instruction joins:
 

@@ -140,6 +140,12 @@ impl Proposal {
         {
             return Err(ProposalError::TextTooLong);
         }
+        if self.expected_target_hash.is_none() {
+            return Err(ProposalError::MissingActionField {
+                action: self.action.as_str(),
+                field: "expected_target_hash",
+            });
+        }
         match self.action {
             ProposalAction::Add => required_text(self.proposed_text.as_deref(), "proposed_text"),
             ProposalAction::Modify => {
@@ -152,13 +158,6 @@ impl Proposal {
                     return Err(ProposalError::MissingActionField {
                         action: self.action.as_str(),
                         field: "source_path",
-                    });
-                }
-                if self.action == ProposalAction::MoveToDocs && self.expected_target_hash.is_none()
-                {
-                    return Err(ProposalError::MissingActionField {
-                        action: self.action.as_str(),
-                        field: "expected_target_hash",
                     });
                 }
                 if self.expected_source_hash.is_none() {
@@ -1836,31 +1835,61 @@ mod tests {
     }
 
     #[test]
+    fn proposal_validation_requires_target_baseline_for_mutating_actions() {
+        let path = PathBuf::from("/fixture/project/AGENTS.md");
+        for action in [
+            ProposalAction::Add,
+            ProposalAction::Modify,
+            ProposalAction::Remove,
+            ProposalAction::MoveToDocs,
+            ProposalAction::SplitScope,
+        ] {
+            let value = proposal(&path, action);
+            assert!(matches!(
+                value.validate(),
+                Err(ProposalError::MissingActionField {
+                    field: "expected_target_hash",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
     fn diff_renderer_supports_actions_and_never_writes() {
         let target = temp_file("AGENTS.md");
         let source_path = temp_file("source.md");
         std::fs::write(&target, "old guidance\n").unwrap();
         std::fs::write(&source_path, "move this\nkeep next\n").unwrap();
         let before_target = std::fs::read_to_string(&target).unwrap();
-        let add = proposal(&target, ProposalAction::Add);
+        let old_target_hash = crate::instructions::content_hash(b"old guidance\n");
+        let mut add = proposal(&target, ProposalAction::Add);
+        add.expected_target_hash = Some(old_target_hash.clone());
         assert!(render_diff(&add).unwrap().contains("+new guidance"));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), before_target);
         let mut no_op = proposal(&target, ProposalAction::Add);
         no_op.proposed_text = Some("old guidance".to_owned());
+        no_op.expected_target_hash = Some(old_target_hash);
         assert!(render_diff(&no_op).unwrap().is_empty());
         std::fs::write(&target, "old guidance\nsecond line\n").unwrap();
+        let second_line_target_hash =
+            crate::instructions::content_hash(b"old guidance\nsecond line\n");
         let mut block_no_op = proposal(&target, ProposalAction::Add);
         block_no_op.proposed_text = Some("old guidance\nsecond line".to_owned());
+        block_no_op.expected_target_hash = Some(second_line_target_hash.clone());
         assert!(render_diff(&block_no_op).unwrap().is_empty());
-        let missing = proposal(&temp_file("missing.md"), ProposalAction::Add);
+        let mut missing = proposal(&temp_file("missing.md"), ProposalAction::Add);
+        missing.expected_target_hash = Some("missing-baseline".to_owned());
         assert!(matches!(
             render_diff(&missing),
             Err(DiffError::MissingTarget(_))
         ));
 
         let mut modify = proposal(&target, ProposalAction::Modify);
+        modify.expected_target_hash = Some(second_line_target_hash.clone());
         assert!(render_diff(&modify).unwrap().contains("+new guidance"));
-        let remove = proposal(&target, ProposalAction::Remove);
+        let mut remove = proposal(&target, ProposalAction::Remove);
+        remove.expected_target_hash = Some(second_line_target_hash.clone());
         assert!(render_diff(&remove).unwrap().contains("-old guidance"));
 
         let docs = temp_file("docs.md");
@@ -1916,6 +1945,7 @@ mod tests {
         let mut split = proposal(&target, ProposalAction::SplitScope);
         split.source_path = Some(source_path.clone());
         split.existing_text = Some("move this\n".to_owned());
+        split.expected_target_hash = Some(second_line_target_hash);
         split.expected_source_hash =
             Some(crate::instructions::content_hash(b"move this\nkeep next\n"));
         assert!(render_diff(&split).unwrap().contains("+new guidance"));
