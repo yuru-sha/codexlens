@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
-use rusqlite::{Connection, OptionalExtension, Row, Statement, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Statement, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use crate::discovery::{DiscoveredInput, InputKind, ReaderKind, codex_home_for_source};
@@ -28,6 +28,24 @@ use crate::state::{
 };
 
 pub const SCHEMA_VERSION: i64 = 6;
+
+const REPORTING_TABLES: &[&str] = &[
+    "schema_versions",
+    "sessions",
+    "turns",
+    "records",
+    "messages",
+    "tool_calls",
+    "tool_results",
+    "file_operations",
+    "token_usage",
+    "diagnostics",
+    "ingested_files",
+    "instruction_blobs",
+    "instruction_snapshots",
+    "instruction_files",
+    "instruction_joins",
+];
 
 const STATE_STORAGE_STANDALONE: &str = "standalone";
 const STATE_STORAGE_ENRICHMENT: &str = "enrichment";
@@ -119,6 +137,17 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let mut connection = Connection::open(path)?;
         migrate(&mut connection)?;
+        Ok(Self { connection })
+    }
+
+    pub fn read_schema_version(path: &Path) -> Result<i64> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+    }
+
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        validate_reporting_schema(&connection)?;
         Ok(Self { connection })
     }
 
@@ -1544,6 +1573,68 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     }
     transaction.commit()?;
     Ok(())
+}
+
+fn validate_reporting_schema(connection: &Connection) -> Result<()> {
+    let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if current != SCHEMA_VERSION {
+        bail!(
+            "store schema version {current} is not supported for read-only reporting (expected {SCHEMA_VERSION})"
+        );
+    }
+    for table in REPORTING_TABLES {
+        let exists = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![table],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if !exists {
+            bail!("store is not a codexlens derived store: missing table {table}");
+        }
+    }
+    for version in 1..=SCHEMA_VERSION {
+        let exists = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version = ?1)",
+            params![version],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if !exists {
+            bail!("store schema history is incomplete: missing version {version}");
+        }
+    }
+    let expected = Store::in_memory()?;
+    for table in REPORTING_TABLES {
+        let actual_columns = table_info(connection, table)?;
+        let expected_columns = table_info(expected.connection(), table)?;
+        if actual_columns != expected_columns {
+            if let Some((column, ..)) = expected_columns
+                .iter()
+                .find(|expected| !actual_columns.iter().any(|actual| actual.0 == expected.0))
+            {
+                bail!("store is not a codexlens derived store: missing column {table}.{column}");
+            }
+            bail!("store is not a codexlens derived store: schema mismatch in table {table}");
+        }
+    }
+    Ok(())
+}
+
+type TableColumn = (String, String, i64, Option<String>, i64);
+
+fn table_info(connection: &Connection, table: &str) -> Result<Vec<TableColumn>> {
+    let mut statement =
+        connection.prepare(&format!("PRAGMA table_info({})", quote_identifier(table)))?;
+    let mut columns: Vec<TableColumn> = load_rows(&mut statement, |row| {
+        Ok((
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+        ))
+    })?;
+    columns.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(columns)
 }
 
 fn add_provenance_columns(transaction: &Transaction<'_>, table: &str) -> Result<()> {
