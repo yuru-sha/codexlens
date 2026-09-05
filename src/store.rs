@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
-use rusqlite::{Connection, OptionalExtension, Row, Statement, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Statement, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use crate::discovery::{DiscoveredInput, InputKind, ReaderKind, codex_home_for_source};
@@ -28,6 +28,24 @@ use crate::state::{
 };
 
 pub const SCHEMA_VERSION: i64 = 6;
+
+const REPORTING_TABLES: &[&str] = &[
+    "schema_versions",
+    "sessions",
+    "turns",
+    "records",
+    "messages",
+    "tool_calls",
+    "tool_results",
+    "file_operations",
+    "token_usage",
+    "diagnostics",
+    "ingested_files",
+    "instruction_blobs",
+    "instruction_snapshots",
+    "instruction_files",
+    "instruction_joins",
+];
 
 const STATE_STORAGE_STANDALONE: &str = "standalone";
 const STATE_STORAGE_ENRICHMENT: &str = "enrichment";
@@ -119,6 +137,12 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let mut connection = Connection::open(path)?;
         migrate(&mut connection)?;
+        Ok(Self { connection })
+    }
+
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        validate_reporting_schema(&connection)?;
         Ok(Self { connection })
     }
 
@@ -1543,6 +1567,26 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         transaction.execute_batch("PRAGMA user_version = 6;")?;
     }
     transaction.commit()?;
+    Ok(())
+}
+
+fn validate_reporting_schema(connection: &Connection) -> Result<()> {
+    let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if current != SCHEMA_VERSION {
+        bail!(
+            "store schema version {current} is not supported for read-only reporting (expected {SCHEMA_VERSION})"
+        );
+    }
+    for table in REPORTING_TABLES {
+        let exists = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![table],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if !exists {
+            bail!("store is not a codexlens derived store: missing table {table}");
+        }
+    }
     Ok(())
 }
 

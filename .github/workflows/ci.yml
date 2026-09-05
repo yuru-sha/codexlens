@@ -10,9 +10,12 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [1.85.0, 1.92.0]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.92.0
+      - uses: dtolnay/rust-toolchain@${{ matrix.rust }}
         with:
           components: clippy, rustfmt
       - name: Check formatting

@@ -155,7 +155,7 @@ fn load_store(options: &StoreOptions) -> Result<(CanonicalData, StoreFreshness)>
     if !options.store.is_file() {
         bail!("store does not exist: {}", options.store.display());
     }
-    let store = Store::open(&options.store).with_context(|| {
+    let store = Store::open_read_only(&options.store).with_context(|| {
         format!(
             "failed to open derived store {}; provide a valid SQLite store",
             options.store.display()

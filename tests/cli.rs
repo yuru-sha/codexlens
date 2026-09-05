@@ -3,6 +3,7 @@ use std::process::Command;
 
 use codexlens::rollout::RolloutParseOptions;
 use codexlens::store::Store;
+use rusqlite::Connection;
 
 fn fixture_store() -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -87,4 +88,25 @@ fn reporting_commands_explain_missing_store() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("store does not exist"));
     assert!(stderr.len() < 512);
+}
+
+#[test]
+fn reporting_commands_reject_uninitialized_store_without_writing() {
+    let path = std::env::temp_dir().join(format!(
+        "codexlens-cli-{}-uninitialized.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    Connection::open(&path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let output = run("analyze", &path);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("schema version"), "{stderr}");
+    assert!(stderr.len() < 512);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let _ = std::fs::remove_file(path);
 }

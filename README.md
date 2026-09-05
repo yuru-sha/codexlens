@@ -38,7 +38,7 @@ files, or claim billing accuracy.
 
 ## Current status
 
-The reporting commands read an existing derived store (default:
+The reporting commands open an existing derived store read-only (default:
 `.codexlens.sqlite`) and never reopen raw rollout or state inputs:
 
 ```bash
