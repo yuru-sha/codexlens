@@ -564,6 +564,32 @@ fn reporting_commands_reject_same_version_mismatched_schema_without_writing() {
 }
 
 #[test]
+fn readiness_document_tracks_the_mvp_boundary_and_entry_condition() {
+    let readme =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
+    let readiness =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/readiness/mvp.md"))
+            .unwrap();
+
+    assert!(readme.contains("docs/readiness/mvp.md"));
+    for marker in [
+        "cargo fmt --all -- --check",
+        "cargo clippy --all-targets --all-features -- -D warnings",
+        "cargo test --all-features",
+        "optimize --apply",
+        "compressed rollout",
+        "#53",
+        "Next-phase entry condition",
+        "read-only",
+    ] {
+        assert!(
+            readiness.contains(marker),
+            "missing readiness marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn readme_documents_current_cli_surface_and_mvp_boundaries() {
     let readme =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();

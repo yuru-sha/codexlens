@@ -1237,6 +1237,28 @@ mod tests {
     }
 
     #[test]
+    fn analysis_output_is_stable_when_canonical_rows_are_reordered() {
+        let data = fixture_data();
+        let mut reordered = data.clone();
+        reordered.sessions.reverse();
+        reordered.turns.reverse();
+        reordered.records.reverse();
+        reordered.messages.reverse();
+        reordered.tool_calls.reverse();
+        reordered.tool_results.reverse();
+        reordered.file_operations.reverse();
+        reordered.token_usage.reverse();
+        reordered.diagnostics.reverse();
+        reordered.instruction_snapshots.reverse();
+        reordered.instruction_joins.reverse();
+
+        assert_eq!(
+            serde_json::to_string(&analyze_default(&data)).unwrap(),
+            serde_json::to_string(&analyze_default(&reordered)).unwrap()
+        );
+    }
+
+    #[test]
     fn failures_prefer_structured_results_and_do_not_report_one_session() {
         let data = fixture_data();
         let options = AnalysisOptions::default();
