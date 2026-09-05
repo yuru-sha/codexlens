@@ -698,6 +698,7 @@ pub fn analyze_rework(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Fi
 pub fn analyze_verification(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
     let edits = edit_events(data, options);
     let verifications = verification_events(data);
+    let unobserved_verifications = unobserved_verification_events(data);
     let mut groups: BTreeMap<(String, Option<String>), Vec<EditEvent>> = BTreeMap::new();
     for edit in &edits {
         groups
@@ -738,6 +739,15 @@ pub fn analyze_verification(data: &CanonicalData, options: &AnalysisOptions) -> 
             .cloned()
             .collect::<Vec<_>>();
         checks.sort_by(|left, right| compare_positions(&left.position, &right.position));
+        let has_unobserved_attempt = unobserved_verifications.iter().any(|attempt| {
+            attempt.session_id == session_id
+                && last_change_position.is_some_and(|last| {
+                    compare_positions(&attempt.position, last) == Ordering::Greater
+                        && next_change_position.as_ref().is_none_or(|next| {
+                            compare_positions(&attempt.position, next) == Ordering::Less
+                        })
+                })
+        });
 
         let mut pending = Vec::new();
         let mut observed_before_pending = Vec::new();
@@ -782,7 +792,8 @@ pub fn analyze_verification(data: &CanonicalData, options: &AnalysisOptions) -> 
             continue;
         }
 
-        let complete = turn_is_complete(data, &session_id, turn_id.as_deref());
+        let complete =
+            !has_unobserved_attempt && turn_is_complete(data, &session_id, turn_id.as_deref());
         let status = if complete {
             VerificationStatus::Missing
         } else {
@@ -1452,31 +1463,20 @@ fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
     let mut events = Vec::new();
     let mut call_ids = HashSet::new();
     for call in &data.tool_calls {
-        let Some(session_id) = call.session_id.clone() else {
-            continue;
-        };
         if !call_has_observed_result(data, call) {
             continue;
         }
-        let command = call
-            .command
-            .as_deref()
-            .or(call.input_summary.as_deref())
-            .unwrap_or_default();
-        let Some(kind) = verification_kind(command) else {
+        let Some(event) = verification_event_for_call(data, call) else {
             continue;
         };
         if let Some(call_id) = call.call_id.as_ref() {
-            call_ids.insert((session_id.clone(), call.turn_id.clone(), call_id.clone()));
+            call_ids.insert((
+                event.session_id.clone(),
+                event.turn_id.clone(),
+                call_id.clone(),
+            ));
         }
-        events.push(VerificationEvent {
-            session_id,
-            turn_id: call.turn_id.clone(),
-            command: bounded_excerpt(command, DEFAULT_EXCERPT_BYTES),
-            kind,
-            position: position_for_source(data, &call.provenance, None),
-            source: call.provenance.clone(),
-        });
+        events.push(event);
     }
     for result in &data.tool_results {
         let Some(session_id) = result.session_id.clone() else {
@@ -1507,6 +1507,32 @@ fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
         });
     }
     events
+}
+
+fn unobserved_verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
+    data.tool_calls
+        .iter()
+        .filter(|call| !call_has_observed_result(data, call))
+        .filter_map(|call| verification_event_for_call(data, call))
+        .collect()
+}
+
+fn verification_event_for_call(data: &CanonicalData, call: &ToolCall) -> Option<VerificationEvent> {
+    let session_id = call.session_id.clone()?;
+    let command = call
+        .command
+        .as_deref()
+        .or(call.input_summary.as_deref())
+        .unwrap_or_default();
+    let kind = verification_kind(command)?;
+    Some(VerificationEvent {
+        session_id,
+        turn_id: call.turn_id.clone(),
+        command: bounded_excerpt(command, DEFAULT_EXCERPT_BYTES),
+        kind,
+        position: position_for_source(data, &call.provenance, None),
+        source: call.provenance.clone(),
+    })
 }
 
 fn verification_kind(command: &str) -> Option<String> {
@@ -3451,6 +3477,22 @@ mod tests {
             "a later-turn verification must cover the preceding edit batch"
         );
 
+        let mut incomplete_later_turn = cross_turn.clone();
+        incomplete_later_turn.tool_results.retain(|result| {
+            result.call_id.as_deref() != Some("fixture-analysis-cross-turn-check")
+        });
+        let incomplete_later_turn_findings =
+            analyze_verification(&incomplete_later_turn, &AnalysisOptions::default());
+        assert!(
+            incomplete_later_turn_findings.iter().any(|finding| {
+                finding.verification_status == Some(VerificationStatus::NotObserved)
+                    && finding.evidence.iter().any(|evidence| {
+                        evidence.session_id.as_deref() == Some("fixture-analysis-session-a")
+                    })
+            }),
+            "an incomplete later-turn verification must preserve not_observed"
+        );
+
         data.tool_calls.push(ToolCall {
             id: None,
             call_id: Some("fixture-analysis-check".to_owned()),
@@ -3471,7 +3513,9 @@ mod tests {
                         evidence.session_id.as_deref() == Some("fixture-analysis-session-b")
                     })
                 })
-                .all(|finding| finding.verification_status == Some(VerificationStatus::Missing))
+                .all(|finding| {
+                    finding.verification_status == Some(VerificationStatus::NotObserved)
+                })
         );
         data.tool_results.push(ToolResult {
             id: None,
