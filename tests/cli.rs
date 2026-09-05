@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use codexlens::discovery::{DiscoveredInput, InputKind, ReaderKind};
 use codexlens::model::{
-    InstructionFile, InstructionFileKind, InstructionFileState, InstructionScope, ProjectRootStatus,
+    DiagnosticKind, InstructionFile, InstructionFileKind, InstructionFileState, InstructionScope,
+    ProjectRootStatus,
 };
 use codexlens::rollout::RolloutParseOptions;
-use codexlens::store::{IngestInputKind, SCHEMA_VERSION, Store};
+use codexlens::store::{IngestInputKind, IngestOptions, SCHEMA_VERSION, Store};
 use rusqlite::{Connection, params};
 
 static NEXT_TEMP_STORE: AtomicUsize = AtomicUsize::new(0);
@@ -572,6 +574,8 @@ fn readiness_document_tracks_the_mvp_boundary_and_entry_condition() {
             .unwrap();
 
     assert!(readme.contains("docs/readiness/mvp.md"));
+    assert!(readme.contains("docs/specs/post-mvp.md"));
+    assert!(readiness.contains("../specs/post-mvp.md"));
     for marker in [
         "cargo fmt --all -- --check",
         "cargo clippy --all-targets --all-features -- -D warnings",
@@ -652,4 +656,164 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
             "README is missing MVP boundary: {boundary}"
         );
     }
+}
+
+#[test]
+fn post_mvp_contract_spec_tracks_each_deferred_boundary() {
+    let spec =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/specs/post-mvp.md"))
+            .unwrap();
+
+    let sections = [
+        (
+            "## 1. Compressed rollout readers",
+            "## 2. Refresh and frozen reporting",
+        ),
+        (
+            "## 2. Refresh and frozen reporting",
+            "## 3. Machine-readable output",
+        ),
+        ("## 3. Machine-readable output", "## 4. Live monitoring"),
+        ("## 4. Live monitoring", "## 5. `optimize --apply`"),
+        (
+            "## 5. `optimize --apply`",
+            "## Entry gate for implementation issues",
+        ),
+    ];
+    for (heading, next_heading) in sections {
+        assert!(
+            spec.contains(heading),
+            "missing contract section: {heading}"
+        );
+        let section = spec
+            .split_once(heading)
+            .and_then(|(_, rest)| rest.split_once(next_heading).map(|(body, _)| body))
+            .unwrap_or_else(|| panic!("could not isolate contract section: {heading}"));
+        assert!(
+            section.contains("### Compatibility tests"),
+            "missing compatibility tests for {heading}"
+        );
+        assert!(
+            section.contains("### Privacy tests"),
+            "missing privacy tests for {heading}"
+        );
+    }
+    for marker in [
+        "Current MVP regression coverage",
+        "Compatibility tests",
+        "Privacy tests",
+        "source read-only",
+        "deterministic",
+        "human-readable",
+        "machine-readable",
+        "backup",
+        "recovery",
+        "confirmation",
+        "before implementation starts",
+        "period_start",
+        "schema_version",
+        "nullable",
+        "canonical",
+        "scope",
+        "LF line endings",
+        "exactly one final LF",
+        "No applicable proposals.",
+        "RenderedDiff",
+        "SkippedProposal",
+        "escape backslash",
+    ] {
+        assert!(spec.contains(marker), "missing contract marker: {marker}");
+    }
+}
+
+#[test]
+fn compressed_rollout_input_is_explicitly_unsupported_and_read_only() {
+    let source = temp_store_path("compressed-rollout").with_extension("jsonl.zst");
+    let payload = b"synthetic secret=do-not-print\n";
+    fs::write(&source, payload).unwrap();
+    let before = fs::read(&source).unwrap();
+    let identity = fs::canonicalize(&source).unwrap();
+
+    let mut store = Store::in_memory().unwrap();
+    let report = store
+        .ingest_inputs(
+            &[DiscoveredInput {
+                path: source.clone(),
+                identity,
+                kind: InputKind::Rollout { archived: false },
+                reader: Some(ReaderKind::ZstdJsonl),
+            }],
+            &IngestOptions::default(),
+        )
+        .unwrap();
+
+    assert_eq!(report.files.len(), 1);
+    assert_eq!(report.files[0].diagnostics, 1);
+    assert_eq!(report.files[0].records, 0);
+    let data = store.load_canonical().unwrap();
+    assert_eq!(data.records.len(), 0);
+    assert_eq!(data.diagnostics.len(), 1);
+    assert_eq!(data.diagnostics[0].kind, DiagnosticKind::UnsupportedReader);
+    assert!(!data.diagnostics[0].message.contains("do-not-print"));
+    assert_eq!(fs::read(&source).unwrap(), before);
+
+    let _ = fs::remove_file(source);
+}
+
+#[test]
+fn reporting_is_deterministic_bounded_and_does_not_refresh_or_write() {
+    let store = fixture_store();
+    let raw_source = store.with_extension("jsonl");
+    let raw_payload = b"synthetic raw secret=do-not-report\n";
+    fs::write(&raw_source, raw_payload).unwrap();
+    let store_before = fs::read(&store).unwrap();
+    let raw_before = fs::read(&raw_source).unwrap();
+
+    let first = run_args(&["doctor"], &store);
+    let second = run_args(&["doctor"], &store);
+
+    assert!(first.status.success());
+    assert!(second.status.success());
+    assert_eq!(first.stdout, second.stdout);
+    assert_eq!(first.stderr, second.stderr);
+    let stdout = String::from_utf8_lossy(&first.stdout);
+    assert_doctor_report(&stdout);
+    assert!(!stdout.contains("do-not-report"));
+    assert_eq!(fs::read(&store).unwrap(), store_before);
+    assert_eq!(fs::read(&raw_source).unwrap(), raw_before);
+
+    let _ = fs::remove_file(raw_source);
+    let _ = fs::remove_file(store);
+}
+
+fn assert_deferred_surface_is_rejected(args: &[&str]) {
+    let store = empty_store();
+    let before = fs::read(&store).unwrap();
+    let output = run_args(args, &store);
+
+    assert!(!output.status.success(), "unexpectedly accepted {args:?}");
+    assert!(output.stderr.len() < 512, "unbounded error for {args:?}");
+    assert_eq!(fs::read(&store).unwrap(), before);
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn refresh_and_frozen_reporting_are_not_currently_exposed() {
+    assert_deferred_surface_is_rejected(&["refresh"]);
+    assert_deferred_surface_is_rejected(&["analyze", "--frozen"]);
+}
+
+#[test]
+fn machine_readable_output_is_not_currently_exposed() {
+    assert_deferred_surface_is_rejected(&["analyze", "--format", "json"]);
+}
+
+#[test]
+fn live_monitoring_is_not_currently_exposed() {
+    assert_deferred_surface_is_rejected(&["monitor"]);
+}
+
+#[test]
+fn optimize_apply_is_not_currently_exposed() {
+    assert_deferred_surface_is_rejected(&["optimize", "--apply"]);
 }

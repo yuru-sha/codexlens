@@ -98,7 +98,8 @@ The Phase 3 lenses and Phase 4 advisor remain exposed from the
 canonical data without reopening source files; the advisor reads only the
 recommended instruction files when rendering diffs. See [the architecture specification](docs/specs/architecture.md),
 [the session format contract](docs/specs/session-format.md), and
-[the analysis contract](docs/specs/analysis.md).
+[the analysis contract](docs/specs/analysis.md). The deferred next-phase
+contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
 
 ## Deliberately deferred
 
@@ -109,7 +110,8 @@ recommended instruction files when rendering diffs. See [the architecture specif
 - `--frozen` reporting mode: skipping refresh is not a current CLI behavior;
   it will be specified together with any future refresh workflow. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 - Machine-readable output and live monitoring: neither is part of the MVP
-  command surface. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
+  command surface. Their entry contracts are documented in
+  [docs/specs/post-mvp.md](docs/specs/post-mvp.md). Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 
 ## Status and roadmap
 
