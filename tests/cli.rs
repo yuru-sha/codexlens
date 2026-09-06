@@ -213,7 +213,11 @@ fn assert_known_proposal(proposal: &KnownProposal) {
 
 fn temp_store_path(label: &str) -> PathBuf {
     let nonce = NEXT_TEMP_STORE.fetch_add(1, Ordering::Relaxed);
-    let base = fs::canonicalize(std::env::temp_dir()).unwrap();
+    let base = if cfg!(windows) {
+        std::env::temp_dir()
+    } else {
+        fs::canonicalize(std::env::temp_dir()).unwrap()
+    };
     let path = base.join(format!(
         "codexlens-cli-{}-{label}-{nonce}.sqlite",
         std::process::id(),
@@ -633,12 +637,7 @@ fn optimize_apply_requires_confirmation_and_applies_only_reviewed_proposals() {
     let missing_confirmation = run_args(&["optimize", "--apply"], &store);
 
     assert!(!missing_confirmation.status.success());
-    assert!(
-        String::from_utf8_lossy(&missing_confirmation.stderr).contains("--yes"),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&missing_confirmation.stdout),
-        String::from_utf8_lossy(&missing_confirmation.stderr)
-    );
+    assert!(String::from_utf8_lossy(&missing_confirmation.stderr).contains("--yes"));
     assert_eq!(fs::read(&target).unwrap(), before_target);
     assert_eq!(fs::read(&store).unwrap(), before_store);
 
@@ -2285,12 +2284,7 @@ fn optimize_apply_requires_explicit_confirmation() {
     let output = run_args(&["optimize", "--apply"], &store);
 
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("--yes"),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--yes"));
     assert_eq!(fs::read(&store).unwrap(), before);
     let _ = fs::remove_file(store);
     let _ = fs::remove_file(target);
