@@ -226,6 +226,14 @@ fn temp_store_path(label: &str) -> PathBuf {
     path
 }
 
+fn long_path(path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(format!(r"\\?\{}", path.display()))
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn temp_rollout_path(label: &str) -> PathBuf {
     let nonce = NEXT_TEMP_STORE.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
@@ -882,7 +890,7 @@ fn reporting_commands_explain_missing_store() {
 
 #[test]
 fn reporting_errors_bound_long_store_paths() {
-    let root = temp_store_path("reporting-long");
+    let root = long_path(&temp_store_path("reporting-long"));
     let mut parent = root.join("long");
     for index in 0..4 {
         parent = parent.join(format!("segment-{index}-{}", "x".repeat(40)));
@@ -1612,7 +1620,7 @@ fn failed_refresh_keeps_the_previous_derived_store() {
 #[test]
 fn refresh_errors_bound_long_store_paths() {
     let (home, _) = refresh_home();
-    let mut parent = home.join("long");
+    let mut parent = long_path(&home).join("long");
     for index in 0..4 {
         parent = parent.join(format!("segment-{index}-{}", "x".repeat(40)));
     }
