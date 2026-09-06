@@ -2,7 +2,7 @@
 
 Status: passed for the Phase 6 release-preparation candidate.
 
-Release candidate: `a874fbde4b6ac6fe0f624ebe7dc6363ca1e859b2`.
+Release candidate: the current audit-branch `HEAD`.
 Observed 2026-09-07 (Asia/Tokyo).
 The audit adds no product capability; it records release evidence and adds only
 boundary checks.
