@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use codexlens::discovery::{DiscoveredInput, InputKind, ReaderKind};
@@ -278,6 +278,7 @@ fn run_args(args: &[&str], store: &Path) -> Output {
         .args(args)
         .arg("--store")
         .arg(store)
+        .stdin(Stdio::null())
         .output()
         .unwrap()
 }
