@@ -125,6 +125,7 @@ struct IngestBatchOptions<'a> {
     storage_mode: Option<&'a str>,
     preserve_instruction_snapshots: bool,
     replace: bool,
+    retracted_file_operations: &'a [FileOperation],
 }
 
 struct RolloutIngestContext<'a> {
@@ -440,19 +441,21 @@ impl Store {
                 storage_mode: (kind == IngestInputKind::State).then_some(STATE_STORAGE_STANDALONE),
                 preserve_instruction_snapshots: false,
                 replace: true,
+                retracted_file_operations: &[],
             },
         )
     }
 
-    pub(crate) fn append_canonical(
+    pub(crate) fn append_canonical_with_retractions(
         &mut self,
         source_path: &Path,
         kind: IngestInputKind,
         data: &CanonicalData,
+        retracted_file_operations: &[FileOperation],
     ) -> Result<IngestSummary> {
         let identity = canonical_identity(source_path)?;
         let fingerprint = fingerprint(source_path)?;
-        self.write_batch(
+        self.write_batch_with_retractions(
             source_path,
             &identity,
             kind,
@@ -462,6 +465,7 @@ impl Store {
                 storage_mode: (kind == IngestInputKind::State).then_some(STATE_STORAGE_STANDALONE),
                 preserve_instruction_snapshots: false,
                 replace: false,
+                retracted_file_operations,
             },
         )
     }
@@ -517,6 +521,7 @@ impl Store {
                 storage_mode: None,
                 preserve_instruction_snapshots: context.force_refresh && unchanged,
                 replace: true,
+                retracted_file_operations: &[],
             },
         )
     }
@@ -574,6 +579,7 @@ impl Store {
                 }),
                 preserve_instruction_snapshots: false,
                 replace: true,
+                retracted_file_operations: &[],
             },
         )
     }
@@ -614,6 +620,7 @@ impl Store {
                 storage_mode: None,
                 preserve_instruction_snapshots: false,
                 replace: true,
+                retracted_file_operations: &[],
             },
         )
     }
@@ -681,6 +688,25 @@ impl Store {
         data: &CanonicalData,
         options: IngestBatchOptions<'_>,
     ) -> Result<IngestSummary> {
+        self.write_batch_with_retractions(
+            source_path,
+            source_identity,
+            kind,
+            fingerprint,
+            data,
+            options,
+        )
+    }
+
+    fn write_batch_with_retractions(
+        &mut self,
+        source_path: &Path,
+        source_identity: &Path,
+        kind: IngestInputKind,
+        fingerprint: &Fingerprint,
+        data: &CanonicalData,
+        options: IngestBatchOptions<'_>,
+    ) -> Result<IngestSummary> {
         let identity = source_identity.to_string_lossy().into_owned();
         let mut stamped_data = data.clone();
         stamp_data(&mut stamped_data, &current_timestamp());
@@ -692,6 +718,7 @@ impl Store {
                 options.preserve_instruction_snapshots,
             )?;
         }
+        delete_file_operations(&transaction, &identity, options.retracted_file_operations)?;
         insert_data(
             &transaction,
             &identity,
@@ -1950,6 +1977,35 @@ fn delete_source(
         transaction.execute(
             "DELETE FROM instruction_snapshots WHERE source_identity = ?1",
             params![identity],
+        )?;
+    }
+    Ok(())
+}
+
+fn delete_file_operations(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    operations: &[FileOperation],
+) -> rusqlite::Result<()> {
+    for operation in operations {
+        transaction.execute(
+            "DELETE FROM file_operations
+             WHERE source_identity = ?1
+               AND source_path = ?2
+               AND source_line IS ?3
+               AND session_id IS ?4
+               AND turn_id IS ?5
+               AND path = ?6
+               AND operation = ?7",
+            params![
+                identity,
+                operation.provenance.path.to_string_lossy().as_ref(),
+                db_line(operation.provenance.line),
+                operation.session_id,
+                operation.turn_id,
+                operation.path,
+                operation.operation,
+            ],
         )?;
     }
     Ok(())

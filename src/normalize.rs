@@ -46,6 +46,7 @@ pub(crate) struct RolloutNormalizationContext {
     pub(crate) turn: Option<Turn>,
     pub(crate) pending_tool_calls: Vec<ToolCall>,
     pub(crate) recent_tool_results: Vec<ToolResult>,
+    pub(crate) invalidated_file_operations: Vec<FileOperation>,
 }
 
 pub(crate) fn normalize_rollout_incremental(
@@ -355,7 +356,8 @@ fn normalize_records_with_resolver(
     if let Some(resolver) = resolver {
         data.instruction_joins = join_sessions(&data.sessions, resolver);
     }
-    recompute_derived(&mut data, &prior_tool_calls, &prior_tool_results);
+    let invalidated_file_operations =
+        recompute_derived(&mut data, &prior_tool_calls, &prior_tool_results);
     let next_pending_tool_calls =
         next_pending_tool_calls(&prior_tool_calls, &data.tool_calls, &data.tool_results);
     let next_recent_tool_results =
@@ -365,6 +367,7 @@ fn normalize_records_with_resolver(
         turn: next_turn,
         pending_tool_calls: next_pending_tool_calls,
         recent_tool_results: next_recent_tool_results,
+        invalidated_file_operations,
     };
     (data, context)
 }
@@ -373,7 +376,7 @@ fn recompute_derived(
     data: &mut CanonicalData,
     prior_tool_calls: &[ToolCall],
     prior_tool_results: &[ToolResult],
-) {
+) -> Vec<FileOperation> {
     deduplicate_token_usage(&mut data.token_usage);
     let mut correlation_calls = prior_tool_calls.to_vec();
     correlation_calls.extend(data.tool_calls.clone());
@@ -383,7 +386,7 @@ fn recompute_derived(
         &mut data.tool_results,
     );
     mark_duplicate_tool_results(prior_tool_results, &mut data.tool_results);
-    extract_file_operations(data, prior_tool_calls, &correlation_calls);
+    extract_file_operations(data, prior_tool_calls, &correlation_calls)
 }
 
 fn next_pending_tool_calls(
@@ -395,18 +398,17 @@ fn next_pending_tool_calls(
         .iter()
         .chain(current)
         .filter(|call| {
-            call.call_id.is_some()
-                && !results.iter().any(|result| {
-                    result.call_id == call.call_id
-                        && call_result_context_matches(
-                            result.session_id.as_deref(),
-                            call.session_id.as_deref(),
-                        )
-                        && call_result_context_matches(
-                            result.turn_id.as_deref(),
-                            call.turn_id.as_deref(),
-                        )
-                })
+            !results.iter().any(|result| {
+                result.call_id == call.call_id
+                    && call_result_context_matches(
+                        result.session_id.as_deref(),
+                        call.session_id.as_deref(),
+                    )
+                    && call_result_context_matches(
+                        result.turn_id.as_deref(),
+                        call.turn_id.as_deref(),
+                    )
+            })
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -466,18 +468,25 @@ fn extract_file_operations(
     data: &mut CanonicalData,
     prior_tool_calls: &[ToolCall],
     correlation_calls: &[ToolCall],
-) {
+) -> Vec<FileOperation> {
     let calls = data.tool_calls.clone();
     let mut call_operations = HashSet::new();
     let mut unpaired_no_id_calls = Vec::new();
+    let mut invalidated_file_operations = Vec::new();
     for call in prior_tool_calls {
+        let operations = call_file_operations(data, call);
         if call_is_failed(&data.tool_results, correlation_calls, call)
             || call_has_failed_result(&data.tool_results, correlation_calls, call)
         {
+            invalidated_file_operations
+                .extend(operations.into_iter().map(|(operation, _)| operation));
             continue;
         }
-        for (_, key) in call_file_operations(data, call) {
-            call_operations.insert(key);
+        for (operation, key) in operations {
+            call_operations.insert(key.clone());
+            if call.call_id.is_none() {
+                unpaired_no_id_calls.push((operation, key.2));
+            }
         }
     }
     for call in &calls {
@@ -593,6 +602,7 @@ fn extract_file_operations(
             && right.provenance.path == left.provenance.path
             && right.provenance.line == left.provenance.line
     });
+    invalidated_file_operations
 }
 
 fn call_file_operations(

@@ -260,7 +260,7 @@ impl LocalMonitor {
             records,
             diagnostics: parsed.diagnostics,
         };
-        let data = if complete_end > start {
+        let (data, retracted_file_operations) = if complete_end > start {
             let (state_sessions, context) = if let Some(context) = self.context.clone() {
                 (Vec::new(), Some(context))
             } else {
@@ -284,10 +284,11 @@ impl LocalMonitor {
                 context.as_ref(),
                 sequence_start,
             );
+            let retracted_file_operations = context.invalidated_file_operations.clone();
             self.context = Some(context);
-            data
+            (data, retracted_file_operations)
         } else {
-            CanonicalData::default()
+            (CanonicalData::default(), Vec::new())
         };
 
         let should_write = self.initial
@@ -298,7 +299,12 @@ impl LocalMonitor {
             let summary = if self.initial || transition.is_some() {
                 store.ingest_canonical(&self.path, IngestInputKind::Rollout, &data)?
             } else {
-                store.append_canonical(&self.path, IngestInputKind::Rollout, &data)?
+                store.append_canonical_with_retractions(
+                    &self.path,
+                    IngestInputKind::Rollout,
+                    &data,
+                    &retracted_file_operations,
+                )?
             };
             Some(summary)
         } else {
@@ -585,5 +591,6 @@ fn stored_context(
         turn,
         pending_tool_calls: pending_tool_calls_for_source(data, path),
         recent_tool_results: recent_tool_results_for_source(data, path),
+        invalidated_file_operations: Vec::new(),
     })
 }
