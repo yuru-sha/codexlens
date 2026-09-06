@@ -188,11 +188,11 @@ impl AtomicRefreshStore {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(file) => {
                     drop(file);
-                    if target.exists()
-                        && let Err(error) = fs::copy(target, &path)
-                    {
-                        let _ = fs::remove_file(&path);
-                        return Err(error.into());
+                    if target.exists() {
+                        if let Err(error) = fs::copy(target, &path) {
+                            let _ = fs::remove_file(&path);
+                            return Err(error.into());
+                        }
                     }
                     return Ok(Self {
                         target: target.to_path_buf(),
