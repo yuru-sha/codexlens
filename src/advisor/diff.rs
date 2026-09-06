@@ -328,7 +328,9 @@ fn normalized_lines(content: &str) -> Vec<&str> {
 
 fn move_to_docs_link(source_path: &Path, target_path: &Path, existing_text: &str) -> String {
     let source_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
-    let link = relative_path(source_dir, target_path);
+    let link = relative_path(source_dir, target_path)
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
     let line_ending = if existing_text.ends_with("\r\n") {
         "\r\n"
     } else if existing_text.ends_with('\n') {
@@ -336,7 +338,7 @@ fn move_to_docs_link(source_path: &Path, target_path: &Path, existing_text: &str
     } else {
         ""
     };
-    format!("See [the detailed fact]({}).{line_ending}", link.display())
+    format!("See [the detailed fact]({link}).{line_ending}")
 }
 
 fn relative_path(from: &Path, to: &Path) -> PathBuf {

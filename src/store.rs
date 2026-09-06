@@ -2870,10 +2870,22 @@ mod tests {
         fs::write(nested.join("AGENTS.override.md"), "nested instruction").unwrap();
         let source = temp_path("filesystem.jsonl");
         let rollout = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-filesystem-session\",\"cwd\":\"{}\",\"project\":\"{}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-filesystem-turn\",\"cwd\":\"{}\"}}}}\n",
-            nested.display(),
-            root.display(),
-            nested.display(),
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": "fixture-filesystem-session",
+                    "cwd": nested.to_string_lossy(),
+                    "project": root.to_string_lossy(),
+                },
+            }),
+            serde_json::json!({
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "fixture-filesystem-turn",
+                    "cwd": nested.to_string_lossy(),
+                },
+            }),
         );
         fs::write(&source, rollout).unwrap();
         let mut store = Store::in_memory().unwrap();
@@ -2960,10 +2972,22 @@ mod tests {
         fs::write(root.join("AGENTS.md"), "before").unwrap();
         let source = temp_path("stable.jsonl");
         let rollout = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-stable-session\",\"cwd\":\"{}\",\"project\":\"{}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-stable-turn\",\"cwd\":\"{}\"}}}}\n",
-            root.display(),
-            root.display(),
-            root.display(),
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": "fixture-stable-session",
+                    "cwd": root.to_string_lossy(),
+                    "project": root.to_string_lossy(),
+                },
+            }),
+            serde_json::json!({
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "fixture-stable-turn",
+                    "cwd": root.to_string_lossy(),
+                },
+            }),
         );
         fs::write(&source, rollout).unwrap();
         let mut store = Store::in_memory().unwrap();
@@ -3433,8 +3457,18 @@ mod tests {
         fs::write(
             &rollout_source,
             format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-enrichment-session\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-enrichment-turn\",\"cwd\":\"{}\"}}}}\n",
-                project_root.display()
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {"id": "fixture-enrichment-session"},
+                }),
+                serde_json::json!({
+                    "type": "turn_context",
+                    "payload": {
+                        "turn_id": "fixture-enrichment-turn",
+                        "cwd": project_root.to_string_lossy(),
+                    },
+                }),
             ),
         )
         .unwrap();

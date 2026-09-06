@@ -1831,9 +1831,37 @@ mod tests {
     #[test]
     fn captures_observed_instruction_payloads_without_claiming_filesystem_history() {
         let instruction_text = "synthetic observed instruction";
+        let missing_root = std::env::temp_dir().join(format!(
+            "codexlens-normalize-missing-project-{}",
+            std::process::id()
+        ));
+        let missing_cwd = missing_root.join("project");
         let input = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fixture-instruction-session\",\"cwd\":\"/fixture/project\",\"project\":\"/fixture\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-instruction-turn-001\",\"cwd\":\"/fixture/project\",\"user_instructions\":\"{}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"fixture-instruction-turn-002\",\"cwd\":\"/fixture/project\",\"user_instructions\":\"{}\"}}}}\n",
-            instruction_text, instruction_text
+            "{}\n{}\n{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": "fixture-instruction-session",
+                    "cwd": missing_cwd.to_string_lossy(),
+                    "project": missing_root.to_string_lossy(),
+                },
+            }),
+            serde_json::json!({
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "fixture-instruction-turn-001",
+                    "cwd": missing_cwd.to_string_lossy(),
+                    "user_instructions": instruction_text,
+                },
+            }),
+            serde_json::json!({
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "fixture-instruction-turn-002",
+                    "cwd": missing_cwd.to_string_lossy(),
+                    "user_instructions": instruction_text,
+                },
+            }),
         );
         let parsed = parse_rollout_reader(
             Path::new("fixture.jsonl"),
