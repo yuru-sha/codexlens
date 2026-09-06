@@ -39,10 +39,10 @@ use the reporting commands against that store.
   support `--frozen` and opt-in `--format json` output.
 - `monitor` is an explicit local polling workflow; it updates the derived
   store and optional cursor file without modifying its observed source.
-- `optimize --diff` is review-only. `optimize --apply --yes` is the only
-  product write exception and updates only its validated instruction/
-  documentation write set, retaining backups and recovering the batch on
-  failure.
+- `optimize --diff` is review-only. `optimize --apply` is the only workflow
+  that may write instruction/documentation source files; it requires explicit
+  confirmation, with `--yes` for non-interactive use. It updates only its
+  validated write set, retaining backups and recovering the batch on failure.
 - Processing is local and deterministic; no hosted service or LLM is needed.
 
 ## Release checklist
