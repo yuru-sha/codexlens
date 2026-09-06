@@ -988,6 +988,28 @@ fn redact_bearer_tokens(value: &str) -> String {
                 .expect("whitespace was present")
                 .len_utf8();
         }
+        if value
+            .get(token_start..)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|character| matches!(character, ':' | '='))
+        {
+            token_start += value[token_start..]
+                .chars()
+                .next()
+                .expect("a delimiter was present")
+                .len_utf8();
+            while value
+                .get(token_start..)
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(char::is_whitespace)
+            {
+                token_start += value[token_start..]
+                    .chars()
+                    .next()
+                    .expect("whitespace was present")
+                    .len_utf8();
+            }
+        }
         if token_start == after_name || token_start >= value.len() {
             cursor = after_name;
             continue;
@@ -1016,13 +1038,11 @@ fn redact_jwt_tokens(value: &str) -> String {
                 .unwrap_or(value.len() - start);
         let token = &value[start..token_end];
         let parts = token.split('.').collect::<Vec<_>>();
-        let is_jwt = parts.len() == 3
+        let is_jwt = matches!(parts.len(), 3 | 5)
             && parts[0].starts_with("eyJ")
             && parts.iter().all(|part| {
-                part.len() >= 8
-                    && part
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                part.bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
             });
         if !is_jwt {
             cursor = start + 3;

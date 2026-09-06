@@ -230,19 +230,27 @@ fn finding_json(finding: &Finding, heuristic: &str) -> serde_json::Value {
         "severity": finding.severity.as_str(),
         "confidence": finding.confidence.as_str(),
         "scope": scope_json(&finding.scope),
-        "key": finding.key,
+        "key": bounded_excerpt(&finding.key, MAX_PROPOSAL_TEXT_BYTES),
         "summary": finding.summary,
         "evidence": finding.evidence.iter().map(evidence_json).collect::<Vec<_>>(),
         "occurrences": finding.occurrences,
         "distinct_sessions": finding.distinct_sessions,
-        "affected_paths": finding.affected_paths,
-        "observed_commands": finding.observed_commands,
-        "sequence": finding.sequence,
+        "affected_paths": bounded_json_strings(&finding.affected_paths),
+        "observed_commands": bounded_json_strings(&finding.observed_commands),
+        "sequence": bounded_json_strings(&finding.sequence),
         "suggested_action": finding.suggested_action,
-        "limitations": finding.limitations,
+        "limitations": bounded_json_strings(&finding.limitations),
         "verification_status": finding.verification_status.map(VerificationStatus::as_str),
         "heuristic": heuristic,
     })
+}
+
+fn bounded_json_strings(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .take(MAX_REPORT_EVIDENCE)
+        .map(|value| bounded_excerpt(value, MAX_PROPOSAL_TEXT_BYTES))
+        .collect()
 }
 
 fn evidence_json(evidence: &EvidenceRef) -> serde_json::Value {
@@ -429,20 +437,23 @@ fn sanitize_finding(mut finding: Finding, excerpt_max_bytes: usize) -> Finding {
     finding.key = bounded_excerpt(&finding.key, excerpt_max_bytes);
     finding.summary = bounded_excerpt(&finding.summary, excerpt_max_bytes);
     finding.suggested_action = bounded_excerpt(&finding.suggested_action, excerpt_max_bytes);
-    finding.affected_paths = bounded_strings(&finding.affected_paths, excerpt_max_bytes);
-    finding.observed_commands = bounded_strings(&finding.observed_commands, excerpt_max_bytes);
-    finding.sequence = bounded_strings(&finding.sequence, excerpt_max_bytes);
-    finding.limitations = bounded_strings(&finding.limitations, excerpt_max_bytes);
+    finding.observed_commands = finding
+        .observed_commands
+        .iter()
+        .map(|command| bounded_excerpt(command, excerpt_max_bytes))
+        .collect();
+    finding.sequence = finding
+        .sequence
+        .iter()
+        .map(|entry| bounded_excerpt(entry, excerpt_max_bytes))
+        .collect();
+    finding.limitations = finding
+        .limitations
+        .iter()
+        .map(|limitation| bounded_excerpt(limitation, excerpt_max_bytes))
+        .collect();
     finding.evidence = bounded_evidence(&finding.evidence, excerpt_max_bytes);
     finding
-}
-
-fn bounded_strings(values: &[String], max_bytes: usize) -> Vec<String> {
-    values
-        .iter()
-        .take(MAX_REPORT_EVIDENCE)
-        .map(|value| bounded_excerpt(value, max_bytes))
-        .collect()
 }
 
 fn period(data: &CanonicalData) -> (Option<String>, Option<String>) {
@@ -683,21 +694,37 @@ mod tests {
         );
         let finding = &report.groups[0].findings[0].finding;
         assert!(!finding.key.contains("key-secret"));
-        assert_eq!(finding.affected_paths.len(), MAX_REPORT_EVIDENCE);
-        assert_eq!(finding.observed_commands.len(), MAX_REPORT_EVIDENCE);
-        assert_eq!(finding.sequence.len(), MAX_REPORT_EVIDENCE);
-        assert_eq!(finding.limitations.len(), MAX_REPORT_EVIDENCE);
+        assert_eq!(finding.affected_paths.len(), MAX_REPORT_EVIDENCE + 1);
+        assert_eq!(finding.observed_commands.len(), MAX_REPORT_EVIDENCE + 1);
+        assert_eq!(finding.sequence.len(), MAX_REPORT_EVIDENCE + 1);
+        assert_eq!(finding.limitations.len(), MAX_REPORT_EVIDENCE + 1);
 
         let output = render_json_finding_report("doctor", &report).unwrap();
         assert!(!output.contains("key-secret"));
+        let document: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let finding = &document["data"]["groups"][0]["findings"][0];
+        for field in [
+            "affected_paths",
+            "observed_commands",
+            "sequence",
+            "limitations",
+        ] {
+            assert_eq!(
+                finding[field].as_array().unwrap().len(),
+                MAX_REPORT_EVIDENCE
+            );
+        }
     }
 
     #[test]
     fn json_diff_skips_extended_credential_formats() {
         let diffs = [
             "Authorization: Bearer bearer-secret\n",
+            "Authorization: Bearer: bearer-delimited-secret\n",
             "-----BEGIN PRIVATE KEY-----\nprivate-secret\n-----END PRIVATE KEY-----\n",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature-secret\n",
+            "eyJhbGciOiJub25lIn0.e30.short-signature\n",
+            "eyJhbGciOiJub25lIn0.a.b.c.jwe-secret\n",
         ];
         let rendered = diffs
             .iter()
@@ -727,7 +754,14 @@ mod tests {
             document["data"]["skipped"].as_array().unwrap().len(),
             diffs.len()
         );
-        for secret in ["bearer-secret", "private-secret", "signature-secret"] {
+        for secret in [
+            "bearer-secret",
+            "bearer-delimited-secret",
+            "private-secret",
+            "signature-secret",
+            "short-signature",
+            "jwe-secret",
+        ] {
             assert!(!output.contains(secret));
         }
         assert!(
