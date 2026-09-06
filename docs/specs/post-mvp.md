@@ -387,6 +387,31 @@ history for the first implementation.
 - A stopped monitor releases its source handles and does not retain raw
   session payloads beyond the documented derived-store boundary.
 
+### Implementation decisions for issue #60
+
+- `monitor --source PATH --kind rollout|state` is the explicit local runtime
+  boundary. `--max-polls` provides a deterministic finite stop boundary for
+  automation; without it the command continues polling locally.
+- A rollout cursor records the canonical source path, the byte offset after the
+  last complete newline, the physical line and canonical sequence counts, a
+  bounded FNV-1a prefix digest, and a bounded recent identity window. The
+  monitor passes only complete newline-terminated bytes to the existing JSONL
+  adapter, so an incomplete final line remains source data and is retried on
+  the next poll.
+- A source smaller than the recorded offset is a `truncated` transition. A
+  changed prefix at the recorded offset is a `rotated` transition. Both reset
+  the cursor and replace that source's derived rows atomically before reading
+  the new complete prefix; neither transition silently appends old and new
+  generations together.
+- Explicit `event_id`, `record_id`, or `id` values are checked in a bounded
+  recent window. A repeated identity is reported as a diagnostic and skipped;
+  identities older than the configured window are treated as new events.
+- State databases have no line offset. The monitor fingerprints the complete
+  read-only source and reuses the existing state adapter only when that
+  fingerprint changes. Rollout batches append canonical rows to the derived
+  store using the existing normalizer, while session and turn context is
+  carried as bounded canonical state rather than raw payloads.
+
 ## 5. `optimize --apply`
 
 ### Scope

@@ -122,6 +122,7 @@ impl std::fmt::Display for StoreFreshness {
 struct IngestBatchOptions<'a> {
     storage_mode: Option<&'a str>,
     preserve_instruction_snapshots: bool,
+    replace: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -422,6 +423,29 @@ impl Store {
             IngestBatchOptions {
                 storage_mode: (kind == IngestInputKind::State).then_some(STATE_STORAGE_STANDALONE),
                 preserve_instruction_snapshots: false,
+                replace: true,
+            },
+        )
+    }
+
+    pub(crate) fn append_canonical(
+        &mut self,
+        source_path: &Path,
+        kind: IngestInputKind,
+        data: &CanonicalData,
+    ) -> Result<IngestSummary> {
+        let identity = canonical_identity(source_path)?;
+        let fingerprint = fingerprint(source_path)?;
+        self.write_batch(
+            source_path,
+            &identity,
+            kind,
+            &fingerprint,
+            data,
+            IngestBatchOptions {
+                storage_mode: (kind == IngestInputKind::State).then_some(STATE_STORAGE_STANDALONE),
+                preserve_instruction_snapshots: false,
+                replace: false,
             },
         )
     }
@@ -468,6 +492,7 @@ impl Store {
             IngestBatchOptions {
                 storage_mode: None,
                 preserve_instruction_snapshots: force_refresh && unchanged,
+                replace: true,
             },
         )
     }
@@ -524,6 +549,7 @@ impl Store {
                     STATE_STORAGE_ENRICHMENT
                 }),
                 preserve_instruction_snapshots: false,
+                replace: true,
             },
         )
     }
@@ -563,6 +589,7 @@ impl Store {
             IngestBatchOptions {
                 storage_mode: None,
                 preserve_instruction_snapshots: false,
+                replace: true,
             },
         )
     }
@@ -611,15 +638,36 @@ impl Store {
         data: &CanonicalData,
         options: IngestBatchOptions<'_>,
     ) -> Result<IngestSummary> {
+        self.write_batch(
+            source_path,
+            source_identity,
+            kind,
+            fingerprint,
+            data,
+            options,
+        )
+    }
+
+    fn write_batch(
+        &mut self,
+        source_path: &Path,
+        source_identity: &Path,
+        kind: IngestInputKind,
+        fingerprint: &Fingerprint,
+        data: &CanonicalData,
+        options: IngestBatchOptions<'_>,
+    ) -> Result<IngestSummary> {
         let identity = source_identity.to_string_lossy().into_owned();
         let mut stamped_data = data.clone();
         stamp_data(&mut stamped_data, &current_timestamp());
         let transaction = self.connection.transaction()?;
-        delete_source(
-            &transaction,
-            &identity,
-            options.preserve_instruction_snapshots,
-        )?;
+        if options.replace {
+            delete_source(
+                &transaction,
+                &identity,
+                options.preserve_instruction_snapshots,
+            )?;
+        }
         insert_data(
             &transaction,
             &identity,
@@ -2437,7 +2485,7 @@ fn capture_options_for_inputs(inputs: &[DiscoveredInput]) -> InstructionCaptureO
         })
 }
 
-fn resolver_for_source(path: &Path) -> InstructionResolver {
+pub(crate) fn resolver_for_source(path: &Path) -> InstructionResolver {
     codex_home_for_source(path)
         .map_or_else(InstructionCaptureOptions::default, |codex_home| {
             InstructionCaptureOptions::from_codex_home(&codex_home, None).0

@@ -12,9 +12,10 @@ scoped proposal for improving `AGENTS.md` or nearby project documentation.
 The product is an evidence tool, not a replacement for Codex, a hosted
 analytics service, or a general-purpose agent-log platform.
 
-The current binary is a read-only reporting surface over an existing derived
-SQLite store. It does not ingest or refresh raw rollout/state inputs, and it
-does not apply advisor proposals. The supported command surface and examples
+The current binary is a local reporting surface over a derived SQLite store.
+Reports are read-only; the explicit `monitor` command is the only runtime that
+reads raw rollout/state inputs and writes derived rows. It does not modify raw
+sources or apply advisor proposals. The supported command surface and examples
 are documented in the [README](../../README.md).
 
 ## 2. Goals
@@ -27,6 +28,8 @@ are documented in the [README](../../README.md).
   knowledge with effective instruction snapshots.
 - Produce deterministic, explainable findings with source evidence.
 - Keep all MVP processing local and rule-based.
+- Observe append-only local sources with bounded cursors and deterministic stop
+  boundaries.
 
 ## 3. Non-goals for the MVP
 
@@ -34,7 +37,7 @@ are documented in the [README](../../README.md).
 - Requiring an LLM or making semantic claims that cannot be traced to evidence.
 - Editing `AGENTS.md`, `config.toml`, source files, or rollout files.
 - Billing or quota accounting.
-- Live monitoring of a running Codex process.
+- Hosted monitoring services, background daemons, or network transport.
 - Supporting every historical or future Codex event before it is observed.
 - Reusing implementation code from
   [`cclens`](https://github.com/lambdalisue/cclens) or
@@ -62,12 +65,14 @@ Codex local state + project instructions
                          doctor / optimize
 ```
 
-The store is the boundary between ingestion and reporting:
+The store is the boundary between monitoring/ingestion and reporting:
 
 - adapters read files and map them to canonical records;
 - storage persists canonical facts and provenance;
 - lenses read the store and emit findings;
 - reports render findings without reopening raw inputs.
+- the explicit monitor appends complete rollout batches or replaces changed
+  state snapshots without changing raw sources.
 
 Incremental source identity is the canonical path plus byte length, modified
 time when available, and a streaming FNV-1a fingerprint. An unchanged identity
@@ -271,8 +276,10 @@ implementation available in the
 5. Advisor: `doctor`, proposal generation, and `optimize --diff`.
 
 Phases 0 through 4, including the reporting command integration, are complete
-for the MVP. Compressed readers, `--frozen`, machine-readable output, live
-monitoring, and `optimize --apply` remain deliberately deferred.
+for the MVP. Live monitoring is implemented as the explicit local runtime
+described in [the post-MVP contract](post-mvp.md#4-live-monitoring).
+Compressed readers, `--frozen`, machine-readable output, and
+`optimize --apply` remain deliberately deferred.
 
 Every phase must leave the repository buildable and its behavior covered by
 focused deterministic tests.

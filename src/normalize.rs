@@ -37,12 +37,44 @@ pub fn normalize_rollout_with_instructions(
     normalize_rollout_with_resolver(result, state, Some(resolver))
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RolloutNormalizationContext {
+    pub(crate) session: Option<Session>,
+    pub(crate) turn: Option<Turn>,
+}
+
+pub(crate) fn normalize_rollout_incremental(
+    result: &RolloutParseResult,
+    state: &[Session],
+    resolver: &InstructionResolver,
+    context: Option<&RolloutNormalizationContext>,
+    sequence_start: usize,
+) -> (CanonicalData, RolloutNormalizationContext) {
+    let (mut data, context) = normalize_records_with_resolver(
+        &result.records,
+        state,
+        Some(resolver),
+        context,
+        sequence_start,
+    );
+    data.diagnostics
+        .extend(result.diagnostics.iter().map(canonical_parse_diagnostic));
+    data.diagnostics.sort_by(|left, right| {
+        left.source
+            .path
+            .cmp(&right.source.path)
+            .then_with(|| left.source.line.cmp(&right.source.line))
+            .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+    });
+    (data, context)
+}
+
 fn normalize_rollout_with_resolver(
     result: &RolloutParseResult,
     state: &[Session],
     resolver: Option<&InstructionResolver>,
 ) -> CanonicalData {
-    let mut data = normalize_records_with_resolver(&result.records, state, resolver);
+    let (mut data, _) = normalize_records_with_resolver(&result.records, state, resolver, None, 0);
     data.diagnostics
         .extend(result.diagnostics.iter().map(canonical_parse_diagnostic));
     data.diagnostics.sort_by(|left, right| {
@@ -74,30 +106,45 @@ pub fn normalize_rollout_result(
 }
 
 pub fn normalize_records(records: &[RolloutRecord], state: &[Session]) -> CanonicalData {
-    normalize_records_with_resolver(records, state, None)
+    normalize_records_with_resolver(records, state, None, None, 0).0
 }
 
 fn normalize_records_with_resolver(
     records: &[RolloutRecord],
     state: &[Session],
     resolver: Option<&InstructionResolver>,
-) -> CanonicalData {
+    context: Option<&RolloutNormalizationContext>,
+    sequence_start: usize,
+) -> (CanonicalData, RolloutNormalizationContext) {
     let mut data = CanonicalData::default();
     let mut sessions = BTreeMap::new();
+    if let Some(session) = context.and_then(|context| context.session.clone()) {
+        sessions.insert(session.id.clone(), session);
+    }
     let source_path = records.first().map(|record| record.source.path.clone());
     let matched_state_session_id =
         matching_state_session(source_path.as_deref(), state).map(|session| session.id.clone());
-    let mut current_session_id = matched_state_session_id
-        .as_deref()
-        .and_then(|session_id| state.iter().find(|session| session.id == session_id))
-        .map(|session| {
-            sessions.insert(session.id.clone(), session.clone());
-            session.id.clone()
-        });
-    let mut current_turn_id = None;
+    let mut current_session_id = context
+        .and_then(|context| context.session.as_ref())
+        .map(|session| session.id.clone())
+        .or_else(|| matched_state_session_id.clone());
+    if context
+        .and_then(|context| context.session.as_ref())
+        .is_none()
+        && let Some(session_id) = current_session_id.as_deref()
+        && let Some(session) = state.iter().find(|session| session.id == session_id)
+    {
+        sessions.insert(session.id.clone(), session.clone());
+    }
+    let mut current_turn_id = context.and_then(|context| {
+        context.turn.as_ref().map(|turn| {
+            data.turns.push(turn.clone());
+            turn.id.clone()
+        })
+    });
 
     for (index, record) in records.iter().enumerate() {
-        let sequence = index + 1;
+        let sequence = sequence_start + index + 1;
         let source = SourceRef::from(&record.source);
         let payload = known_payload(record);
         let explicit_turn_id = payload
@@ -284,15 +331,30 @@ fn normalize_records_with_resolver(
         });
     }
 
+    let next_session = current_session_id
+        .as_deref()
+        .and_then(|session_id| sessions.get(session_id))
+        .cloned();
+    let next_turn = current_turn_id
+        .as_deref()
+        .and_then(|turn_id| data.turns.iter().find(|turn| turn.id == turn_id).cloned());
     data.sessions = sessions.into_values().collect();
     if let Some(resolver) = resolver {
         data.instruction_joins = join_sessions(&data.sessions, resolver);
     }
+    recompute_derived(&mut data);
+    let context = RolloutNormalizationContext {
+        session: next_session,
+        turn: next_turn,
+    };
+    (data, context)
+}
+
+fn recompute_derived(data: &mut CanonicalData) {
     deduplicate_token_usage(&mut data.token_usage);
     mark_tool_results(&mut data.tool_calls, &mut data.tool_results);
     mark_duplicate_tool_results(&mut data.tool_results);
-    extract_file_operations(&mut data);
-    data
+    extract_file_operations(data);
 }
 
 fn extract_file_operations(data: &mut CanonicalData) {

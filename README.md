@@ -4,8 +4,9 @@ Analyze Codex sessions and turn recurring friction into actionable
 `AGENTS.md` improvements.
 
 > MVP status: local ingestion, instruction capture, deterministic lenses, the
-> advisor, and the read-only reporting CLI are implemented. The binary reads a
-> derived store; it does not ingest raw files or apply proposals.
+> advisor, the read-only reporting CLI, and bounded local monitoring are
+> implemented. Monitoring updates a derived store; it does not modify sources
+> or apply proposals.
 
 ## Goal
 
@@ -62,6 +63,7 @@ recommended instruction files in order to render a diff.
 | `instructions` | derived store | instruction-lens findings | reads the store only |
 | `doctor` | derived store | ranked findings grouped by scope | reads the store only |
 | `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | does not modify the supplied store or target files; legacy stores use a temporary migrated copy |
+| `monitor` | one local rollout JSONL or state SQLite source | bounded incremental ingestion and cursor/status output | reads the source only; writes only the derived store |
 
 `doctor` accepts the optional `--limit COUNT` to cap findings per scope.
 `optimize` currently requires `--diff`; the command is advisory and
@@ -71,9 +73,13 @@ invalid stores return a bounded, actionable error. Older supported store
 schemas are migrated only in a temporary copy, leaving the supplied store
 unchanged.
 
-The current binary has no ingestion or refresh command. Raw rollout/state
-ingestion remains the adapter and store boundary, and reporting never reopens
-those raw inputs.
+The current binary has no implicit ingestion or refresh on reporting commands.
+Raw rollout/state ingestion remains the adapter and store boundary, and
+reporting never reopens those raw inputs. `monitor` is the explicit exception:
+it polls one source locally, reuses the existing adapter and canonical model,
+and appends or replaces only the derived store. Use `--kind rollout|state`;
+`--max-polls COUNT` makes a finite run, and omitting it keeps polling at
+`--interval-ms MILLISECONDS` until stopped by the caller.
 
 The final MVP readiness review, verification evidence, and next-phase entry
 condition are recorded in [docs/readiness/mvp.md](docs/readiness/mvp.md).
@@ -91,6 +97,7 @@ cargo run -- knowledge --store .codexlens.sqlite
 cargo run -- instructions --store .codexlens.sqlite
 cargo run -- doctor --store .codexlens.sqlite
 cargo run -- optimize --diff --store .codexlens.sqlite
+cargo run -- monitor --source tests/fixtures/rollout/monitoring.jsonl --kind rollout --store .codexlens.sqlite --max-polls 1
 ```
 
 The Phase 3 lenses and Phase 4 advisor remain exposed from the
@@ -111,15 +118,15 @@ contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
   the refresh/frozen boundary is documented in
   [docs/specs/post-mvp.md](docs/specs/post-mvp.md), and implementation remains deferred.
   Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
-- Machine-readable output and live monitoring: neither is part of the MVP
-  command surface. Their entry contracts are documented in
-  [docs/specs/post-mvp.md](docs/specs/post-mvp.md). Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
+- Machine-readable output remains deferred. Its entry contract is documented
+  in [docs/specs/post-mvp.md](docs/specs/post-mvp.md). Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 
 ## Status and roadmap
 
-Phases 0 through 4 are complete. The current MVP endpoint is the local,
-deterministic reporting surface documented above; future work starts with the
-deferred capabilities rather than an implicit expansion of the boundary.
+Phases 0 through 4 and the Phase 5 live-monitoring capability are complete.
+The current endpoint is the local, deterministic reporting and monitoring
+surface documented above; future work starts with the remaining deferred
+capabilities rather than an implicit expansion of the boundary.
 
 - Phase 0 Foundation: [#1](https://github.com/yuru-sha/codexlens/issues/1)–[#4](https://github.com/yuru-sha/codexlens/issues/4)
 - Phase 1 Codex ingestion: [#5](https://github.com/yuru-sha/codexlens/issues/5)–[#10](https://github.com/yuru-sha/codexlens/issues/10)

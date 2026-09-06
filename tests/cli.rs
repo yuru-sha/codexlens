@@ -39,6 +39,16 @@ fn temp_store_path(label: &str) -> PathBuf {
     path
 }
 
+fn temp_rollout_path(label: &str) -> PathBuf {
+    let nonce = NEXT_TEMP_STORE.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "codexlens-cli-{label}-{}-{nonce}.jsonl",
+        std::process::id(),
+    ));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
 fn fixture_store() -> PathBuf {
     let path = temp_store_path("reporting");
     let mut store = Store::open(&path).unwrap();
@@ -372,6 +382,44 @@ fn reporting_commands_render_local_store_data() {
     assert!(corrections.contains("correction="));
 
     let _ = std::fs::remove_file(store);
+}
+
+#[test]
+fn monitor_command_updates_a_local_store_and_honors_max_polls() {
+    let source = temp_rollout_path("monitor");
+    let store = temp_store_path("monitor-store");
+    fs::write(
+        &source,
+        br#"{"type":"session_meta","payload":{"id":"cli-monitor-session"}}
+"#,
+    )
+    .unwrap();
+
+    let output = run_args(
+        &[
+            "monitor",
+            "--source",
+            source.to_str().unwrap(),
+            "--max-polls",
+            "1",
+        ],
+        &store,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Monitor Rollout: Updated"), "{stdout}");
+    let persisted = Store::open_read_only(&store)
+        .unwrap()
+        .load_canonical()
+        .unwrap();
+    assert_eq!(persisted.sessions[0].id, "cli-monitor-session");
+
+    let _ = fs::remove_file(source);
+    let _ = fs::remove_file(store);
 }
 
 #[test]

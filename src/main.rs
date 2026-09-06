@@ -75,6 +75,24 @@ enum Command {
         #[arg(long)]
         diff: bool,
     },
+    Monitor {
+        #[command(flatten)]
+        store: StoreOptions,
+        #[arg(long, value_name = "PATH")]
+        source: PathBuf,
+        #[arg(long, value_enum, default_value_t = MonitorKind::Rollout)]
+        kind: MonitorKind,
+        #[arg(long, value_name = "COUNT")]
+        max_polls: Option<usize>,
+        #[arg(long, default_value_t = 500, value_name = "MILLISECONDS")]
+        interval_ms: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum MonitorKind {
+    Rollout,
+    State,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -187,7 +205,54 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Monitor {
+            store,
+            source,
+            kind,
+            max_polls,
+            interval_ms,
+        } => run_monitor(&store, &source, kind, max_polls, interval_ms),
     }
+}
+
+fn run_monitor(
+    store_options: &StoreOptions,
+    source: &Path,
+    kind: MonitorKind,
+    max_polls: Option<usize>,
+    interval_ms: u64,
+) -> Result<()> {
+    let options = codexlens::monitor::MonitorOptions {
+        poll_interval: std::time::Duration::from_millis(interval_ms),
+        ..codexlens::monitor::MonitorOptions::default()
+    };
+    let mut monitor = match kind {
+        MonitorKind::Rollout => codexlens::monitor::LocalMonitor::rollout(source, None, options)?,
+        MonitorKind::State => codexlens::monitor::LocalMonitor::state(source, None, options)?,
+    };
+    let mut store = Store::open(&store_options.store).with_context(|| {
+        format!(
+            "failed to open derived store {}; monitoring requires a writable local store",
+            store_options.store.display()
+        )
+    })?;
+    let mut clock = codexlens::monitor::SystemMonitorClock;
+    let mut polls = 0usize;
+    monitor.run(&mut store, &mut clock, |poll| {
+        polls = polls.saturating_add(1);
+        println!(
+            "Monitor {:?}: {:?} ({} records, {} skipped duplicates, offset {})",
+            kind, poll.status, poll.records, poll.skipped_duplicates, poll.cursor.offset,
+        );
+        for diagnostic in &poll.diagnostics {
+            eprintln!(
+                "Monitor diagnostic {:?}: {}",
+                diagnostic.kind, diagnostic.message
+            );
+        }
+        max_polls.is_some_and(|limit| polls >= limit)
+    })?;
+    Ok(())
 }
 
 fn load_analysis(options: &StoreOptions) -> Result<(CanonicalData, Vec<Finding>, StoreFreshness)> {
@@ -311,8 +376,23 @@ mod tests {
             "verification",
             "knowledge",
             "instructions",
+            "monitor",
         ] {
-            Cli::try_parse_from(["codexlens", command, "--store", "fixture.sqlite"]).unwrap();
+            let args = if command == "monitor" {
+                vec![
+                    "codexlens",
+                    command,
+                    "--source",
+                    "fixture.jsonl",
+                    "--store",
+                    "fixture.sqlite",
+                    "--max-polls",
+                    "1",
+                ]
+            } else {
+                vec!["codexlens", command, "--store", "fixture.sqlite"]
+            };
+            Cli::try_parse_from(args).unwrap();
         }
     }
 }
