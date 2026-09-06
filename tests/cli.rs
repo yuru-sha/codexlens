@@ -39,6 +39,10 @@ fn temp_store_path(label: &str) -> PathBuf {
     path
 }
 
+fn write_compressed(path: &Path, payload: &[u8]) {
+    fs::write(path, zstd::stream::encode_all(payload, 0).unwrap()).unwrap();
+}
+
 fn fixture_store() -> PathBuf {
     let path = temp_store_path("reporting");
     let mut store = Store::open(&path).unwrap();
@@ -650,7 +654,7 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
         "does not modify the supplied store or target files",
         "temporary migrated copy",
         "`optimize --apply`",
-        "compressed rollout readers",
+        "zstd-compressed rollout",
         "`--frozen`",
     ] {
         assert!(
@@ -749,37 +753,172 @@ fn post_mvp_contract_spec_tracks_each_deferred_boundary() {
 }
 
 #[test]
-fn compressed_rollout_input_is_explicitly_unsupported_and_read_only() {
-    let source = temp_store_path("compressed-rollout").with_extension("jsonl.zst");
-    let payload = b"synthetic secret=do-not-print\n";
-    fs::write(&source, payload).unwrap();
-    let before = fs::read(&source).unwrap();
-    let identity = fs::canonicalize(&source).unwrap();
+fn compressed_rollout_input_is_ingested_incrementally_and_read_only() {
+    let source_a = temp_store_path("compressed-a").with_extension("jsonl.zst");
+    let source_b = temp_store_path("compressed-b").with_extension("jsonl.zst");
+    let source_a_v1 = br#"{"type":"session_meta","payload":{"id":"fixture-compressed-a-v1"}}"#;
+    let source_a_v2 = br#"{"type":"session_meta","payload":{"id":"fixture-compressed-a-v2"}}"#;
+    let source_b_payload = br#"{"type":"session_meta","payload":{"id":"fixture-compressed-b"}}"#;
+    write_compressed(&source_a, source_a_v1);
+    write_compressed(&source_b, source_b_payload);
+    let source_b_before = fs::read(&source_b).unwrap();
 
+    let input = |path: &Path| DiscoveredInput {
+        path: path.to_path_buf(),
+        identity: fs::canonicalize(path).unwrap(),
+        kind: InputKind::Rollout { archived: false },
+        reader: Some(ReaderKind::ZstdJsonl),
+    };
+    let inputs = vec![input(&source_a), input(&source_b)];
+    let mut store = Store::in_memory().unwrap();
+
+    let first = store
+        .ingest_inputs(&inputs, &IngestOptions::default())
+        .unwrap();
+    assert!(first.files.iter().all(|file| !file.skipped));
+    assert_eq!(
+        first.files.iter().map(|file| file.records).sum::<usize>(),
+        2
+    );
+    assert_eq!(fs::read(&source_b).unwrap(), source_b_before);
+
+    let second = store
+        .ingest_inputs(&inputs, &IngestOptions::default())
+        .unwrap();
+    assert!(second.files.iter().all(|file| file.skipped));
+    assert_eq!(fs::read(&source_b).unwrap(), source_b_before);
+
+    write_compressed(&source_a, source_a_v2);
+    let source_a_after_change = fs::read(&source_a).unwrap();
+    let changed = store
+        .ingest_inputs(&inputs, &IngestOptions::default())
+        .unwrap();
+    assert!(
+        !changed
+            .files
+            .iter()
+            .find(|file| file.source == source_a)
+            .unwrap()
+            .skipped
+    );
+    assert!(
+        changed
+            .files
+            .iter()
+            .find(|file| file.source == source_b)
+            .unwrap()
+            .skipped
+    );
+
+    let data = store.load_canonical().unwrap();
+    assert_eq!(data.sessions.len(), 2);
+    assert!(
+        data.sessions
+            .iter()
+            .any(|session| session.id == "fixture-compressed-a-v2")
+    );
+    assert!(
+        data.sessions
+            .iter()
+            .any(|session| session.id == "fixture-compressed-b")
+    );
+    assert!(
+        !data
+            .sessions
+            .iter()
+            .any(|session| session.id == "fixture-compressed-a-v1")
+    );
+    assert_eq!(fs::read(&source_a).unwrap(), source_a_after_change);
+    assert_eq!(fs::read(&source_b).unwrap(), source_b_before);
+
+    let _ = fs::remove_file(source_a);
+    let _ = fs::remove_file(source_b);
+}
+
+#[test]
+fn ingest_inputs_uses_reader_kind_for_dispatch() {
+    let plain_source = temp_store_path("reader-kind-plain").with_extension("jsonl.zst");
+    let compressed_source = temp_store_path("reader-kind-compressed").with_extension("jsonl");
+    let plain_payload = br#"{"type":"session_meta","payload":{"id":"fixture-reader-kind-plain"}}"#;
+    let compressed_payload =
+        br#"{"type":"session_meta","payload":{"id":"fixture-reader-kind-compressed"}}"#;
+    fs::write(&plain_source, plain_payload).unwrap();
+    write_compressed(&compressed_source, compressed_payload);
+
+    let input = |path: &Path, reader| DiscoveredInput {
+        path: path.to_path_buf(),
+        identity: fs::canonicalize(path).unwrap(),
+        kind: InputKind::Rollout { archived: false },
+        reader: Some(reader),
+    };
+    let inputs = vec![
+        input(&plain_source, ReaderKind::PlainJsonl),
+        input(&compressed_source, ReaderKind::ZstdJsonl),
+    ];
     let mut store = Store::in_memory().unwrap();
     let report = store
-        .ingest_inputs(
-            &[DiscoveredInput {
-                path: source.clone(),
-                identity,
-                kind: InputKind::Rollout { archived: false },
-                reader: Some(ReaderKind::ZstdJsonl),
-            }],
-            &IngestOptions::default(),
-        )
+        .ingest_inputs(&inputs, &IngestOptions::default())
         .unwrap();
 
-    assert_eq!(report.files.len(), 1);
-    assert_eq!(report.files[0].diagnostics, 1);
-    assert_eq!(report.files[0].records, 0);
+    assert!(report.files.iter().all(|file| file.diagnostics == 0));
+    assert_eq!(
+        report.files.iter().map(|file| file.sessions).sum::<usize>(),
+        2
+    );
     let data = store.load_canonical().unwrap();
-    assert_eq!(data.records.len(), 0);
-    assert_eq!(data.diagnostics.len(), 1);
-    assert_eq!(data.diagnostics[0].kind, DiagnosticKind::UnsupportedReader);
-    assert!(!data.diagnostics[0].message.contains("do-not-print"));
-    assert_eq!(fs::read(&source).unwrap(), before);
+    assert_eq!(data.sessions.len(), 2);
 
-    let _ = fs::remove_file(source);
+    let _ = fs::remove_file(plain_source);
+    let _ = fs::remove_file(compressed_source);
+}
+
+#[test]
+fn corrupt_compressed_rollout_does_not_block_valid_sibling() {
+    let corrupt = temp_store_path("corrupt-compressed").with_extension("jsonl.zst");
+    let valid = temp_store_path("valid-compressed").with_extension("jsonl.zst");
+    let corrupt_payload = b"synthetic secret=do-not-print\n";
+    fs::write(&corrupt, corrupt_payload).unwrap();
+    let corrupt_before = fs::read(&corrupt).unwrap();
+    write_compressed(
+        &valid,
+        br#"{"type":"session_meta","payload":{"id":"fixture-valid-compressed"}}"#,
+    );
+    let valid_before = fs::read(&valid).unwrap();
+
+    let input = |path: &Path| DiscoveredInput {
+        path: path.to_path_buf(),
+        identity: fs::canonicalize(path).unwrap(),
+        kind: InputKind::Rollout { archived: false },
+        reader: Some(ReaderKind::ZstdJsonl),
+    };
+    let mut store = Store::in_memory().unwrap();
+    let report = store
+        .ingest_inputs(&[input(&corrupt), input(&valid)], &IngestOptions::default())
+        .unwrap();
+
+    let corrupt_summary = report
+        .files
+        .iter()
+        .find(|file| file.source == corrupt)
+        .unwrap();
+    assert_eq!(corrupt_summary.records, 0);
+    assert_eq!(corrupt_summary.diagnostics, 1);
+    let valid_summary = report
+        .files
+        .iter()
+        .find(|file| file.source == valid)
+        .unwrap();
+    assert_eq!(valid_summary.sessions, 1);
+    let data = store.load_canonical().unwrap();
+    assert_eq!(data.sessions.len(), 1);
+    assert_eq!(data.diagnostics.len(), 1);
+    assert_eq!(data.diagnostics[0].kind, DiagnosticKind::Unreadable);
+    assert!(!data.diagnostics[0].message.contains("do-not-print"));
+    assert_eq!(fs::read(&corrupt).unwrap(), corrupt_before);
+    assert_eq!(fs::read(&valid).unwrap(), valid_before);
+
+    let _ = fs::remove_file(corrupt);
+    let _ = fs::remove_file(valid);
 }
 
 #[test]

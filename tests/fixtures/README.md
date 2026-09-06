@@ -31,5 +31,5 @@ so instruction content is not stored in repository fixtures.
 
 `discovery/` contains path-only fixtures for input discovery tests. Tests copy
 it into temporary directories before removing inputs or adding symlinks. The
-`.jsonl.zst` file only verifies reader selection in this phase and is not
-decompressed here.
+compressed reader tests generate bounded synthetic zstd bytes in memory or in
+temporary files rather than committing a binary fixture.

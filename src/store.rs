@@ -22,7 +22,9 @@ use crate::model::{
     ToolOutcome, ToolResult, Turn, TurnLifecycleEvent,
 };
 use crate::normalize::{normalize_rollout, normalize_rollout_with_instructions};
-use crate::rollout::{ParseDiagnosticKind, RolloutParseOptions, parse_rollout};
+use crate::rollout::{
+    ParseDiagnosticKind, RolloutParseOptions, parse_rollout, parse_rollout_with_reader,
+};
 use crate::state::{
     StateDiagnostic, StateDiagnosticKind, StateReadResult, merge_state_results, read_state_database,
 };
@@ -124,6 +126,12 @@ struct IngestBatchOptions<'a> {
     preserve_instruction_snapshots: bool,
 }
 
+struct RolloutIngestContext<'a> {
+    state_sessions: &'a [Session],
+    force_refresh: bool,
+    resolver: &'a InstructionResolver,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestReport {
     pub files: Vec<IngestSummary>,
@@ -219,7 +227,12 @@ impl Store {
         resolver: &InstructionResolver,
     ) -> Result<IngestSummary> {
         let identity = canonical_identity(path).unwrap_or_else(|_| path.to_path_buf());
-        self.ingest_rollout_at(path, &identity, options, &[], false, resolver)
+        let context = RolloutIngestContext {
+            state_sessions: &[],
+            force_refresh: false,
+            resolver,
+        };
+        self.ingest_rollout_at(path, &identity, None, options, &context)
     }
 
     pub fn ingest_state_database(&mut self, path: &Path) -> Result<IngestSummary> {
@@ -291,11 +304,14 @@ impl Store {
         let mut state_reads = Vec::new();
         let mut state_changed = false;
         let mut state_refresh_blocked = false;
-        let has_plain_rollout = inputs.iter().any(|input| {
+        let has_rollout = inputs.iter().any(|input| {
             matches!(input.kind, InputKind::Rollout { .. })
-                && matches!(input.reader, Some(ReaderKind::PlainJsonl))
+                && matches!(
+                    input.reader,
+                    Some(ReaderKind::PlainJsonl | ReaderKind::ZstdJsonl)
+                )
         });
-        let state_storage_mode = if has_plain_rollout {
+        let state_storage_mode = if has_rollout {
             STATE_STORAGE_ENRICHMENT
         } else {
             STATE_STORAGE_STANDALONE
@@ -352,7 +368,7 @@ impl Store {
                     &identity,
                     &fingerprint,
                     read,
-                    !has_plain_rollout,
+                    !has_rollout,
                     resolver,
                 )?);
             }
@@ -375,25 +391,25 @@ impl Store {
             }
         }
 
+        let context = RolloutIngestContext {
+            state_sessions: &state_sessions,
+            force_refresh: state_changed && !state_refresh_blocked,
+            resolver,
+        };
         for input in inputs {
             let InputKind::Rollout { .. } = input.kind else {
                 continue;
             };
             match input.reader {
-                Some(ReaderKind::PlainJsonl) => report.files.push(self.ingest_rollout_at(
-                    &input.path,
-                    &input.identity,
-                    &options.rollout,
-                    &state_sessions,
-                    state_changed && !state_refresh_blocked,
-                    resolver,
-                )?),
-                Some(ReaderKind::ZstdJsonl) => report.files.push(self.ingest_unsupported(
-                    &input.path,
-                    &input.identity,
-                    IngestInputKind::Rollout,
-                    "compressed rollout input is not supported by the current reader",
-                )?),
+                Some(ReaderKind::PlainJsonl | ReaderKind::ZstdJsonl) => {
+                    report.files.push(self.ingest_rollout_at(
+                        &input.path,
+                        &input.identity,
+                        input.reader,
+                        &options.rollout,
+                        &context,
+                    )?)
+                }
                 None => report.files.push(self.ingest_unsupported(
                     &input.path,
                     &input.identity,
@@ -430,10 +446,9 @@ impl Store {
         &mut self,
         path: &Path,
         identity: &Path,
+        reader: Option<ReaderKind>,
         options: &RolloutParseOptions,
-        state_sessions: &[Session],
-        force_refresh: bool,
-        resolver: &InstructionResolver,
+        context: &RolloutIngestContext<'_>,
     ) -> Result<IngestSummary> {
         let fingerprint = match fingerprint(path) {
             Ok(fingerprint) => fingerprint,
@@ -445,10 +460,13 @@ impl Store {
         };
         let unchanged =
             self.is_unchanged(identity, &fingerprint, IngestInputKind::Rollout, None)?;
-        if !force_refresh && unchanged {
+        if !context.force_refresh && unchanged {
             return Ok(skipped_summary(path.to_path_buf()));
         }
-        let parsed = parse_rollout(path, options);
+        let parsed = reader.map_or_else(
+            || parse_rollout(path, options),
+            |reader| parse_rollout_with_reader(path, reader, options),
+        );
         if parsed
             .diagnostics
             .iter()
@@ -458,7 +476,8 @@ impl Store {
             self.persist_diagnostics(identity, &data.diagnostics)?;
             return Ok(summary_from_data(path.to_path_buf(), &data, false));
         }
-        let data = normalize_rollout_with_instructions(&parsed, state_sessions, resolver);
+        let data =
+            normalize_rollout_with_instructions(&parsed, context.state_sessions, context.resolver);
         self.ingest_batch(
             path,
             identity,
@@ -467,7 +486,7 @@ impl Store {
             &data,
             IngestBatchOptions {
                 storage_mode: None,
-                preserve_instruction_snapshots: force_refresh && unchanged,
+                preserve_instruction_snapshots: context.force_refresh && unchanged,
             },
         )
     }

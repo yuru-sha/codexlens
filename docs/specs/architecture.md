@@ -93,7 +93,7 @@ mode is deferred until a refresh workflow exists.
 The adapter owns:
 
 - `CODEX_HOME` and file discovery;
-- plain JSONL reading; compressed rollout readers are deferred;
+- plain and compressed JSONL reading;
 - `state_*.sqlite` thread metadata;
 - rollout envelope and event-shape decoding;
 - `AGENTS.md`/override discovery;
@@ -270,14 +270,14 @@ implementation available in the
 4. Lenses: deterministic findings over stored evidence.
 5. Advisor: `doctor`, proposal generation, and `optimize --diff`.
 
-Phases 0 through 4, including the reporting command integration, are complete
-for the MVP. Compressed readers, `--frozen`, machine-readable output, live
-monitoring, and `optimize --apply` remain deliberately deferred.
+Phases 0 through 5, including the reporting command integration and compressed
+rollout reader, are complete for the MVP. `--frozen`, machine-readable output,
+live monitoring, and `optimize --apply` remain deliberately deferred.
 
 Every phase must leave the repository buildable and its behavior covered by
 focused deterministic tests.
 
 The deferred input and reporting boundaries are specified in
 [`post-mvp.md`](post-mvp.md). That contract must be selected and accepted by
-a feature issue before compressed input, refresh, machine output, monitoring,
-or proposal application changes this architecture.
+a feature issue before refresh, machine output, monitoring, or proposal
+application changes this architecture.

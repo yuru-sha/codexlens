@@ -1,15 +1,16 @@
 # Post-MVP input and reporting contracts
 
-Status: entry contract for future feature issues. The capabilities in this
-document are not implemented by the MVP.
+Status: entry contract for post-MVP feature issues. The compressed rollout
+reader in section 1 is implemented by issue #57; the remaining sections are
+not implemented by the MVP.
 
 Issue #53 tracks the capabilities that cross the MVP input, runtime, output,
 or write boundary. A feature issue must select one capability, implement its
 compatibility and privacy tests, and pass the relevant safety checks before it
 changes the current command surface.
-This contract-only document does not close the issue: the positive tests below
-remain acceptance criteria for the feature issues that implement each
-capability.
+The positive tests below are the acceptance criteria for the compressed-reader
+implementation and for the future feature issues that implement the remaining
+capabilities.
 
 ## Shared boundary
 
@@ -36,12 +37,13 @@ upstream input -> adapter -> canonical records -> derived store -> lens/report
 
 ## Current MVP regression coverage
 
-The executable guards for the still-deferred boundary are intentionally
-negative or read-only until a capability issue is explicitly agreed:
+The executable guards for the implemented and still-deferred boundaries are
+kept explicit:
 
-- `compressed_rollout_input_is_explicitly_unsupported_and_read_only` checks
-  the current unsupported-reader diagnostic, bounded privacy behavior, and
-  unchanged compressed source.
+- `compressed_rollout_input_is_ingested_incrementally_and_read_only` and
+  `corrupt_compressed_rollout_does_not_block_valid_sibling` cover compressed
+  reader parity, bounded corruption handling, incremental replacement, and
+  unchanged sources.
 - `refresh_and_frozen_reporting_are_not_currently_exposed`,
   `machine_readable_output_is_not_currently_exposed`,
   `live_monitoring_is_not_currently_exposed`, and
@@ -55,10 +57,9 @@ negative or read-only until a capability issue is explicitly agreed:
   current deterministic human-readable, bounded-evidence, and read-only
   reporting behavior.
 
-The positive compatibility/privacy cases listed in each section are required
-executable tests in the feature issue that introduces that capability. This
-contract-only change does not pretend that an unimplemented capability has
-runtime behavior to test.
+The positive compatibility/privacy cases listed in each not-yet-implemented
+section are required executable tests in the feature issue that introduces
+that capability.
 
 ## 1. Compressed rollout readers
 
