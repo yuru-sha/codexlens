@@ -286,13 +286,7 @@ fn minimal_store() -> PathBuf {
 }
 
 fn run_args(args: &[&str], store: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_codexlens"))
-        .args(args)
-        .arg("--store")
-        .arg(store)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap()
+    run_args_with_flags(args, &[], store)
 }
 
 fn run_args_with_flags(args: &[&str], flags: &[&str], store: &Path) -> Output {
@@ -308,6 +302,18 @@ fn run_args_with_flags(args: &[&str], flags: &[&str], store: &Path) -> Output {
 
 fn assert_file_unchanged(path: &Path, before: &[u8], label: &str) {
     assert_eq!(fs::read(path).unwrap(), before, "{label} changed");
+}
+
+fn assert_output_omits(output: &Output, marker: &[u8], label: &str) {
+    for (stream, bytes) in [
+        ("stdout", output.stdout.as_slice()),
+        ("stderr", output.stderr.as_slice()),
+    ] {
+        assert!(
+            !bytes.windows(marker.len()).any(|window| window == marker),
+            "{label} leaked the raw marker to {stream}"
+        );
+    }
 }
 
 fn refresh_home() -> (PathBuf, PathBuf) {
@@ -1629,20 +1635,7 @@ fn reporting_command_surface_stays_read_only_and_private() {
                 "{label}: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert!(
-                !output
-                    .stdout
-                    .windows(secret_marker.len())
-                    .any(|window| window == secret_marker),
-                "{label} leaked the raw marker to stdout"
-            );
-            assert!(
-                !output
-                    .stderr
-                    .windows(secret_marker.len())
-                    .any(|window| window == secret_marker),
-                "{label} leaked the raw marker to stderr"
-            );
+            assert_output_omits(&output, secret_marker, &label);
             assert_file_unchanged(&store, &store_before, &format!("{label} store"));
             assert_file_unchanged(&source, &source_before, &format!("{label} source"));
         }
