@@ -523,7 +523,7 @@ fn canonical_existing(path: &Path, expected: ExistingKind) -> Result<PathBuf, Ap
     let mut current = PathBuf::new();
     for (index, component) in components.iter().enumerate() {
         current.push(component.as_os_str());
-        if current.as_os_str().is_empty() {
+        if matches!(component, Component::Prefix(_)) || current.as_os_str().is_empty() {
             continue;
         }
         let metadata = fs::symlink_metadata(&current).map_err(|error| {
