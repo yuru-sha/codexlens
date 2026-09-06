@@ -1,16 +1,18 @@
 # Post-MVP input and reporting contracts
 
-Status: entry contract for future feature issues. The compressed rollout reader
-in section 1, refresh/frozen reporting in section 2, machine-readable output in
-section 3, live monitoring in section 4, and safe apply in section 5 are
-implemented by issues #57, #58, #59, #60, and #61.
+Status: compatibility and privacy contract for the implemented Phase 5
+boundaries, plus an entry contract for future feature issues. The compressed
+rollout reader in section 1, refresh/frozen reporting in section 2,
+machine-readable output in section 3, live monitoring in section 4, and safe
+apply in section 5 are implemented by issues #57, #58, #59, #60, and #61.
 
-Issue #53 tracks the capabilities that cross the MVP input, runtime, output,
-or write boundary. A feature issue must select one capability, implement its
-compatibility and privacy tests, and pass the relevant safety checks before it
-changes the current command surface.
-The positive tests below are the acceptance criteria for the implemented
-capabilities and for future feature issues that extend the current boundaries.
+Issue #53 originally tracked the capabilities that crossed the MVP input,
+runtime, output, or write boundary. Issues #57 through #61 implement sections
+1 through 5. Future feature issues must state which current boundary they
+extend, add the relevant compatibility and privacy tests, and pass the
+relevant safety checks before changing the command surface.
+The positive tests below guard the implemented capabilities and future
+extensions of their boundaries.
 
 ## Shared boundary
 
@@ -37,8 +39,8 @@ upstream input -> adapter -> canonical records -> derived store -> lens/report
 
 ## Current regression coverage
 
-The executable guards for the implemented and still-deferred boundaries are
-kept explicit:
+The executable guards for the implemented boundaries and their future
+extensions are kept explicit:
 
 - `compressed_rollout_input_is_ingested_incrementally_and_read_only` and
   `corrupt_compressed_rollout_does_not_block_valid_sibling` cover compressed
@@ -64,19 +66,21 @@ kept explicit:
   current deterministic human-readable, bounded-evidence, and read-only
   reporting behavior.
 
-The positive compatibility/privacy cases listed in each section are required
-executable tests in the feature issue that introduces or extends that
-capability. Sections 1 through 5 are implemented.
+The positive compatibility/privacy cases listed in each section are covered by
+executable tests for the implemented capabilities. Future extensions must add
+the corresponding tests. Sections 1 through 5 are implemented.
 
 ## 1. Compressed rollout readers
 
+Implementation status: implemented by Issue #57.
+
 ### Scope
 
-Add a compressed rollout reader in the adapter only. A `.jsonl.zst` source
-must yield the same logical `(line number, bytes)` stream as its equivalent
-plain `.jsonl` source, then reuse the existing JSONL parser, normalizer, and
-store transaction. Compression details must not appear in canonical records,
-lenses, or reports.
+The adapter's compressed rollout reader yields the same logical `(line number,
+bytes)` stream for a `.jsonl.zst` source as for its equivalent plain `.jsonl`
+source, then reuses the existing JSONL parser, normalizer, and store
+transaction. Compression details do not appear in canonical records, lenses,
+or reports.
 
 The canonical source identity remains the canonical source path. The
 compressed source bytes provide the compressed-byte fingerprint used for change
@@ -109,13 +113,15 @@ unbounded line.
 
 ## 2. Refresh and frozen reporting
 
+Implementation status: implemented by Issue #58.
+
 ### Scope
 
-Introduce an explicit refresh workflow for building or updating the derived
-store from discovered inputs. Refresh reads raw rollout/state and instruction
-sources, applies the existing identity and incremental-ingest rules, and
-commits all replacements atomically. A failed source read or transaction
-leaves the previous successful derived state available.
+The explicit refresh workflow builds or updates the derived store from
+discovered inputs. Refresh reads raw rollout/state and instruction sources,
+applies the existing identity and incremental-ingest rules, and commits all
+replacements atomically. A failed source read or transaction leaves the
+previous successful derived state available.
 
 Reporting remains a separate operation over the derived store. The explicit
 `--frozen` reporting mode means "use exactly this store": it must not discover
@@ -123,16 +129,12 @@ or reopen raw inputs, refresh the store, or silently claim that the store is
 current. Missing or invalid stores remain bounded errors; recorded freshness
 is shown in the report.
 
-The refresh command and `--frozen` option must be explicit in the feature
-issue that implements them. This document defines their boundary, not an
-additional implicit refresh on an existing reporting command.
-
 Issue #58 implements `refresh` with `--store`, `--codex-home`/`--home`,
 `--include-archived`, and `--config` input options. All supported reporting
 commands accept `--frozen`; both frozen and default reporting read only the
 selected derived store, and recorded freshness is reported without claiming
-that the store is current. The explicit refresh path is the only reporting
-workflow that discovers or ingests raw inputs.
+that the store is current. The explicit refresh path is the only workflow that
+discovers or ingests raw inputs; reporting does not refresh implicitly.
 
 ### Compatibility tests
 
@@ -160,6 +162,8 @@ workflow that discovers or ingests raw inputs.
   migration, and rollback errors.
 
 ## 3. Machine-readable output
+
+Implementation status: implemented by Issue #59.
 
 This section is implemented for the supported reporting commands by issue
 #59. The default human-readable output remains unchanged.
@@ -379,18 +383,20 @@ are never emitted by default.
 
 ## 4. Live monitoring
 
+Implementation status: implemented by Issue #60.
+
 ### Scope
 
-Add live monitoring only as an explicit local runtime boundary. It may observe
-append-only rollout/state changes and produce incremental findings, but it must
-reuse the adapter and canonical model; it must not create a second parser or
-leak upstream event names into lenses.
+Live monitoring is an explicit local runtime boundary. It observes append-only
+rollout/state changes and produces incremental findings while reusing the
+adapter and canonical model; it does not create a second parser or leak
+upstream event names into lenses.
 
-The contract must define the input lifecycle before implementation: source
-identity and offsets, incomplete final lines, rotation/truncation, duplicate
-events, stop behavior, restart behavior, and the distinction between partial
-observations and a completed session. A monitor may not silently turn a
-partial observation into a final finding.
+The implementation defines the input lifecycle: source identity and offsets,
+incomplete final lines, rotation/truncation, duplicate events, stop behavior,
+restart behavior, and the distinction between partial observations and a
+completed session. A monitor may not silently turn a partial observation into a
+final finding.
 
 Monitoring is read-only with respect to sources, local-only, and bounded. It
 must not require a hosted service, background daemon, or unbounded in-memory
@@ -546,10 +552,11 @@ outcome.
 
 ## Entry gate for implementation issues
 
-Before a feature issue implements one section, it must name that section and
-record that the relevant acceptance criteria and boundary are explicitly
-agreed in the issue or PR before implementation starts, then add the listed
-compatibility and privacy tests with synthetic data. It must
+Before a future feature issue extends one section or changes a boundary, it
+must name that section and record that the relevant acceptance criteria and
+boundary are explicitly agreed in the issue or PR before implementation
+starts, then add the listed compatibility and privacy tests with synthetic data.
+It must
 also update the relevant adapter, canonical, store, lens, or report
 specification, preserve the source read-only boundary, run the pinned CI
 commands, and record any newly deferred behavior in this document or a linked
