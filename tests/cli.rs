@@ -1680,9 +1680,19 @@ fn refresh_protects_turn_context_instruction_sources() {
     fs::write(
         &source,
         format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"synthetic-turn-context\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"synthetic-turn\",\"cwd\":\"{}\",\"project_root\":\"{}\"}}}}\n",
-            project.display(),
-            project.display()
+            "{}\n{}\n",
+            json!({
+                "type": "session_meta",
+                "payload": {"id": "synthetic-turn-context"},
+            }),
+            json!({
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "synthetic-turn",
+                    "cwd": project.to_string_lossy(),
+                    "project_root": project.to_string_lossy(),
+                },
+            }),
         ),
     )
     .unwrap();

@@ -18,8 +18,12 @@ cargo test --all-features
 cargo test --all-features --test cli
 ```
 
-The CI workflow runs the same gates with Rust 1.85.0 and 1.92.0. Every change
-must pass the same matrix before it is merged.
+The Ubuntu CI workflow runs the same gates with Rust 1.85.0 and 1.92.0. The
+macOS and Windows hosted-runner jobs run `cargo build --all-features` and
+`cargo test --all-features` with Rust 1.85.0. These jobs use only synthetic
+repository fixtures and do not require a real Codex home. Windows hosted-runner
+build/test coverage is the verification boundary; no Windows runtime,
+packaging, or installer support is claimed.
 
 CLI integration coverage exercises every supported reporting command with
 synthetic stores, including empty and minimal stores, aliases, deterministic
