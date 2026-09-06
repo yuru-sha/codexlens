@@ -1,11 +1,11 @@
 # MVP readiness review
 
-Status: ready to enter the next feature phase.
+Status: Phase 5 complete; ready for Phase 6 release preparation.
 
-Review scope: the refactor, local reporting work, and safe proposal-apply
-workflow through the current MVP endpoint. The review checks the architecture,
-session-format, analysis, and post-MVP write contract against the implementation,
-then verifies the supported CLI surface and its boundaries.
+Review scope: the refactor, Phase 5 input/reporting work, and safe
+proposal-apply workflow through the current MVP endpoint. The review checks the
+architecture, session-format, analysis, and post-MVP write contract against the
+implementation, then verifies the supported CLI surface and its boundaries.
 
 ## Verification
 
@@ -18,21 +18,22 @@ cargo test --all-features
 cargo test --all-features --test cli
 ```
 
-The CI workflow runs the same gates with Rust 1.85.0 and 1.92.0. The base
-branch was green at review time (`main` at `2781536`); the current head must
-pass the same matrix before this change is merged.
+The CI workflow runs the same gates with Rust 1.85.0 and 1.92.0. Every change
+must pass the same matrix before it is merged.
 
 CLI integration coverage exercises every supported reporting command with
 synthetic stores, including empty and minimal stores, aliases, deterministic
 repeated runs, bounded errors, legacy-store migration, read-only `--diff`, and
-confirmed safe apply behavior.
+confirmed safe apply behavior. The Phase 5 coverage also exercises compressed
+rollout input, explicit refresh and frozen reporting, versioned JSON output, and
+bounded local monitoring.
 
 ## Review result
 
-- The CLI's user-facing surface is limited to canonical-data lenses,
-  derived-store reports, review-only proposal diffs, and the explicitly
-  confirmed validated apply workflow; ingestion and store APIs remain library
-  boundaries rather than CLI reporting behavior.
+- The CLI's user-facing surface includes explicit refresh, bounded local
+  monitoring, canonical-data lenses, derived-store reports, review-only
+  proposal diffs, and the explicitly confirmed validated apply workflow.
+  Reporting never refreshes implicitly, and raw input sources remain read-only.
 - Finding and report ordering is deterministic; evidence retains source paths
   and line numbers where available, and reports bound/redact human-facing
   excerpts.
@@ -45,10 +46,10 @@ confirmed safe apply behavior.
   closed the clarification. Any future persisted lens output needs its own
   explicit schema issue.
 
-## Deferred work
+## Implemented Phase 5 boundaries
 
-The capabilities and their rationale were originally tracked in
-[#53](https://github.com/yuru-sha/codexlens/issues/53). Issues
+Phase 5 is complete. The capabilities and their rationale were originally
+tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53). Issues
 [#57](https://github.com/yuru-sha/codexlens/issues/57),
 [#58](https://github.com/yuru-sha/codexlens/issues/58),
 [#59](https://github.com/yuru-sha/codexlens/issues/59),
@@ -63,11 +64,11 @@ The store-schema wording for `corrections` and `findings` was clarified and
 closed in [#54](https://github.com/yuru-sha/codexlens/issues/54); the current
 CLI derives those results in memory from canonical data.
 
-## Next-phase entry condition
+## Phase 6 entry condition
 
-The next feature phase may start only when its issue:
+Phase 6 release-preparation work may proceed only when its issue:
 
-1. selects a capability from #53, states its compatibility, privacy, and
+1. states the affected CLI boundary, compatibility, privacy, and
    read-only/write requirements, and records explicit agreement on those
    acceptance criteria before implementation starts;
 2. updates the relevant specification and adds synthetic regression coverage;

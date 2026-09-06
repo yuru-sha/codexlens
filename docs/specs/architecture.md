@@ -288,7 +288,9 @@ implementation available in the
    incremental storage.
 3. Instructions: resolver, config settings, and effective snapshots.
 4. Lenses: deterministic findings over stored evidence.
-5. Advisor: `doctor`, proposal generation, `optimize --diff`, and safe
+5. Advisor: `doctor`, proposal generation, and `optimize --diff`.
+6. Phase 5 boundaries: compressed rollout readers, refresh/`--frozen`
+   reporting, versioned JSON output, local monitoring, and safe
    `optimize --apply`.
 
 Phases 0 through 5, including the reporting command integration, compressed
@@ -300,6 +302,6 @@ contract](post-mvp.md#4-live-monitoring).
 Every phase must leave the repository buildable and its behavior covered by
 focused deterministic tests.
 
-The remaining deferred input and reporting boundaries are specified in
-[`post-mvp.md`](post-mvp.md). Each boundary must be selected and accepted by a
-feature issue before it changes this architecture.
+Future extensions to the input and reporting boundaries are specified in
+[`post-mvp.md`](post-mvp.md). Each extension must be selected and accepted by
+a feature issue before it changes this architecture.

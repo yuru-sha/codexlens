@@ -7,8 +7,8 @@ Analyze Codex sessions and turn recurring friction into actionable
 > advisor, the read-only reporting CLI, bounded local monitoring, compressed
 > rollout readers, explicit refresh/frozen reporting, versioned JSON output,
 > and safe `optimize --apply` are implemented. `refresh` is the explicit raw-input workflow;
-> reporting never refreshes implicitly, monitoring updates
-> only the derived store, and apply writes only its validated write set.
+> reporting never refreshes implicitly, monitoring updates the derived store
+> and an optional cursor file, and apply writes only its validated write set.
 
 ## Goal
 
@@ -71,7 +71,7 @@ order to render a diff.
 | `doctor` | derived store | ranked findings grouped by scope | reads the store only |
 | `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | does not modify the supplied store or target files; legacy stores use a temporary migrated copy |
 | `optimize --apply --yes` | derived store and validated instruction/documentation targets | applies reviewed proposals and reports retained backups/recovery | modifies only the validated write set; never modifies the supplied store or rollout/state inputs |
-| `monitor` | one local rollout JSONL or state SQLite source | bounded incremental ingestion and cursor/status output | reads the source only; writes only the derived store |
+| `monitor` | one local rollout JSONL or state SQLite source | bounded incremental ingestion and cursor/status output | does not modify the source; writes the derived store and optional cursor file |
 
 `doctor` accepts the optional `--limit COUNT` to cap findings per scope.
 `optimize` requires exactly one of `--diff` or `--apply`. `--diff` is advisory
@@ -100,10 +100,10 @@ $ cargo run -- refresh --codex-home "$CODEX_HOME" --store .codexlens.sqlite
 The adapter provides compressed rollout readers for plain and zstd-compressed rollout JSONL; reporting never reopens raw inputs. `monitor` is the explicit
 local monitoring exception: it polls one rollout or state source, reuses the
 existing adapter and canonical model, and appends or replaces only the derived
-store. Use `--kind rollout|state`; `--max-polls COUNT` makes a finite run, and
-omitting it keeps polling at `--interval-ms MILLISECONDS` until stopped. Pass
-`--cursor PATH` to save the bounded cursor at a clean stop and reuse it on the
-next invocation.
+store. When requested, it also writes the bounded cursor to `--cursor PATH` at
+a clean stop for reuse on the next invocation. Use `--kind rollout|state`;
+`--max-polls COUNT` makes a finite run, and omitting it keeps polling at
+`--interval-ms MILLISECONDS` until stopped.
 
 The final MVP readiness review, verification evidence, and next-phase entry
 condition are recorded in [docs/readiness/mvp.md](docs/readiness/mvp.md).
@@ -125,15 +125,14 @@ cargo run -- monitor --source tests/fixtures/rollout/monitoring.jsonl --kind rol
 cargo run -- doctor --format json --store .codexlens.sqlite
 ```
 
-The Phase 3 lenses, Phase 4 advisor, and Phase 5 safe apply workflow remain exposed from the
+The Phase 3 lenses, Phase 4 advisor, and Phase 5 safe-apply workflow remain exposed from the
 `codexlens::analysis` and `codexlens::advisor` modules. The lenses consume
 canonical data without reopening source files; the advisor reads only the
 recommended instruction files when rendering diffs. See [the architecture specification](docs/specs/architecture.md),
 [the session format contract](docs/specs/session-format.md), and
-[the analysis contract](docs/specs/analysis.md). The deferred next-phase
-contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
-
-## Deliberately deferred
+[the analysis contract](docs/specs/analysis.md). The compatibility contracts
+for the implemented Phase 5 boundaries and the entry gate for future
+extensions are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
 
 ## Status and roadmap
 
@@ -141,6 +140,9 @@ Phases 0 through 5 are complete. Phase 5 compressed rollout readers (#57),
 refresh/frozen reporting (#58), versioned JSON reporting (#59), bounded local
 live monitoring (#60), and safe optimize apply (#61) are implemented. Future
 changes must preserve the explicit boundaries documented above.
+
+Phase 6 is the release-preparation phase; its documentation synchronization
+starts with [#70](https://github.com/yuru-sha/codexlens/issues/70).
 
 - Phase 0 Foundation: [#1](https://github.com/yuru-sha/codexlens/issues/1)–[#4](https://github.com/yuru-sha/codexlens/issues/4)
 - Phase 1 Codex ingestion: [#5](https://github.com/yuru-sha/codexlens/issues/5)–[#10](https://github.com/yuru-sha/codexlens/issues/10)
