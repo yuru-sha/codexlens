@@ -510,10 +510,10 @@ fn canonical_existing(path: &Path, expected: ExistingKind) -> Result<PathBuf, Ap
             path_label(path)
         )));
     }
-    if path
-        .components()
-        .any(|component| component == Component::ParentDir)
-    {
+    if path.components().any(|component| {
+        component == Component::ParentDir
+            || matches!(component, Component::Normal(name) if name == "..")
+    }) {
         return Err(invalid_batch(format!(
             "raw parent traversal is not allowed: {}",
             path_label(path)
