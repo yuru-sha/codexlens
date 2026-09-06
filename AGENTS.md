@@ -29,8 +29,9 @@ project documentation.
 - Flow: adapter → canonical records → SQLite store → lenses → findings →
   `doctor`/`optimize`.
 - Unknown valid rollout records are retained with source provenance.
-- Source data is never edited. MVP `optimize` produces proposals; it does not
-  apply them automatically.
+- Raw rollout/state inputs and the derived store are never edited. `optimize
+  --diff` produces review-only proposals; explicit confirmed `optimize
+  --apply` may update only its validated instruction/documentation write set.
 - No network service or LLM is required by the MVP.
 
 ## Development

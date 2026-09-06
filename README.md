@@ -5,9 +5,10 @@ Analyze Codex sessions and turn recurring friction into actionable
 
 > MVP status: local ingestion, instruction capture, deterministic lenses, the
 > advisor, the read-only reporting CLI, bounded local monitoring, compressed
-> rollout readers, explicit refresh/frozen reporting, and versioned JSON output
-> are implemented. `refresh` is the explicit raw-input workflow; reporting
-> never refreshes implicitly, and monitoring updates only the derived store.
+> rollout readers, explicit refresh/frozen reporting, versioned JSON output,
+> and safe `optimize --apply` are implemented. `refresh` is the explicit raw-input workflow;
+> reporting never refreshes implicitly, monitoring updates
+> only the derived store, and apply writes only its validated write set.
 
 ## Goal
 
@@ -37,8 +38,8 @@ The MVP is designed to answer questions such as:
 - What small, scoped instruction change is supported by the evidence?
 
 The MVP is local-only, deterministic, and evidence-backed. It does not send
-session data to a service, require an LLM, modify source files, or claim
-billing accuracy.
+session data to a service, require an LLM, modify source files outside the
+validated instruction/documentation write set, or claim billing accuracy.
 
 ## CLI surface
 
@@ -47,7 +48,9 @@ over the derived SQLite store. Reporting commands accept `-s, --store PATH`,
 which defaults to `.codexlens.sqlite`, `--frozen` to state that the selected
 store must be used exactly as recorded, and `--format json` for the versioned
 machine-readable schema. Both normal and frozen reporting formats are
-read-only with respect to raw inputs and never refresh implicitly.
+read-only with respect to raw inputs and never refresh implicitly. The explicit
+`optimize --apply` path is the write exception and may update only its
+validated instruction/documentation write set.
 Legacy-store reporting may create a temporary migrated copy, which is removed
 afterward; `optimize --diff` also reads the recommended instruction files in
 order to render a diff.
@@ -67,16 +70,20 @@ order to render a diff.
 | `instructions` | derived store | instruction-lens findings | reads the store only |
 | `doctor` | derived store | ranked findings grouped by scope | reads the store only |
 | `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | does not modify the supplied store or target files; legacy stores use a temporary migrated copy |
+| `optimize --apply --yes` | derived store and validated instruction/documentation targets | applies reviewed proposals and reports retained backups/recovery | modifies only the validated write set; never modifies the supplied store or rollout/state inputs |
 | `monitor` | one local rollout JSONL or state SQLite source | bounded incremental ingestion and cursor/status output | reads the source only; writes only the derived store |
 
 `doctor` accepts the optional `--limit COUNT` to cap findings per scope.
-`optimize` currently requires `--diff`; the command is advisory and
-read-only. `analyze` reports every lens, while the focused analysis commands
-report one lens through the same deterministic report format. Add
-`--format json` to any reporting command for schema version 1; aliases emit
-their canonical command name. Missing or invalid stores return a bounded,
-actionable error. Older supported store schemas are migrated only in a
-temporary copy, leaving the supplied store unchanged.
+`optimize` requires exactly one of `--diff` or `--apply`. `--diff` is advisory
+and read-only. `--apply` requires explicit confirmation; non-interactive use
+must add `--yes` after reviewing the diff. It validates the complete write set,
+re-reads and re-hashes every file, keeps backups after success, and rolls back
+the whole batch on failure. `analyze` reports every lens, while the focused
+analysis commands report one lens through the same deterministic report format.
+Add `--format json` to read-only reporting commands for schema version 1;
+aliases emit their canonical command name. Missing or invalid stores return a
+bounded, actionable error. Older supported store schemas are migrated only in
+a temporary copy, leaving the supplied store unchanged.
 
 `refresh` accepts `--codex-home PATH` (or `--home PATH`),
 `--include-archived`, `--config PATH`, and `--store PATH`. Without
@@ -118,7 +125,7 @@ cargo run -- monitor --source tests/fixtures/rollout/monitoring.jsonl --kind rol
 cargo run -- doctor --format json --store .codexlens.sqlite
 ```
 
-The Phase 3 lenses and Phase 4 advisor remain exposed from the
+The Phase 3 lenses, Phase 4 advisor, and Phase 5 safe apply workflow remain exposed from the
 `codexlens::analysis` and `codexlens::advisor` modules. The lenses consume
 canonical data without reopening source files; the advisor reads only the
 recommended instruction files when rendering diffs. See [the architecture specification](docs/specs/architecture.md),
@@ -128,14 +135,12 @@ contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
 
 ## Deliberately deferred
 
-- `optimize --apply`: requires an explicit write-safety contract, backups,
-  patch validation, scope checks, and confirmation. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 ## Status and roadmap
 
-Phases 0 through 4 are complete. Phase 5 compressed rollout readers (#57),
-refresh/frozen reporting (#58), versioned JSON reporting (#59), and bounded
-local live monitoring (#60) are implemented; the remaining deferred
-capabilities are documented above.
+Phases 0 through 5 are complete. Phase 5 compressed rollout readers (#57),
+refresh/frozen reporting (#58), versioned JSON reporting (#59), bounded local
+live monitoring (#60), and safe optimize apply (#61) are implemented. Future
+changes must preserve the explicit boundaries documented above.
 
 - Phase 0 Foundation: [#1](https://github.com/yuru-sha/codexlens/issues/1)–[#4](https://github.com/yuru-sha/codexlens/issues/4)
 - Phase 1 Codex ingestion: [#5](https://github.com/yuru-sha/codexlens/issues/5)–[#10](https://github.com/yuru-sha/codexlens/issues/10)
@@ -146,6 +151,7 @@ capabilities are documented above.
 - Phase 5 refresh and frozen reporting: [#58](https://github.com/yuru-sha/codexlens/issues/58) (implemented)
 - Phase 5 versioned JSON reporting: [#59](https://github.com/yuru-sha/codexlens/issues/59) (implemented)
 - Phase 5 local live monitoring: [#60](https://github.com/yuru-sha/codexlens/issues/60) (implemented)
+- Phase 5 safe optimize apply: [#61](https://github.com/yuru-sha/codexlens/issues/61) (implemented)
 
 ## Development
 

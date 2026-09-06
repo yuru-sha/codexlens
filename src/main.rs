@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,8 +8,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use codexlens::advisor::{
-    DiffBatch, DoctorOptions, doctor, proposals_for_findings, render_diffs, render_doctor,
-    render_json_diff, render_json_finding_report, render_json_sessions, render_proposal_summary,
+    ApplyPlan, ApplyReport, DiffBatch, DoctorOptions, doctor, prepare_apply_proposals,
+    proposals_for_findings, render_diffs, render_doctor, render_json_diff,
+    render_json_finding_report, render_json_sessions, render_proposal_summary,
 };
 use codexlens::analysis::{
     Finding, analyze_default, corrections, failures, instructions, knowledge, rework, verification,
@@ -84,8 +85,12 @@ enum Command {
     Optimize {
         #[command(flatten)]
         store: StoreOptions,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "apply")]
         diff: bool,
+        #[arg(long, conflicts_with = "diff")]
+        apply: bool,
+        #[arg(long, requires = "apply")]
+        yes: bool,
     },
     Monitor {
         #[command(flatten)]
@@ -311,23 +316,27 @@ fn main() -> Result<()> {
                 || render_json_finding_report("doctor", &report),
             )
         }
-        Command::Optimize { store, diff } => {
-            if !diff {
-                bail!("optimize requires --diff; proposals are advisory and read-only");
+        Command::Optimize {
+            store,
+            diff,
+            apply,
+            yes,
+        } => {
+            if !diff && !apply {
+                bail!("optimize requires --diff or --apply");
             }
             let (data, findings, _) = load_analysis(&store)?;
-            let plan = proposals_for_findings(&data, &findings);
-            let mut batch = render_diffs(&plan.proposals);
-            batch.skipped.extend(plan.skipped);
-            batch.skipped.sort_by(|left, right| {
-                left.target_path
-                    .cmp(&right.target_path)
-                    .then_with(|| left.reason.cmp(&right.reason))
-            });
-            store.format.write_report(
-                || render_optimize_human(&batch),
-                || render_json_diff(&batch),
-            )
+            let proposal_plan = proposals_for_findings(&data, &findings);
+            if diff {
+                let batch = proposal_batch(&proposal_plan);
+                store.format.write_report(
+                    || render_optimize_human(&batch),
+                    || render_json_diff(&batch),
+                )
+            } else {
+                run_apply(&data, &proposal_plan.proposals, &proposal_plan.skipped, yes)?;
+                Ok(())
+            }
         }
         Command::Monitor {
             store,
@@ -684,6 +693,87 @@ fn bounded_text(value: &str) -> String {
         end -= 1;
     }
     format!("{}...", &value[..end])
+}
+
+fn proposal_batch(plan: &codexlens::advisor::ProposalPlan) -> codexlens::advisor::DiffBatch {
+    let mut batch = render_diffs(&plan.proposals);
+    batch.skipped.extend(plan.skipped.clone());
+    batch.skipped.sort_by(|left, right| {
+        left.target_path
+            .cmp(&right.target_path)
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+    batch
+}
+
+fn run_apply(
+    data: &CanonicalData,
+    proposals: &[codexlens::advisor::Proposal],
+    skipped: &[codexlens::advisor::SkippedProposal],
+    yes: bool,
+) -> Result<()> {
+    for skipped in skipped {
+        eprintln!(
+            "Skipped {}: {}",
+            bounded_path(&skipped.target_path),
+            bounded_text(&skipped.reason)
+        );
+    }
+    if proposals.is_empty() {
+        require_confirmation_mode(yes)?;
+        println!("No applicable proposals.");
+        return Ok(());
+    }
+    let plan = prepare_apply_proposals(data, proposals)
+        .context("optimize --apply rejected the proposal batch before writing")?;
+    let confirmed = confirm_apply(&plan, yes)?;
+    let report = plan
+        .apply(confirmed)
+        .context("optimize --apply could not complete the transaction")?;
+    print_apply_report(&report);
+    Ok(())
+}
+
+fn confirm_apply(plan: &ApplyPlan, yes: bool) -> Result<bool> {
+    require_confirmation_mode(yes)?;
+    if yes {
+        return Ok(true);
+    }
+    eprintln!("Validated write set:");
+    for path in plan.write_set() {
+        eprintln!("- {}", bounded_path(path));
+    }
+    eprint!("Apply these files? Type 'yes' to continue: ");
+    io::stderr().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    if answer.trim().eq_ignore_ascii_case("yes") {
+        Ok(true)
+    } else {
+        bail!("optimize --apply cancelled; no files were written")
+    }
+}
+
+fn require_confirmation_mode(yes: bool) -> Result<()> {
+    if !yes && !io::stdin().is_terminal() {
+        bail!(
+            "optimize --apply requires explicit confirmation; rerun with --yes after reviewing optimize --diff"
+        );
+    }
+    Ok(())
+}
+
+fn print_apply_report(report: &ApplyReport) {
+    println!("Applied {} file(s).", report.changed_files.len());
+    for path in &report.changed_files {
+        println!("Changed: {}", bounded_path(path));
+    }
+    println!("Backups retained at {}.", bounded_path(&report.backup_dir));
+    println!("Recovery: {}.", report.recovery);
+}
+
+fn bounded_path(path: &Path) -> String {
+    bounded_text(&path.display().to_string())
 }
 
 fn load_analysis(options: &StoreOptions) -> Result<(CanonicalData, Vec<Finding>, StoreFreshness)> {

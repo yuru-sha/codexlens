@@ -122,7 +122,8 @@ pub(crate) fn data_with_join(files: Vec<InstructionFile>) -> CanonicalData {
 }
 
 pub(crate) fn temp_file(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
+    let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    base.join(format!(
         "codexlens-advisor-{}-{}-{name}",
         std::process::id(),
         NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
