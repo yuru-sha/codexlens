@@ -12,10 +12,11 @@ scoped proposal for improving `AGENTS.md` or nearby project documentation.
 The product is an evidence tool, not a replacement for Codex, a hosted
 analytics service, or a general-purpose agent-log platform.
 
-The current binary is a read-only reporting surface over an existing derived
-SQLite store. It does not ingest or refresh raw rollout/state inputs, and it
-does not apply advisor proposals. The supported command surface and examples
-are documented in the [README](../../README.md).
+The binary has an explicit refresh workflow for raw rollout/state inputs and a
+read-only reporting surface over the derived SQLite store. Reporting does not
+refresh implicitly, and the binary does not apply advisor proposals. The
+supported command surface and examples are documented in the
+[README](../../README.md).
 
 ## 2. Goals
 
@@ -80,11 +81,14 @@ metadata for rollout normalization and are not stored as separate session rows;
 this keeps one canonical stored session per rollout source. Direct state-only
 ingestion still persists state sessions when explicitly requested.
 
-Reporting commands consume the existing derived store in read-only mode. They
-do not reopen raw rollout/state inputs or refresh the store. Analysis,
-`sessions`, and `doctor` reports make the recorded freshness state visible;
-`optimize --diff` reports proposal and diff state instead. A future `--frozen`
-mode is deferred until a refresh workflow exists.
+The explicit `refresh` command discovers raw rollout/state inputs, captures
+instruction context, and delegates identity, incremental ingest, and
+per-source replacement transactions to the store. Reporting commands consume
+the existing derived store in read-only mode; they do not reopen raw
+rollout/state inputs or refresh the store. `--frozen` makes that store-only
+contract explicit. Analysis, `sessions`, and `doctor` reports make the
+recorded freshness state visible; `optimize --diff` reports proposal and diff
+state instead.
 
 ## 5. Components
 
@@ -271,13 +275,13 @@ implementation available in the
 5. Advisor: `doctor`, proposal generation, and `optimize --diff`.
 
 Phases 0 through 4, including the reporting command integration, are complete
-for the MVP. Compressed readers, `--frozen`, machine-readable output, live
-monitoring, and `optimize --apply` remain deliberately deferred.
+for the MVP. Phase 5 refresh and `--frozen` reporting are implemented.
+Compressed readers, machine-readable output, live monitoring, and
+`optimize --apply` remain deliberately deferred.
 
 Every phase must leave the repository buildable and its behavior covered by
 focused deterministic tests.
 
-The deferred input and reporting boundaries are specified in
-[`post-mvp.md`](post-mvp.md). That contract must be selected and accepted by
-a feature issue before compressed input, refresh, machine output, monitoring,
-or proposal application changes this architecture.
+The remaining deferred input and reporting boundaries are specified in
+[`post-mvp.md`](post-mvp.md). Each boundary must be selected and accepted by a
+feature issue before it changes this architecture.

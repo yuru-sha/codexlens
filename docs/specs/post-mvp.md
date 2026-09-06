@@ -1,7 +1,8 @@
 # Post-MVP input and reporting contracts
 
-Status: entry contract for future feature issues. The capabilities in this
-document are not implemented by the MVP.
+Status: entry contract for future feature issues. The refresh/frozen reporting
+capability in section 2 is implemented by issue #58; the other capabilities
+remain deferred.
 
 Issue #53 tracks the capabilities that cross the MVP input, runtime, output,
 or write boundary. A feature issue must select one capability, implement its
@@ -34,15 +35,15 @@ upstream input -> adapter -> canonical records -> derived store -> lens/report
   paths and line numbers may appear where the existing evidence contract
   permits them; raw source content may not.
 
-## Current MVP regression coverage
+## Current regression coverage
 
-The executable guards for the still-deferred boundary are intentionally
-negative or read-only until a capability issue is explicitly agreed:
+The executable guards for deferred boundaries remain negative or read-only;
+the section 2 capability has positive compatibility/privacy coverage:
 
 - `compressed_rollout_input_is_explicitly_unsupported_and_read_only` checks
   the current unsupported-reader diagnostic, bounded privacy behavior, and
   unchanged compressed source.
-- `refresh_and_frozen_reporting_are_not_currently_exposed`,
+- `refresh_and_frozen_reporting_are_explicit_and_read_only`,
   `machine_readable_output_is_not_currently_exposed`,
   `live_monitoring_is_not_currently_exposed`, and
   `optimize_apply_is_not_currently_exposed` check each deferred CLI boundary
@@ -56,9 +57,9 @@ negative or read-only until a capability issue is explicitly agreed:
   reporting behavior.
 
 The positive compatibility/privacy cases listed in each section are required
-executable tests in the feature issue that introduces that capability. This
-contract-only change does not pretend that an unimplemented capability has
-runtime behavior to test.
+executable tests in the feature issue that introduces that capability. Section
+2 is now implemented; the remaining sections retain their deferred boundary
+until their feature issues land.
 
 ## 1. Compressed rollout readers
 
@@ -109,7 +110,7 @@ sources, applies the existing identity and incremental-ingest rules, and
 commits all replacements atomically. A failed source read or transaction
 leaves the previous successful derived state available.
 
-Reporting remains a separate operation over the derived store. A future
+Reporting remains a separate operation over the derived store. The explicit
 `--frozen` reporting mode means "use exactly this store": it must not discover
 or reopen raw inputs, refresh the store, or silently claim that the store is
 current. Missing or invalid stores remain bounded errors; recorded freshness
@@ -118,6 +119,13 @@ is shown in the report.
 The refresh command and `--frozen` option must be explicit in the feature
 issue that implements them. This document defines their boundary, not an
 additional implicit refresh on an existing reporting command.
+
+Issue #58 implements `refresh` with `--store`, `--codex-home`/`--home`,
+`--include-archived`, and `--config` input options. All supported reporting
+commands accept `--frozen`; both frozen and default reporting read only the
+selected derived store, and recorded freshness is reported without claiming
+that the store is current. The explicit refresh path is the only reporting
+workflow that discovers or ingests raw inputs.
 
 ### Compatibility tests
 

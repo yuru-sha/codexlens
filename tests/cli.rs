@@ -85,6 +85,27 @@ fn run_args(args: &[&str], store: &Path) -> Output {
         .unwrap()
 }
 
+fn refresh_home() -> (PathBuf, PathBuf) {
+    let home = temp_store_path("refresh-home");
+    let session_directory = home.join("sessions").join("2026");
+    fs::create_dir_all(&session_directory).unwrap();
+    let source = session_directory.join("fixture.jsonl");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/analysis/lenses.jsonl");
+    fs::copy(fixture, &source).unwrap();
+    (home, source)
+}
+
+fn run_refresh(home: &Path, store: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["refresh", "--codex-home"])
+        .arg(home)
+        .args(["--store"])
+        .arg(store)
+        .output()
+        .unwrap()
+}
+
 fn assert_finding_report(
     stdout: &str,
     kind: &str,
@@ -601,8 +622,8 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
     let readme_lower = readme.to_ascii_lowercase();
 
     assert!(readme.contains("## CLI surface"));
-    assert!(readme.contains("the refresh/frozen boundary is documented"));
-    assert!(readme.contains("implementation remains deferred"));
+    assert!(readme.contains("explicit raw-input workflow"));
+    assert!(readme.contains("never refreshes implicitly"));
     for args in REPORTING_COMMANDS {
         let command = args.join(" ");
         assert!(
@@ -643,7 +664,7 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
     let _ = fs::remove_file(store);
 
     for boundary in [
-        "existing derived SQLite store",
+        "derived SQLite store",
         "local-only",
         "deterministic",
         "evidence-backed",
@@ -651,6 +672,8 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
         "temporary migrated copy",
         "`optimize --apply`",
         "compressed rollout readers",
+        "`refresh`",
+        "`--codex-home PATH`",
         "`--frozen`",
     ] {
         assert!(
@@ -701,7 +724,7 @@ fn post_mvp_contract_spec_tracks_each_deferred_boundary() {
         );
     }
     for marker in [
-        "Current MVP regression coverage",
+        "Current regression coverage",
         "Compatibility tests",
         "Privacy tests",
         "source read-only",
@@ -820,9 +843,214 @@ fn assert_deferred_surface_is_rejected(args: &[&str]) {
 }
 
 #[test]
-fn refresh_and_frozen_reporting_are_not_currently_exposed() {
-    assert_deferred_surface_is_rejected(&["refresh"]);
-    assert_deferred_surface_is_rejected(&["analyze", "--frozen"]);
+fn refresh_and_frozen_reporting_are_explicit_and_read_only() {
+    let (home, source) = refresh_home();
+    let store = temp_store_path("refresh-store");
+
+    let first = run_refresh(&home, &store);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(String::from_utf8_lossy(&first.stdout).contains("ingested"));
+    let first_store = fs::read(&store).unwrap();
+
+    let second = run_refresh(&home, &store);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(String::from_utf8_lossy(&second.stdout).contains("skipped"));
+    assert_eq!(
+        Store::open_read_only(&store)
+            .unwrap()
+            .freshness()
+            .unwrap()
+            .source_count,
+        1
+    );
+
+    let frozen = run_args(&["doctor", "--frozen"], &store);
+    assert!(frozen.status.success());
+    fs::write(&source, b"synthetic raw secret=must-not-be-read\n").unwrap();
+    let frozen_again = run_args(&["doctor", "--frozen"], &store);
+    let normal = run_args(&["doctor"], &store);
+    assert_eq!(frozen.stdout, frozen_again.stdout);
+    assert_eq!(frozen.stderr, frozen_again.stderr);
+    assert_eq!(frozen.stdout, normal.stdout);
+    assert_eq!(frozen.stderr, normal.stderr);
+    assert_eq!(fs::read(&store).unwrap(), first_store);
+    assert_eq!(
+        fs::read(&source).unwrap(),
+        b"synthetic raw secret=must-not-be-read\n"
+    );
+
+    let _ = fs::remove_dir_all(home);
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn failed_refresh_keeps_the_previous_derived_store() {
+    let (home, source) = refresh_home();
+    let store = temp_store_path("refresh-rollback");
+    assert!(run_refresh(&home, &store).status.success());
+    Connection::open(&store)
+        .unwrap()
+        .execute_batch(include_str!("fixtures/store/rollback-trigger.sql"))
+        .unwrap();
+    let before = fs::read(&store).unwrap();
+    let mut changed_source = fs::read(&source).unwrap();
+    changed_source.extend_from_slice(b"{\"type\":\"future\",\"payload\":{}}\n");
+    fs::write(&source, changed_source).unwrap();
+
+    let output = run_refresh(&home, &store);
+
+    assert!(!output.status.success());
+    assert_eq!(fs::read(&store).unwrap(), before);
+    let _ = fs::remove_dir_all(home);
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn refresh_errors_bound_long_store_paths() {
+    let (home, _) = refresh_home();
+    let mut parent = home.join("long");
+    for index in 0..4 {
+        parent = parent.join(format!("segment-{index}-{}", "x".repeat(40)));
+    }
+    fs::create_dir_all(&parent).unwrap();
+    let store = parent.join("invalid-store-secret-tail.sqlite");
+    fs::write(&store, b"not a sqlite database").unwrap();
+
+    let output = run_refresh(&home, &store);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.len() < 512, "{stderr}");
+    assert!(!stderr.contains("secret-tail"), "{stderr}");
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn refresh_rejects_a_raw_input_as_the_derived_store() {
+    let (home, source) = refresh_home();
+    let before = fs::read(&source).unwrap();
+
+    let output = run_refresh(&home, &source);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must not be a raw or instruction input"),
+        "{stderr}"
+    );
+    assert!(stderr.len() < 512, "{stderr}");
+    assert_eq!(fs::read(&source).unwrap(), before);
+
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn refresh_rejects_archived_and_instruction_sources_as_the_derived_store() {
+    let (home, _) = refresh_home();
+    let archived = home
+        .join("archived_sessions")
+        .join("2026")
+        .join("old.jsonl");
+    fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    fs::write(&archived, b"").unwrap();
+    let agents = home.join("AGENTS.md");
+    let config = home.join("config.toml");
+
+    for protected in [&archived, &agents, &config] {
+        fs::write(protected, b"").unwrap();
+        let before = fs::read(protected).unwrap();
+        let output = run_refresh(&home, protected);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("must not be a raw or instruction input")
+        );
+        assert_eq!(fs::read(protected).unwrap(), before);
+    }
+
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn refresh_protects_turn_context_instruction_sources() {
+    let (home, source) = refresh_home();
+    let project = home.join("project");
+    let instruction = project.join("AGENTS.md");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(&instruction, b"").unwrap();
+    fs::write(
+        &source,
+        format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"synthetic-turn-context\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"synthetic-turn\",\"cwd\":\"{}\",\"project_root\":\"{}\"}}}}\n",
+            project.display(),
+            project.display()
+        ),
+    )
+    .unwrap();
+    let before = fs::read(&instruction).unwrap();
+
+    let output = run_refresh(&home, &instruction);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must not be a raw or instruction input")
+    );
+    assert_eq!(fs::read(&instruction).unwrap(), before);
+
+    let _ = fs::remove_dir_all(home);
+}
+
+#[cfg(unix)]
+#[test]
+fn refresh_rejects_a_hard_link_to_a_raw_input_as_the_derived_store() {
+    let (home, source) = refresh_home();
+    let store = temp_store_path("hard-linked-refresh-store");
+    fs::hard_link(&source, &store).unwrap();
+    let before = fs::read(&source).unwrap();
+
+    let output = run_refresh(&home, &store);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must not be a raw or instruction input"),
+        "{stderr}"
+    );
+    assert!(stderr.len() < 512, "{stderr}");
+    assert_eq!(fs::read(&source).unwrap(), before);
+
+    let _ = fs::remove_dir_all(home);
+    let _ = fs::remove_file(store);
+}
+
+#[cfg(unix)]
+#[test]
+fn refresh_rejects_a_hard_link_to_an_instruction_source_as_the_derived_store() {
+    let (home, _) = refresh_home();
+    let instruction = home.join("AGENTS.md");
+    let store = temp_store_path("hard-linked-instruction-store");
+    fs::write(&instruction, b"").unwrap();
+    fs::hard_link(&instruction, &store).unwrap();
+    let before = fs::read(&instruction).unwrap();
+
+    let output = run_refresh(&home, &store);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must not be a raw or instruction input")
+    );
+    assert_eq!(fs::read(&instruction).unwrap(), before);
+
+    let _ = fs::remove_dir_all(home);
+    let _ = fs::remove_file(store);
 }
 
 #[test]
