@@ -94,7 +94,9 @@ The adapter provides compressed rollout readers for plain and zstd-compressed ro
 local monitoring exception: it polls one rollout or state source, reuses the
 existing adapter and canonical model, and appends or replaces only the derived
 store. Use `--kind rollout|state`; `--max-polls COUNT` makes a finite run, and
-omitting it keeps polling at `--interval-ms MILLISECONDS` until stopped.
+omitting it keeps polling at `--interval-ms MILLISECONDS` until stopped. Pass
+`--cursor PATH` to save the bounded cursor at a clean stop and reuse it on the
+next invocation.
 
 The final MVP readiness review, verification evidence, and next-phase entry
 condition are recorded in [docs/readiness/mvp.md](docs/readiness/mvp.md).

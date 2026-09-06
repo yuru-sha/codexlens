@@ -425,7 +425,9 @@ canonical normalization flow.
 
 - `monitor --source PATH --kind rollout|state` is the explicit local runtime
   boundary. `--max-polls` provides a deterministic finite stop boundary for
-  automation; without it the command continues polling locally.
+  automation; without it the command continues polling locally. `--cursor PATH`
+  persists the bounded cursor at a clean stop and reloads it on the next
+  invocation; the cursor path must not alias the source or derived store.
 - A rollout cursor records the canonical source path, the byte offset after the
   last complete newline, the physical line and canonical sequence counts, a
   bounded FNV-1a prefix digest, and a bounded recent identity window. The
@@ -443,8 +445,9 @@ canonical normalization flow.
 - State databases have no line offset. The monitor fingerprints the complete
   read-only source and reuses the existing state adapter only when that
   fingerprint changes. Rollout batches append canonical rows to the derived
-  store using the existing normalizer, while session and turn context is
-  carried as bounded canonical state rather than raw payloads.
+  store using the existing normalizer, while session, turn, and pending tool
+  call correlation context is carried as bounded canonical state rather than
+  raw payloads.
 
 ## 5. `optimize --apply`
 

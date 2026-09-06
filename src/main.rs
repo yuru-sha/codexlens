@@ -98,6 +98,8 @@ enum Command {
         max_polls: Option<usize>,
         #[arg(long, default_value_t = 500, value_name = "MILLISECONDS")]
         interval_ms: u64,
+        #[arg(long, value_name = "PATH")]
+        cursor: Option<PathBuf>,
     },
 }
 
@@ -333,7 +335,15 @@ fn main() -> Result<()> {
             kind,
             max_polls,
             interval_ms,
-        } => run_monitor(&store, &source, kind, max_polls, interval_ms),
+            cursor,
+        } => run_monitor(
+            &store,
+            &source,
+            kind,
+            max_polls,
+            interval_ms,
+            cursor.as_deref(),
+        ),
     }
 }
 
@@ -343,14 +353,11 @@ fn run_monitor(
     kind: MonitorKind,
     max_polls: Option<usize>,
     interval_ms: u64,
+    cursor_path: Option<&Path>,
 ) -> Result<()> {
     let options = codexlens::monitor::MonitorOptions {
         poll_interval: std::time::Duration::from_millis(interval_ms),
         ..codexlens::monitor::MonitorOptions::default()
-    };
-    let mut monitor = match kind {
-        MonitorKind::Rollout => codexlens::monitor::LocalMonitor::rollout(source, None, options)?,
-        MonitorKind::State => codexlens::monitor::LocalMonitor::state(source, None, options)?,
     };
     let mut store = Store::open(&store_options.store).with_context(|| {
         format!(
@@ -358,8 +365,17 @@ fn run_monitor(
             store_options.store.display()
         )
     })?;
+    if let Some(path) = cursor_path {
+        reject_monitor_cursor_path(path, source, &store_options.store)?;
+    }
+    let cursor = cursor_path.map(load_monitor_cursor).transpose()?.flatten();
+    let mut monitor = match kind {
+        MonitorKind::Rollout => codexlens::monitor::LocalMonitor::rollout(source, cursor, options)?,
+        MonitorKind::State => codexlens::monitor::LocalMonitor::state(source, cursor, options)?,
+    };
     let mut clock = codexlens::monitor::SystemMonitorClock;
     let mut polls = 0usize;
+    let mut cursor_error = None;
     monitor.run(&mut store, &mut clock, |poll| {
         polls = polls.saturating_add(1);
         println!(
@@ -372,8 +388,46 @@ fn run_monitor(
                 diagnostic.kind, diagnostic.message
             );
         }
+        if let Some(path) = cursor_path {
+            if let Err(error) = write_monitor_cursor(path, &poll.cursor) {
+                cursor_error = Some(error);
+                return true;
+            }
+        }
         max_polls.is_some_and(|limit| polls >= limit)
     })?;
+    if let Some(error) = cursor_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn load_monitor_cursor(path: &Path) -> Result<Option<codexlens::monitor::MonitorCursor>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read monitor cursor {}", bounded_display(path)))?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .with_context(|| format!("failed to parse monitor cursor {}", bounded_display(path)))
+}
+
+fn write_monitor_cursor(path: &Path, cursor: &codexlens::monitor::MonitorCursor) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(cursor)?;
+    fs::write(path, bytes)
+        .with_context(|| format!("failed to write monitor cursor {}", bounded_display(path)))
+}
+
+fn reject_monitor_cursor_path(cursor: &Path, source: &Path, store: &Path) -> Result<()> {
+    for (label, protected) in [("source", source), ("derived store", store)] {
+        if cursor.exists() && same_file_identity(cursor, protected)? {
+            bail!(
+                "monitor cursor must not be the {label}: {}",
+                bounded_display(cursor)
+            );
+        }
+    }
     Ok(())
 }
 

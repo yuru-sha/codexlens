@@ -5,9 +5,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::model::CanonicalData;
-use crate::normalize::{RolloutNormalizationContext, normalize_rollout_incremental};
+use crate::normalize::{
+    RolloutNormalizationContext, normalize_rollout_incremental, pending_tool_calls_for_source,
+};
 use crate::rollout::{
     PlainJsonlReader, ReadLine, RolloutLineReader, RolloutParseOptions, RolloutParseResult,
     RolloutRecord, RolloutRecordKind, parse_rollout_reader,
@@ -20,7 +23,7 @@ const READ_CHUNK_BYTES: usize = 16 * 1024;
 const DEFAULT_MAX_POLL_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_MAX_EVENT_IDENTITIES: usize = 4096;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MonitorCursor {
     pub source_identity: PathBuf,
     pub offset: u64,
@@ -576,5 +579,9 @@ fn stored_context(
             })
             .cloned()
     });
-    Some(RolloutNormalizationContext { session, turn })
+    Some(RolloutNormalizationContext {
+        session,
+        turn,
+        pending_tool_calls: pending_tool_calls_for_source(data, path),
+    })
 }

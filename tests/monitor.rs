@@ -166,6 +166,30 @@ fn finite_replay_matches_batch_ordering_and_findings() {
 }
 
 #[test]
+fn tool_result_matches_a_call_across_poll_boundaries() {
+    let source = temp_source("tool-correlation");
+    let lines = include_str!("fixtures/rollout/monitoring.jsonl")
+        .lines()
+        .collect::<Vec<_>>();
+    fs::write(&source, []).unwrap();
+    let mut store = Store::in_memory().unwrap();
+    let mut monitor = LocalMonitor::rollout(&source, None, MonitorOptions::default()).unwrap();
+
+    for line in &lines[..4] {
+        append(&source, line.as_bytes());
+        append(&source, b"\n");
+        monitor.poll(&mut store).unwrap();
+    }
+
+    let data = store.load_canonical().unwrap();
+    assert_eq!(data.tool_calls.len(), 1);
+    assert_eq!(data.tool_results.len(), 1);
+    assert!(data.tool_results[0].matched_call);
+
+    let _ = fs::remove_file(source);
+}
+
+#[test]
 fn restarting_from_the_recorded_cursor_does_not_duplicate_complete_events() {
     let source = temp_source("restart");
     let lines = include_str!("fixtures/rollout/monitoring.jsonl")

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -711,6 +712,7 @@ fn reporting_commands_render_local_store_data() {
 fn monitor_command_updates_a_local_store_and_honors_max_polls() {
     let source = temp_rollout_path("monitor");
     let store = temp_store_path("monitor-store");
+    let cursor = source.with_extension("cursor.json");
     fs::write(
         &source,
         br#"{"type":"session_meta","payload":{"id":"cli-monitor-session"}}
@@ -723,6 +725,8 @@ fn monitor_command_updates_a_local_store_and_honors_max_polls() {
             "monitor",
             "--source",
             source.to_str().unwrap(),
+            "--cursor",
+            cursor.to_str().unwrap(),
             "--max-polls",
             "1",
         ],
@@ -735,14 +739,59 @@ fn monitor_command_updates_a_local_store_and_honors_max_polls() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Monitor Rollout: Updated"), "{stdout}");
+    let saved_cursor: codexlens::monitor::MonitorCursor =
+        serde_json::from_slice(&fs::read(&cursor).unwrap()).unwrap();
+    assert!(saved_cursor.offset > 0);
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&source)
+        .unwrap()
+        .write_all(b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"cli-monitor-session-2\"}}\n")
+        .unwrap();
+    let restarted = run_args(
+        &[
+            "monitor",
+            "--source",
+            source.to_str().unwrap(),
+            "--cursor",
+            cursor.to_str().unwrap(),
+            "--max-polls",
+            "1",
+        ],
+        &store,
+    );
+    assert!(
+        restarted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&restarted.stdout).contains("(1 records"),
+        "{}",
+        String::from_utf8_lossy(&restarted.stdout)
+    );
     let persisted = Store::open_read_only(&store)
         .unwrap()
         .load_canonical()
         .unwrap();
-    assert_eq!(persisted.sessions[0].id, "cli-monitor-session");
+    assert_eq!(persisted.sessions.len(), 2);
+    assert!(
+        persisted
+            .sessions
+            .iter()
+            .any(|session| session.id == "cli-monitor-session")
+    );
+    assert!(
+        persisted
+            .sessions
+            .iter()
+            .any(|session| session.id == "cli-monitor-session-2")
+    );
 
     let _ = fs::remove_file(source);
     let _ = fs::remove_file(store);
+    let _ = fs::remove_file(cursor);
 }
 
 #[test]
