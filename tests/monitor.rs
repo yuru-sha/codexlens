@@ -190,6 +190,67 @@ fn tool_result_matches_a_call_across_poll_boundaries() {
 }
 
 #[test]
+fn tool_result_deduplication_and_file_operations_match_batch_across_poll_boundaries() {
+    let source = temp_source("tool-boundaries");
+    let lines = include_str!("fixtures/rollout/monitoring_tool_boundaries.jsonl")
+        .lines()
+        .collect::<Vec<_>>();
+    fs::write(&source, []).unwrap();
+    let mut live_store = Store::in_memory().unwrap();
+    let mut monitor = LocalMonitor::rollout(&source, None, MonitorOptions::default()).unwrap();
+
+    for line in &lines[..4] {
+        append(&source, line.as_bytes());
+        append(&source, b"\n");
+        monitor.poll(&mut live_store).unwrap();
+    }
+    let cursor = monitor.cursor().clone();
+    drop(monitor);
+    let mut monitor =
+        LocalMonitor::rollout(&source, Some(cursor), MonitorOptions::default()).unwrap();
+    append(&source, lines[4].as_bytes());
+    append(&source, b"\n");
+    monitor.poll(&mut live_store).unwrap();
+
+    let mut batch_store = Store::in_memory().unwrap();
+    batch_store
+        .ingest_rollout_file(&source, &RolloutParseOptions::default())
+        .unwrap();
+    let live = live_store.load_canonical().unwrap();
+    let batch = batch_store.load_canonical().unwrap();
+
+    assert_eq!(live.tool_results.len(), 2);
+    assert!(live.tool_results[0].matched_call);
+    assert!(live.tool_results[1].is_duplicate);
+    assert_eq!(live.file_operations.len(), 1);
+    assert_eq!(
+        live.tool_results
+            .iter()
+            .map(|result| (result.matched_call, result.is_duplicate))
+            .collect::<Vec<_>>(),
+        batch
+            .tool_results
+            .iter()
+            .map(|result| (result.matched_call, result.is_duplicate))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        live.file_operations
+            .iter()
+            .map(|operation| (&operation.path, &operation.operation))
+            .collect::<Vec<_>>(),
+        batch
+            .file_operations
+            .iter()
+            .map(|operation| (&operation.path, &operation.operation))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(finding_signature(&live), finding_signature(&batch));
+
+    let _ = fs::remove_file(source);
+}
+
+#[test]
 fn restarting_from_the_recorded_cursor_does_not_duplicate_complete_events() {
     let source = temp_source("restart");
     let lines = include_str!("fixtures/rollout/monitoring.jsonl")

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::CanonicalData;
 use crate::normalize::{
     RolloutNormalizationContext, normalize_rollout_incremental, pending_tool_calls_for_source,
+    recent_tool_results_for_source,
 };
 use crate::rollout::{
     PlainJsonlReader, ReadLine, RolloutLineReader, RolloutParseOptions, RolloutParseResult,
@@ -583,5 +584,6 @@ fn stored_context(
         session,
         turn,
         pending_tool_calls: pending_tool_calls_for_source(data, path),
+        recent_tool_results: recent_tool_results_for_source(data, path),
     })
 }

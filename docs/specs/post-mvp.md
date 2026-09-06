@@ -445,9 +445,10 @@ canonical normalization flow.
 - State databases have no line offset. The monitor fingerprints the complete
   read-only source and reuses the existing state adapter only when that
   fingerprint changes. Rollout batches append canonical rows to the derived
-  store using the existing normalizer, while session, turn, and pending tool
-  call correlation context is carried as bounded canonical state rather than
-  raw payloads.
+  store using the existing normalizer, while session, turn, pending tool-call,
+  and recent tool-result correlation context is carried as bounded canonical
+  state rather than raw payloads. Call/result-derived file operations use the
+  same bounded call identity to avoid double counting across poll boundaries.
 
 ## 5. `optimize --apply`
 
