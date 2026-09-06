@@ -510,10 +510,16 @@ fn canonical_existing(path: &Path, expected: ExistingKind) -> Result<PathBuf, Ap
             path_label(path)
         )));
     }
-    if path.components().any(|component| {
+    let has_parent_component = path.components().any(|component| {
         component == Component::ParentDir
             || matches!(component, Component::Normal(name) if name == "..")
-    }) {
+    }) || (cfg!(windows)
+        && path
+            .as_os_str()
+            .to_string_lossy()
+            .split(['\\', '/'])
+            .any(|component| component == ".."));
+    if has_parent_component {
         return Err(invalid_batch(format!(
             "raw parent traversal is not allowed: {}",
             path_label(path)
