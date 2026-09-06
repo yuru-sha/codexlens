@@ -270,6 +270,8 @@ Only high-confidence proposals are rendered. Findings do not synthesize
 replacement pair and the docs target has no stored baseline; both actions
 remain available for explicitly constructed, validated proposals.
 The command never writes, renames, or deletes files.
+The future write contract for `optimize --apply` is defined in
+[`post-mvp.md`](post-mvp.md) and is not implied by this review-only command.
 
 ## 12. Deterministic testing
 

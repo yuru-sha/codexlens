@@ -50,6 +50,8 @@ The deferred capabilities and their rationale are tracked in
 readers, refresh/frozen-mode behavior, machine-readable output, live
 monitoring, and `optimize --apply`. They remain deferred because each expands
 an input, runtime, output, or write boundary that needs its own contract.
+The entry contracts and required compatibility/privacy test gates are in
+[`docs/specs/post-mvp.md`](../specs/post-mvp.md).
 
 The store-schema wording for `corrections` and `findings` was clarified and
 closed in [#54](https://github.com/yuru-sha/codexlens/issues/54); the current
@@ -59,8 +61,9 @@ CLI derives those results in memory from canonical data.
 
 The next feature phase may start only when its issue:
 
-1. selects a capability from #53 and states its compatibility, privacy, and
-   read-only/write requirements;
+1. selects a capability from #53, states its compatibility, privacy, and
+   read-only/write requirements, and records explicit agreement on those
+   acceptance criteria before implementation starts;
 2. updates the relevant specification and adds synthetic regression coverage;
 3. preserves the adapter → canonical data → derived store → lens/report
    boundary unless the issue explicitly changes that contract; and

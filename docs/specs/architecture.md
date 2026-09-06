@@ -276,3 +276,8 @@ monitoring, and `optimize --apply` remain deliberately deferred.
 
 Every phase must leave the repository buildable and its behavior covered by
 focused deterministic tests.
+
+The deferred input and reporting boundaries are specified in
+[`post-mvp.md`](post-mvp.md). That contract must be selected and accepted by
+a feature issue before compressed input, refresh, machine output, monitoring,
+or proposal application changes this architecture.
