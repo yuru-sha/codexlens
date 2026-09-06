@@ -47,11 +47,15 @@ confirmed safe apply behavior.
 
 ## Deferred work
 
-The remaining deferred capabilities and their rationale are tracked in
-[#53](https://github.com/yuru-sha/codexlens/issues/53): compressed rollout
-readers, refresh/frozen-mode behavior, machine-readable output, and live
-monitoring. `optimize --apply` is implemented under its agreed write contract
-in [#61](https://github.com/yuru-sha/codexlens/issues/61).
+The capabilities and their rationale were originally tracked in
+[#53](https://github.com/yuru-sha/codexlens/issues/53). Issues
+[#57](https://github.com/yuru-sha/codexlens/issues/57),
+[#58](https://github.com/yuru-sha/codexlens/issues/58),
+[#59](https://github.com/yuru-sha/codexlens/issues/59),
+[#60](https://github.com/yuru-sha/codexlens/issues/60), and
+[#61](https://github.com/yuru-sha/codexlens/issues/61) implement the
+compressed rollout reader, refresh/frozen reporting, machine-readable output,
+live monitoring, and safe apply under their agreed contracts.
 The entry contracts and required compatibility/privacy test gates are in
 [`docs/specs/post-mvp.md`](../specs/post-mvp.md).
 

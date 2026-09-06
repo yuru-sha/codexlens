@@ -1,14 +1,16 @@
 # Post-MVP input and reporting contracts
 
-Status: entry contract for future feature issues. Section 5 is implemented by
-Issue #61; the other capabilities in this document remain deferred.
+Status: entry contract for future feature issues. The compressed rollout reader
+in section 1, refresh/frozen reporting in section 2, machine-readable output in
+section 3, live monitoring in section 4, and safe apply in section 5 are
+implemented by issues #57, #58, #59, #60, and #61.
 
 Issue #53 tracks the capabilities that cross the MVP input, runtime, output,
 or write boundary. A feature issue must select one capability, implement its
 compatibility and privacy tests, and pass the relevant safety checks before it
 changes the current command surface.
-For deferred capabilities, the positive tests below remain acceptance criteria
-for the feature issues that implement them.
+The positive tests below are the acceptance criteria for the implemented
+capabilities and for future feature issues that extend the current boundaries.
 
 ## Shared boundary
 
@@ -33,18 +35,25 @@ upstream input -> adapter -> canonical records -> derived store -> lens/report
   paths and line numbers may appear where the existing evidence contract
   permits them; raw source content may not.
 
-## Current MVP regression coverage
+## Current regression coverage
 
-The executable guards for the still-deferred boundary are intentionally
-negative or read-only until a capability issue is explicitly agreed:
+The executable guards for the implemented and still-deferred boundaries are
+kept explicit:
 
-- `compressed_rollout_input_is_explicitly_unsupported_and_read_only` checks
-  the current unsupported-reader diagnostic, bounded privacy behavior, and
-  unchanged compressed source.
-- `refresh_and_frozen_reporting_are_not_currently_exposed`,
-  `machine_readable_output_is_not_currently_exposed`, and
-  `live_monitoring_is_not_currently_exposed` check each deferred CLI boundary
-  independently; rejected errors stay bounded and stores stay unchanged.
+- `compressed_rollout_input_is_ingested_incrementally_and_read_only` and
+  `corrupt_compressed_rollout_does_not_block_valid_sibling` cover compressed
+  reader parity, bounded corruption handling, incremental replacement, and
+  unchanged sources.
+- `refresh_and_frozen_reporting_are_explicit_and_read_only` checks the refresh
+  boundary independently; rejected errors stay bounded and stores stay
+  unchanged.
+- `monitor_command_updates_a_local_store_and_honors_max_polls`, together with
+  the monitor integration tests, covers partial lines, finite replay,
+  restart, rotation/truncation, duplicate identities, state fingerprints, and
+  deterministic stop timing.
+- `machine_readable_output_is_versioned_deterministic_and_canonical` and
+  `optimize_json_contains_typed_proposals_and_keeps_skips_in_document` cover
+  the implemented JSON command shapes and canonical aliases.
 - `optimize_apply_requires_explicit_confirmation` checks the implemented write
   boundary; rejected confirmation stays bounded and the store stays unchanged.
 - `reporting_is_deterministic_bounded_and_does_not_refresh_or_write` checks
@@ -56,9 +65,8 @@ negative or read-only until a capability issue is explicitly agreed:
   reporting behavior.
 
 The positive compatibility/privacy cases listed in each section are required
-executable tests in the feature issue that introduces that capability. This
-contract-only change does not pretend that an unimplemented capability has
-runtime behavior to test.
+executable tests in the feature issue that introduces or extends that
+capability. Sections 1 through 5 are implemented.
 
 ## 1. Compressed rollout readers
 
@@ -109,7 +117,7 @@ sources, applies the existing identity and incremental-ingest rules, and
 commits all replacements atomically. A failed source read or transaction
 leaves the previous successful derived state available.
 
-Reporting remains a separate operation over the derived store. A future
+Reporting remains a separate operation over the derived store. The explicit
 `--frozen` reporting mode means "use exactly this store": it must not discover
 or reopen raw inputs, refresh the store, or silently claim that the store is
 current. Missing or invalid stores remain bounded errors; recorded freshness
@@ -118,6 +126,13 @@ is shown in the report.
 The refresh command and `--frozen` option must be explicit in the feature
 issue that implements them. This document defines their boundary, not an
 additional implicit refresh on an existing reporting command.
+
+Issue #58 implements `refresh` with `--store`, `--codex-home`/`--home`,
+`--include-archived`, and `--config` input options. All supported reporting
+commands accept `--frozen`; both frozen and default reporting read only the
+selected derived store, and recorded freshness is reported without claiming
+that the store is current. The explicit refresh path is the only reporting
+workflow that discovers or ingests raw inputs.
 
 ### Compatibility tests
 
@@ -145,6 +160,9 @@ additional implicit refresh on an existing reporting command.
   migration, and rollback errors.
 
 ## 3. Machine-readable output
+
+This section is implemented for the supported reporting commands by issue
+#59. The default human-readable output remains unchanged.
 
 ### Scope
 
@@ -178,7 +196,15 @@ The top-level JSON contract is versioned and uses stable snake-case fields:
   `{id, created_at, updated_at, cwd, project}`.
 - `optimize --diff` uses `{rendered, skipped}`, where `rendered` contains the
   typed proposal and unified `diff`, and `skipped` contains
-  `{target_path, reason}`.
+  `{target_path, reason, proposal}`. `proposal` is the typed proposal when a
+  rendered diff was omitted for machine-output safety, and is `null` when the
+  proposal was already skipped before diff rendering.
+
+Machine-readable diffs are redacted before output and are emitted only when
+the complete, unchanged diff is at most 16 KiB. A rendered proposal requiring
+redaction or exceeding the limit is moved to `skipped` with a bounded reason;
+its bounded typed proposal and evidence remain available there. JSON never
+emits a syntactically truncated or redaction-altered unified diff.
 
 All wrapper fields above are required. `string`, `integer`, and `boolean` use
 their JSON primitive types; nullable values are `string | null` or
@@ -240,8 +266,11 @@ cwd: string | null, project: string | null}`. A `RenderedDiff` is
 `source_path: string | null`, `expected_target_hash: string | null`,
 `expected_source_hash: string | null`, `target_rationale: string`,
 `limitations: string[]`, and `review_reminder: string`. A `SkippedProposal` is
-`{target_path: string, reason: string}`. `rendered` and `skipped` are arrays
-of those exact element types.
+`{target_path: string, reason: string, proposal: Proposal | null}`.
+`rendered` and `skipped` are arrays of those exact element types. When a
+rendered proposal is omitted for machine-output safety, `proposal` preserves
+its bounded scope and evidence references so the machine report remains
+comparable with the human proposal summary.
 
 For `optimize --diff`, `action` is `add | modify | remove | move_to_docs |
 split_scope`; all fields are required, including nullable fields, as defined
@@ -386,6 +415,42 @@ history for the first implementation.
   deletes the observed source.
 - A stopped monitor releases its source handles and does not retain raw
   session payloads beyond the documented derived-store boundary.
+
+Issue #60 implements this section with the explicit local `monitor` command,
+bounded rollout cursors, state fingerprints, and the existing adapter and
+canonical normalization flow.
+
+### Implementation decisions for issue #60
+
+- `monitor --source PATH --kind rollout|state` is the explicit local runtime
+  boundary. `--max-polls` provides a deterministic finite stop boundary for
+  automation; without it the command continues polling locally. `--cursor PATH`
+  persists the bounded cursor at a clean stop and reloads it on the next
+  invocation; the cursor path must not alias the source or derived store.
+- A rollout cursor records the canonical source path, the byte offset after the
+  last complete newline, the physical line and canonical sequence counts, a
+  bounded FNV-1a prefix digest, and a bounded recent identity window. The
+  monitor passes only complete newline-terminated bytes to the existing JSONL
+  adapter, so an incomplete final line remains source data and is retried on
+  the next poll.
+- A source smaller than the recorded offset is a `truncated` transition. A
+  changed prefix at the recorded offset is a `rotated` transition. Both reset
+  the cursor and replace that source's derived rows atomically before reading
+  the new complete prefix; neither transition silently appends old and new
+  generations together.
+- Explicit `event_id`, `record_id`, or `id` values are checked in a bounded
+  recent window. A repeated identity is reported as a diagnostic and skipped;
+  identities older than the configured window are treated as new events.
+- State databases have no line offset. The monitor fingerprints the complete
+  read-only source and reuses the existing state adapter only when that
+  fingerprint changes. Rollout batches append canonical rows to the derived
+  store using the existing normalizer, while session, turn, pending tool-call
+  candidates (including calls without an ID), and recent tool-result
+  correlation context are carried as bounded canonical state rather than raw
+  payloads. Call/result-derived file operations use the same bounded call
+  identity to avoid double counting across poll boundaries. If a later failure
+  invalidates a provisional call-derived operation, the append transaction
+  retracts that operation so live and batch ingestion remain equivalent.
 
 ## 5. `optimize --apply`
 

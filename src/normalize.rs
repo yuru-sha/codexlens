@@ -18,6 +18,9 @@ use crate::rollout::{
 };
 use crate::state::StateReadResult;
 
+pub(crate) const MAX_PENDING_TOOL_CALLS: usize = 1024;
+const MAX_RECENT_TOOL_RESULTS: usize = MAX_PENDING_TOOL_CALLS;
+
 pub fn normalize_rollout(result: &RolloutParseResult) -> CanonicalData {
     normalize_rollout_with_state(result, &[])
 }
@@ -37,12 +40,47 @@ pub fn normalize_rollout_with_instructions(
     normalize_rollout_with_resolver(result, state, Some(resolver))
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RolloutNormalizationContext {
+    pub(crate) session: Option<Session>,
+    pub(crate) turn: Option<Turn>,
+    pub(crate) pending_tool_calls: Vec<ToolCall>,
+    pub(crate) recent_tool_results: Vec<ToolResult>,
+    pub(crate) invalidated_file_operations: Vec<FileOperation>,
+}
+
+pub(crate) fn normalize_rollout_incremental(
+    result: &RolloutParseResult,
+    state: &[Session],
+    resolver: &InstructionResolver,
+    context: Option<&RolloutNormalizationContext>,
+    sequence_start: usize,
+) -> (CanonicalData, RolloutNormalizationContext) {
+    let (mut data, context) = normalize_records_with_resolver(
+        &result.records,
+        state,
+        Some(resolver),
+        context,
+        sequence_start,
+    );
+    data.diagnostics
+        .extend(result.diagnostics.iter().map(canonical_parse_diagnostic));
+    data.diagnostics.sort_by(|left, right| {
+        left.source
+            .path
+            .cmp(&right.source.path)
+            .then_with(|| left.source.line.cmp(&right.source.line))
+            .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+    });
+    (data, context)
+}
+
 fn normalize_rollout_with_resolver(
     result: &RolloutParseResult,
     state: &[Session],
     resolver: Option<&InstructionResolver>,
 ) -> CanonicalData {
-    let mut data = normalize_records_with_resolver(&result.records, state, resolver);
+    let (mut data, _) = normalize_records_with_resolver(&result.records, state, resolver, None, 0);
     data.diagnostics
         .extend(result.diagnostics.iter().map(canonical_parse_diagnostic));
     data.diagnostics.sort_by(|left, right| {
@@ -74,30 +112,53 @@ pub fn normalize_rollout_result(
 }
 
 pub fn normalize_records(records: &[RolloutRecord], state: &[Session]) -> CanonicalData {
-    normalize_records_with_resolver(records, state, None)
+    normalize_records_with_resolver(records, state, None, None, 0).0
 }
 
 fn normalize_records_with_resolver(
     records: &[RolloutRecord],
     state: &[Session],
     resolver: Option<&InstructionResolver>,
-) -> CanonicalData {
+    context: Option<&RolloutNormalizationContext>,
+    sequence_start: usize,
+) -> (CanonicalData, RolloutNormalizationContext) {
     let mut data = CanonicalData::default();
+    let prior_tool_calls = context
+        .map(|context| context.pending_tool_calls.clone())
+        .unwrap_or_default();
+    let prior_tool_results = context
+        .map(|context| context.recent_tool_results.clone())
+        .unwrap_or_default();
     let mut sessions = BTreeMap::new();
+    if let Some(session) = context.and_then(|context| context.session.clone()) {
+        sessions.insert(session.id.clone(), session);
+    }
     let source_path = records.first().map(|record| record.source.path.clone());
     let matched_state_session_id =
         matching_state_session(source_path.as_deref(), state).map(|session| session.id.clone());
-    let mut current_session_id = matched_state_session_id
-        .as_deref()
-        .and_then(|session_id| state.iter().find(|session| session.id == session_id))
-        .map(|session| {
-            sessions.insert(session.id.clone(), session.clone());
-            session.id.clone()
-        });
-    let mut current_turn_id = None;
+    let mut current_session_id = context
+        .and_then(|context| context.session.as_ref())
+        .map(|session| session.id.clone())
+        .or_else(|| matched_state_session_id.clone());
+    if context
+        .and_then(|context| context.session.as_ref())
+        .is_none()
+    {
+        if let Some(session_id) = current_session_id.as_deref() {
+            if let Some(session) = state.iter().find(|session| session.id == session_id) {
+                sessions.insert(session.id.clone(), session.clone());
+            }
+        }
+    }
+    let mut current_turn_id = context.and_then(|context| {
+        context.turn.as_ref().map(|turn| {
+            data.turns.push(turn.clone());
+            turn.id.clone()
+        })
+    });
 
     for (index, record) in records.iter().enumerate() {
-        let sequence = index + 1;
+        let sequence = sequence_start + index + 1;
         let source = SourceRef::from(&record.source);
         let payload = known_payload(record);
         let explicit_turn_id = payload
@@ -284,67 +345,160 @@ fn normalize_records_with_resolver(
         });
     }
 
+    let next_session = current_session_id
+        .as_deref()
+        .and_then(|session_id| sessions.get(session_id))
+        .cloned();
+    let next_turn = current_turn_id
+        .as_deref()
+        .and_then(|turn_id| data.turns.iter().find(|turn| turn.id == turn_id).cloned());
     data.sessions = sessions.into_values().collect();
     if let Some(resolver) = resolver {
         data.instruction_joins = join_sessions(&data.sessions, resolver);
     }
-    deduplicate_token_usage(&mut data.token_usage);
-    mark_tool_results(&mut data.tool_calls, &mut data.tool_results);
-    mark_duplicate_tool_results(&mut data.tool_results);
-    extract_file_operations(&mut data);
-    data
+    let invalidated_file_operations =
+        recompute_derived(&mut data, &prior_tool_calls, &prior_tool_results);
+    let next_pending_tool_calls =
+        next_pending_tool_calls(&prior_tool_calls, &data.tool_calls, &data.tool_results);
+    let next_recent_tool_results =
+        next_recent_tool_results(&prior_tool_results, &data.tool_results);
+    let context = RolloutNormalizationContext {
+        session: next_session,
+        turn: next_turn,
+        pending_tool_calls: next_pending_tool_calls,
+        recent_tool_results: next_recent_tool_results,
+        invalidated_file_operations,
+    };
+    (data, context)
 }
 
-fn extract_file_operations(data: &mut CanonicalData) {
+fn recompute_derived(
+    data: &mut CanonicalData,
+    prior_tool_calls: &[ToolCall],
+    prior_tool_results: &[ToolResult],
+) -> Vec<FileOperation> {
+    deduplicate_token_usage(&mut data.token_usage);
+    let mut correlation_calls = prior_tool_calls.to_vec();
+    correlation_calls.extend(data.tool_calls.clone());
+    mark_tool_results(
+        prior_tool_results,
+        &correlation_calls,
+        &mut data.tool_results,
+    );
+    mark_duplicate_tool_results(prior_tool_results, &mut data.tool_results);
+    extract_file_operations(data, prior_tool_calls, &correlation_calls)
+}
+
+fn next_pending_tool_calls(
+    prior: &[ToolCall],
+    current: &[ToolCall],
+    results: &[ToolResult],
+) -> Vec<ToolCall> {
+    let mut pending = prior
+        .iter()
+        .chain(current)
+        .filter(|call| {
+            !results.iter().any(|result| {
+                result.call_id == call.call_id
+                    && call_result_context_matches(
+                        result.session_id.as_deref(),
+                        call.session_id.as_deref(),
+                    )
+                    && call_result_context_matches(
+                        result.turn_id.as_deref(),
+                        call.turn_id.as_deref(),
+                    )
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if pending.len() > MAX_PENDING_TOOL_CALLS {
+        let remove = pending.len() - MAX_PENDING_TOOL_CALLS;
+        pending.drain(..remove);
+    }
+    pending
+}
+
+fn next_recent_tool_results(prior: &[ToolResult], current: &[ToolResult]) -> Vec<ToolResult> {
+    let mut results = prior.iter().chain(current).cloned().collect::<Vec<_>>();
+    if results.len() > MAX_RECENT_TOOL_RESULTS {
+        let remove = results.len() - MAX_RECENT_TOOL_RESULTS;
+        results.drain(..remove);
+    }
+    results
+}
+
+pub(crate) fn pending_tool_calls_for_source(
+    data: &CanonicalData,
+    source_path: &Path,
+) -> Vec<ToolCall> {
+    let calls = data
+        .tool_calls
+        .iter()
+        .filter(|call| call.provenance.path == source_path)
+        .cloned()
+        .collect::<Vec<_>>();
+    let results = data
+        .tool_results
+        .iter()
+        .filter(|result| result.provenance.path == source_path)
+        .cloned()
+        .collect::<Vec<_>>();
+    next_pending_tool_calls(&[], &calls, &results)
+}
+
+pub(crate) fn recent_tool_results_for_source(
+    data: &CanonicalData,
+    source_path: &Path,
+) -> Vec<ToolResult> {
+    let mut results = data
+        .tool_results
+        .iter()
+        .filter(|result| result.provenance.path == source_path)
+        .cloned()
+        .collect::<Vec<_>>();
+    if results.len() > MAX_RECENT_TOOL_RESULTS {
+        let remove = results.len() - MAX_RECENT_TOOL_RESULTS;
+        results.drain(..remove);
+    }
+    results
+}
+
+fn extract_file_operations(
+    data: &mut CanonicalData,
+    prior_tool_calls: &[ToolCall],
+    correlation_calls: &[ToolCall],
+) -> Vec<FileOperation> {
     let calls = data.tool_calls.clone();
     let mut call_operations = HashSet::new();
     let mut unpaired_no_id_calls = Vec::new();
+    let mut invalidated_file_operations = Vec::new();
+    for call in prior_tool_calls {
+        let operations = call_file_operations(data, call);
+        if call_is_failed(&data.tool_results, correlation_calls, call)
+            || call_has_failed_result(&data.tool_results, correlation_calls, call)
+        {
+            invalidated_file_operations
+                .extend(operations.into_iter().map(|(operation, _)| operation));
+            continue;
+        }
+        for (operation, key) in operations {
+            call_operations.insert(key.clone());
+            if call.call_id.is_none() {
+                unpaired_no_id_calls.push((operation, key.2));
+            }
+        }
+    }
     for call in &calls {
-        if call_is_failed(&data.tool_results, &calls, call)
-            || call_has_failed_result(&data.tool_results, &calls, call)
+        if call_is_failed(&data.tool_results, correlation_calls, call)
+            || call_has_failed_result(&data.tool_results, correlation_calls, call)
         {
             continue;
         }
-        let command = call
-            .command
-            .as_deref()
-            .or(call.input_summary.as_deref())
-            .unwrap_or_default();
-        let cwd = call.cwd.clone().or_else(|| {
-            context_cwd(data, call.session_id.as_deref(), call.turn_id.as_deref())
-                .map(str::to_owned)
-        });
-        let timestamp = record_timestamp(data, &call.provenance);
-        let mut extracted = Vec::new();
-        append_observed_file_operations(
-            &mut extracted,
-            call.session_id.clone(),
-            call.turn_id.clone(),
-            call.tool_name.as_deref().unwrap_or_default(),
-            command,
-            &call.provenance,
-            timestamp,
-        );
-        for operation in extracted {
-            let Some(session_id) = operation.session_id.as_ref() else {
-                continue;
-            };
-            let call_identity = call.call_id.clone().unwrap_or_else(|| {
-                format!(
-                    "missing-call-id:call:{}:{}",
-                    call.provenance.path.display(),
-                    call.provenance.line.unwrap_or_default()
-                )
-            });
-            let operation_path = operation_identity_path(&operation.path, cwd.as_deref());
-            if call_operations.insert((
-                session_id.clone(),
-                call_identity,
-                operation_path.clone(),
-                operation.operation.clone(),
-            )) {
+        for (operation, key) in call_file_operations(data, call) {
+            if call_operations.insert(key.clone()) {
                 if call.call_id.is_none() {
-                    unpaired_no_id_calls.push((operation.clone(), operation_path));
+                    unpaired_no_id_calls.push((operation.clone(), key.2));
                 }
                 data.file_operations.push(operation);
             }
@@ -356,8 +510,10 @@ fn extract_file_operations(data: &mut CanonicalData) {
         }
         let command = result.command.as_deref().unwrap_or_default();
         let timestamp = record_timestamp(data, &result.provenance);
-        let matched_call = matching_call(&calls, result);
-        if matched_call.is_some_and(|call| call_is_failed(&data.tool_results, &calls, call)) {
+        let matched_call = matching_call(correlation_calls, result);
+        if matched_call
+            .is_some_and(|call| call_is_failed(&data.tool_results, correlation_calls, call))
+        {
             continue;
         }
         let tool_name = matched_call
@@ -446,6 +602,51 @@ fn extract_file_operations(data: &mut CanonicalData) {
             && right.provenance.path == left.provenance.path
             && right.provenance.line == left.provenance.line
     });
+    invalidated_file_operations
+}
+
+fn call_file_operations(
+    data: &CanonicalData,
+    call: &ToolCall,
+) -> Vec<(FileOperation, (String, String, String, String))> {
+    let command = call
+        .command
+        .as_deref()
+        .or(call.input_summary.as_deref())
+        .unwrap_or_default();
+    let cwd = call.cwd.clone().or_else(|| {
+        context_cwd(data, call.session_id.as_deref(), call.turn_id.as_deref()).map(str::to_owned)
+    });
+    let timestamp = record_timestamp(data, &call.provenance);
+    let mut extracted = Vec::new();
+    append_observed_file_operations(
+        &mut extracted,
+        call.session_id.clone(),
+        call.turn_id.clone(),
+        call.tool_name.as_deref().unwrap_or_default(),
+        command,
+        &call.provenance,
+        timestamp,
+    );
+    extracted
+        .into_iter()
+        .filter_map(|operation| {
+            let session_id = operation.session_id.clone()?;
+            let call_identity = call.call_id.clone().unwrap_or_else(|| {
+                format!(
+                    "missing-call-id:call:{}:{}",
+                    call.provenance.path.display(),
+                    call.provenance.line.unwrap_or_default()
+                )
+            });
+            let operation_path = operation_identity_path(&operation.path, cwd.as_deref());
+            let operation_kind = operation.operation.clone();
+            Some((
+                operation,
+                (session_id, call_identity, operation_path, operation_kind),
+            ))
+        })
+        .collect()
 }
 
 fn append_observed_file_operations(
@@ -1054,7 +1255,7 @@ fn token_usage_from_payload(
     }
 }
 
-fn mark_tool_results(calls: &mut [ToolCall], results: &mut [ToolResult]) {
+fn mark_tool_results(prior_results: &[ToolResult], calls: &[ToolCall], results: &mut [ToolResult]) {
     for result in results {
         result.matched_call = result.call_id.as_ref().is_some_and(|call_id| {
             calls.iter().any(|call| {
@@ -1067,7 +1268,9 @@ fn mark_tool_results(calls: &mut [ToolCall], results: &mut [ToolResult]) {
                         result.turn_id.as_deref(),
                         call.turn_id.as_deref(),
                     )
-            })
+            }) || prior_results
+                .iter()
+                .any(|prior| prior.matched_call && equivalent_results(prior, result))
         });
     }
 }
@@ -1208,10 +1411,22 @@ fn call_has_failed_result(results: &[ToolResult], calls: &[ToolCall], call: &Too
         .any(result_is_failed)
 }
 
-fn mark_duplicate_tool_results(results: &mut [ToolResult]) {
+fn mark_duplicate_tool_results(prior: &[ToolResult], results: &mut [ToolResult]) {
     // ponytail: O(n^2) result dedup; index by call_id if large histories make it measurable.
     let mut representatives = Vec::new();
     for index in 0..results.len() {
+        if let Some(previous) = prior
+            .iter()
+            .find(|previous| equivalent_results(previous, &results[index]))
+        {
+            results[index].deduplication_key = previous
+                .deduplication_key
+                .clone()
+                .or_else(|| Some(result_key(previous)));
+            results[index].equivalent_to = Some(previous.provenance.clone());
+            results[index].is_duplicate = true;
+            continue;
+        }
         let Some(previous) = representatives
             .iter()
             .copied()
@@ -1664,7 +1879,8 @@ mod tests {
             ..CanonicalData::default()
         };
 
-        extract_file_operations(&mut data);
+        let calls = data.tool_calls.clone();
+        extract_file_operations(&mut data, &[], &calls);
 
         assert_eq!(data.file_operations.len(), 1);
         assert_eq!(data.file_operations[0].path, "src/lib.rs");
@@ -1771,14 +1987,16 @@ mod tests {
 
         data.tool_calls[0].turn_id = None;
         data.file_operations.clear();
-        extract_file_operations(&mut data);
+        let calls = data.tool_calls.clone();
+        extract_file_operations(&mut data, &[], &calls);
         assert_eq!(data.file_operations.len(), 1);
 
         for result in &mut data.tool_results {
             result.turn_id = None;
         }
         data.file_operations.clear();
-        extract_file_operations(&mut data);
+        let calls = data.tool_calls.clone();
+        extract_file_operations(&mut data, &[], &calls);
         assert_eq!(data.file_operations.len(), 1);
 
         let failed = parse(
@@ -1868,7 +2086,7 @@ mod tests {
             },
         ];
 
-        mark_duplicate_tool_results(&mut results);
+        mark_duplicate_tool_results(&[], &mut results);
 
         assert!(results[0].is_duplicate);
         assert!(!results[1].is_duplicate);
@@ -1891,7 +2109,7 @@ mod tests {
                 ..base.clone()
             },
         ];
-        mark_duplicate_tool_results(&mut conflicting);
+        mark_duplicate_tool_results(&[], &mut conflicting);
         assert!(conflicting[0].is_duplicate);
         assert!(!conflicting[1].is_duplicate);
 
@@ -1909,7 +2127,7 @@ mod tests {
                 ..base
             },
         ];
-        mark_duplicate_tool_results(&mut unknown);
+        mark_duplicate_tool_results(&[], &mut unknown);
         assert!(unknown.iter().all(|result| !result.is_duplicate));
     }
 

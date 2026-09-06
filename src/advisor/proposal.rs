@@ -15,7 +15,7 @@ use crate::model::CanonicalData;
 use super::diff::SkippedProposal;
 use super::scope::{file_hash, recommend_scope, stored_file};
 pub(super) const MAX_PROPOSAL_TEXT_BYTES: usize = 512;
-const MAX_REPORT_EVIDENCE: usize = 12;
+pub(super) const MAX_REPORT_EVIDENCE: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

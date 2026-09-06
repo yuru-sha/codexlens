@@ -890,7 +890,9 @@ pub(crate) fn bounded_excerpt(value: &str, max_bytes: usize) -> String {
 }
 
 fn redact_sensitive(value: &str) -> String {
-    let mut redacted = value.to_owned();
+    let mut redacted = redact_pem_blocks(value);
+    redacted = redact_bearer_tokens(&redacted);
+    redacted = redact_jwt_tokens(&redacted);
     for marker in ["token=", "password=", "secret=", "api_key="] {
         redacted = redact_assignment(&redacted, marker);
     }
@@ -905,9 +907,153 @@ fn redact_sensitive(value: &str) -> String {
         "client_secret",
         "secret_key",
         "private_key",
+        "authorization",
     ] {
         redacted = redact_named_value(&redacted, name);
     }
+    redacted
+}
+
+fn redact_pem_blocks(value: &str) -> String {
+    const BEGIN_PREFIX: &str = "-----begin ";
+    const HEADER_END: &str = "-----";
+
+    let lower = value.to_ascii_lowercase();
+    let mut cursor = 0;
+    let mut redacted = String::with_capacity(value.len());
+    while let Some(offset) = lower.get(cursor..).and_then(|rest| rest.find(BEGIN_PREFIX)) {
+        let start = cursor + offset;
+        let label_start = start + BEGIN_PREFIX.len();
+        let Some(header_end_offset) = lower
+            .get(label_start..)
+            .and_then(|rest| rest.find(HEADER_END))
+        else {
+            redacted.push_str(&value[cursor..start]);
+            redacted.push_str("[redacted]");
+            return redacted;
+        };
+        let header_end = label_start + header_end_offset;
+        let label = &lower[label_start..header_end];
+        if label.is_empty() {
+            cursor = header_end + HEADER_END.len();
+            continue;
+        }
+        let end_marker = format!("-----end {label}-----");
+        let Some(end_offset) = lower
+            .get(header_end + HEADER_END.len()..)
+            .and_then(|rest| rest.find(&end_marker))
+        else {
+            redacted.push_str(&value[cursor..start]);
+            redacted.push_str("[redacted]");
+            return redacted;
+        };
+        let end = header_end + HEADER_END.len() + end_offset + end_marker.len();
+        redacted.push_str(&value[cursor..start]);
+        redacted.push_str("[redacted]");
+        cursor = end;
+    }
+    redacted.push_str(&value[cursor..]);
+    redacted
+}
+
+fn redact_bearer_tokens(value: &str) -> String {
+    const BEARER: &str = "bearer";
+
+    let lower = value.to_ascii_lowercase();
+    let mut cursor = 0;
+    let mut redacted = String::with_capacity(value.len());
+    while let Some(offset) = lower.get(cursor..).and_then(|rest| rest.find(BEARER)) {
+        let start = cursor + offset;
+        let after_name = start + BEARER.len();
+        let before = value[..start].chars().next_back();
+        let after = value.get(after_name..).unwrap_or_default();
+        if before.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+            || after
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            cursor = after_name;
+            continue;
+        }
+
+        let mut token_start = after_name;
+        while value
+            .get(token_start..)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(char::is_whitespace)
+        {
+            token_start += value[token_start..]
+                .chars()
+                .next()
+                .expect("whitespace was present")
+                .len_utf8();
+        }
+        if value
+            .get(token_start..)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|character| matches!(character, ':' | '='))
+        {
+            token_start += value[token_start..]
+                .chars()
+                .next()
+                .expect("a delimiter was present")
+                .len_utf8();
+            while value
+                .get(token_start..)
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(char::is_whitespace)
+            {
+                token_start += value[token_start..]
+                    .chars()
+                    .next()
+                    .expect("whitespace was present")
+                    .len_utf8();
+            }
+        }
+        if token_start == after_name || token_start >= value.len() {
+            cursor = after_name;
+            continue;
+        }
+        let token_end = value[token_start..]
+            .find(char::is_whitespace)
+            .map_or(value.len(), |offset| token_start + offset);
+        redacted.push_str(&value[cursor..token_start]);
+        redacted.push_str("[redacted]");
+        cursor = token_end;
+    }
+    redacted.push_str(&value[cursor..]);
+    redacted
+}
+
+fn redact_jwt_tokens(value: &str) -> String {
+    let mut cursor = 0;
+    let mut redacted = String::with_capacity(value.len());
+    while let Some(offset) = value.get(cursor..).and_then(|rest| rest.find("eyJ")) {
+        let start = cursor + offset;
+        let token_end = start
+            + value[start..]
+                .find(|character: char| {
+                    !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+                })
+                .unwrap_or(value.len() - start);
+        let token = &value[start..token_end];
+        let parts = token.split('.').collect::<Vec<_>>();
+        let is_jwt = matches!(parts.len(), 3 | 5)
+            && parts[0].starts_with("eyJ")
+            && parts.iter().all(|part| {
+                part.bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            });
+        if !is_jwt {
+            cursor = start + 3;
+            continue;
+        }
+        redacted.push_str(&value[cursor..start]);
+        redacted.push_str("[redacted]");
+        cursor = token_end;
+    }
+    redacted.push_str(&value[cursor..]);
     redacted
 }
 
@@ -1017,7 +1163,13 @@ fn redact_named_value(value: &str, name: &str) -> String {
             .next()
             .filter(|character| matches!(character, '\'' | '"'));
         let content_start = value_start + quoted.map_or(0, char::len_utf8);
-        let end = secret_value_end(value, content_start, quoted);
+        let end = if name == "authorization" && quoted.is_none() {
+            value[content_start..]
+                .find(['\r', '\n'])
+                .map_or(value.len(), |offset| content_start + offset)
+        } else {
+            secret_value_end(value, content_start, quoted)
+        };
         redacted.push_str(&value[cursor..content_start]);
         redacted.push_str("[redacted]");
         if let Some(delimiter) = quoted {

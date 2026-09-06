@@ -4,6 +4,7 @@ pub mod config;
 pub mod discovery;
 pub mod instructions;
 pub mod model;
+pub mod monitor;
 pub mod normalize;
 pub mod rollout;
 pub mod state;
