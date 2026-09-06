@@ -694,7 +694,8 @@ fn optimize_apply_requires_confirmation_and_applies_only_reviewed_proposals() {
         })
         .expect("apply must report its backup directory");
     let manifest = fs::read_to_string(backup_dir.join("manifest.tsv")).unwrap();
-    assert!(manifest.contains(&target.display().to_string()));
+    let canonical_target = fs::canonicalize(&target).unwrap();
+    assert!(manifest.contains(&canonical_target.display().to_string()));
     assert_eq!(
         fs::read(backup_dir.join("0000.bak")).unwrap(),
         before_target
