@@ -917,6 +917,11 @@ fn corrupt_compressed_rollout_does_not_block_valid_sibling() {
     assert_eq!(fs::read(&corrupt).unwrap(), corrupt_before);
     assert_eq!(fs::read(&valid).unwrap(), valid_before);
 
+    let second = store
+        .ingest_inputs(&[input(&corrupt), input(&valid)], &IngestOptions::default())
+        .unwrap();
+    assert!(second.files.iter().all(|file| file.skipped));
+
     let _ = fs::remove_file(corrupt);
     let _ = fs::remove_file(valid);
 }

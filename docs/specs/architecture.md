@@ -270,9 +270,10 @@ implementation available in the
 4. Lenses: deterministic findings over stored evidence.
 5. Advisor: `doctor`, proposal generation, and `optimize --diff`.
 
-Phases 0 through 5, including the reporting command integration and compressed
-rollout reader, are complete for the MVP. `--frozen`, machine-readable output,
-live monitoring, and `optimize --apply` remain deliberately deferred.
+Phases 0 through 4, including the reporting command integration, are complete
+for the MVP. The Phase 5 compressed rollout reader milestone is implemented;
+its remaining capabilities—`--frozen`, machine-readable output, live
+monitoring, and `optimize --apply`—remain deliberately deferred.
 
 Every phase must leave the repository buildable and its behavior covered by
 focused deterministic tests.

@@ -116,16 +116,18 @@ contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
 
 ## Status and roadmap
 
-Phases 0 through 5 are complete. The current MVP endpoint is the local,
-deterministic reporting surface documented above; future work starts with the
-deferred capabilities rather than an implicit expansion of the boundary.
+Phases 0 through 4 are complete. The Phase 5 compressed rollout reader
+milestone is implemented in #57; its remaining capabilities stay deferred.
+The current MVP endpoint is the local, deterministic reporting surface
+documented above; future work starts with the deferred capabilities rather than
+an implicit expansion of the boundary.
 
 - Phase 0 Foundation: [#1](https://github.com/yuru-sha/codexlens/issues/1)–[#4](https://github.com/yuru-sha/codexlens/issues/4)
 - Phase 1 Codex ingestion: [#5](https://github.com/yuru-sha/codexlens/issues/5)–[#10](https://github.com/yuru-sha/codexlens/issues/10)
 - Phase 2 Instructions: [#11](https://github.com/yuru-sha/codexlens/issues/11)–[#14](https://github.com/yuru-sha/codexlens/issues/14)
 - Phase 3 Lenses: [#15](https://github.com/yuru-sha/codexlens/issues/15)–[#20](https://github.com/yuru-sha/codexlens/issues/20)
 - Phase 4 Advisor: [#21](https://github.com/yuru-sha/codexlens/issues/21)–[#24](https://github.com/yuru-sha/codexlens/issues/24)
-- Phase 5 Compressed rollout reader: [#57](https://github.com/yuru-sha/codexlens/issues/57)
+- Phase 5 compressed rollout reader milestone: [#57](https://github.com/yuru-sha/codexlens/issues/57) (implemented)
 
 ## Development
 

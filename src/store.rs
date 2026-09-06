@@ -473,7 +473,12 @@ impl Store {
             .any(|diagnostic| diagnostic.kind == ParseDiagnosticKind::Unreadable)
         {
             let data = normalize_rollout(&parsed);
-            self.persist_diagnostics(identity, &data.diagnostics)?;
+            self.persist_rollout_diagnostics_with_fingerprint(
+                path,
+                identity,
+                &fingerprint,
+                &data.diagnostics,
+            )?;
             return Ok(summary_from_data(path.to_path_buf(), &data, false));
         }
         let data =
@@ -645,18 +650,13 @@ impl Store {
             &stamped_data,
             options.preserve_instruction_snapshots,
         )?;
-        transaction.execute(
-            "INSERT INTO ingested_files (identity, source_path, input_kind, size, modified_ns, digest, storage_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(identity) DO UPDATE SET source_path = excluded.source_path, input_kind = excluded.input_kind, size = excluded.size, modified_ns = excluded.modified_ns, digest = excluded.digest, storage_mode = excluded.storage_mode",
-            params![
-                identity,
-                source_path.to_string_lossy().as_ref(),
-                kind.as_str(),
-                i64::try_from(fingerprint.size).unwrap_or(i64::MAX),
-                fingerprint.modified_ns.map(|value| value.to_string()),
-                fingerprint.digest.to_string(),
-                options.storage_mode,
-            ],
+        upsert_ingested_file(
+            &transaction,
+            &identity,
+            source_path,
+            kind,
+            fingerprint,
+            options.storage_mode,
         )?;
         transaction.commit()?;
         Ok(summary_from_data(
@@ -674,14 +674,71 @@ impl Store {
         let identity = source_identity.to_string_lossy();
         let timestamp = current_timestamp();
         let transaction = self.connection.transaction()?;
-        for (index, diagnostic) in diagnostics.iter().enumerate() {
-            let mut stamped = diagnostic.clone();
-            stamped.source.stamp_ingest_time(&timestamp);
-            insert_diagnostic(&transaction, identity.as_ref(), &stamped, index)?;
-        }
+        insert_diagnostics(&transaction, identity.as_ref(), diagnostics, &timestamp)?;
         transaction.commit()?;
         Ok(())
     }
+
+    fn persist_rollout_diagnostics_with_fingerprint(
+        &mut self,
+        source_path: &Path,
+        source_identity: &Path,
+        fingerprint: &Fingerprint,
+        diagnostics: &[CanonicalDiagnostic],
+    ) -> Result<()> {
+        let identity = source_identity.to_string_lossy();
+        let timestamp = current_timestamp();
+        let transaction = self.connection.transaction()?;
+        insert_diagnostics(&transaction, identity.as_ref(), diagnostics, &timestamp)?;
+        upsert_ingested_file(
+            &transaction,
+            identity.as_ref(),
+            source_path,
+            IngestInputKind::Rollout,
+            fingerprint,
+            None,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
+fn insert_diagnostics(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    diagnostics: &[CanonicalDiagnostic],
+    timestamp: &str,
+) -> Result<()> {
+    for (index, diagnostic) in diagnostics.iter().enumerate() {
+        let mut stamped = diagnostic.clone();
+        stamped.source.stamp_ingest_time(timestamp);
+        insert_diagnostic(transaction, identity, &stamped, index)?;
+    }
+    Ok(())
+}
+
+fn upsert_ingested_file(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    source_path: &Path,
+    kind: IngestInputKind,
+    fingerprint: &Fingerprint,
+    storage_mode: Option<&str>,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO ingested_files (identity, source_path, input_kind, size, modified_ns, digest, storage_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(identity) DO UPDATE SET source_path = excluded.source_path, input_kind = excluded.input_kind, size = excluded.size, modified_ns = excluded.modified_ns, digest = excluded.digest, storage_mode = excluded.storage_mode",
+        params![
+            identity,
+            source_path.to_string_lossy().as_ref(),
+            kind.as_str(),
+            i64::try_from(fingerprint.size).unwrap_or(i64::MAX),
+            fingerprint.modified_ns.map(|value| value.to_string()),
+            fingerprint.digest.to_string(),
+            storage_mode,
+        ],
+    )?;
+    Ok(())
 }
 
 fn load_canonical(connection: &Connection) -> Result<CanonicalData> {
