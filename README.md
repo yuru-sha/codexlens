@@ -4,8 +4,10 @@ Analyze Codex sessions and turn recurring friction into actionable
 `AGENTS.md` improvements.
 
 > MVP status: local ingestion, instruction capture, deterministic lenses, the
-> advisor, and the read-only reporting CLI are implemented. `refresh` is the
-> explicit raw-input workflow; reporting never refreshes implicitly.
+> advisor, the read-only reporting CLI, bounded local monitoring, compressed
+> rollout readers, explicit refresh/frozen reporting, and versioned JSON output
+> are implemented. `refresh` is the explicit raw-input workflow; reporting
+> never refreshes implicitly, and monitoring updates only the derived store.
 
 ## Goal
 
@@ -65,6 +67,7 @@ order to render a diff.
 | `instructions` | derived store | instruction-lens findings | reads the store only |
 | `doctor` | derived store | ranked findings grouped by scope | reads the store only |
 | `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | does not modify the supplied store or target files; legacy stores use a temporary migrated copy |
+| `monitor` | one local rollout JSONL or state SQLite source | bounded incremental ingestion and cursor/status output | reads the source only; writes only the derived store |
 
 `doctor` accepts the optional `--limit COUNT` to cap findings per scope.
 `optimize` currently requires `--diff`; the command is advisory and
@@ -87,7 +90,13 @@ To build or update a store from raw inputs:
 $ cargo run -- refresh --codex-home "$CODEX_HOME" --store .codexlens.sqlite
 ```
 
-The adapter provides compressed rollout readers for plain and zstd-compressed rollout JSONL; reporting never reopens raw inputs.
+The adapter provides compressed rollout readers for plain and zstd-compressed rollout JSONL; reporting never reopens raw inputs. `monitor` is the explicit
+local monitoring exception: it polls one rollout or state source, reuses the
+existing adapter and canonical model, and appends or replaces only the derived
+store. Use `--kind rollout|state`; `--max-polls COUNT` makes a finite run, and
+omitting it keeps polling at `--interval-ms MILLISECONDS` until stopped. Pass
+`--cursor PATH` to save the bounded cursor at a clean stop and reuse it on the
+next invocation.
 
 The final MVP readiness review, verification evidence, and next-phase entry
 condition are recorded in [docs/readiness/mvp.md](docs/readiness/mvp.md).
@@ -105,6 +114,7 @@ cargo run -- knowledge --store .codexlens.sqlite
 cargo run -- instructions --store .codexlens.sqlite
 cargo run -- doctor --store .codexlens.sqlite
 cargo run -- optimize --diff --store .codexlens.sqlite
+cargo run -- monitor --source tests/fixtures/rollout/monitoring.jsonl --kind rollout --store .codexlens.sqlite --max-polls 1
 cargo run -- doctor --format json --store .codexlens.sqlite
 ```
 
@@ -120,14 +130,12 @@ contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
 
 - `optimize --apply`: requires an explicit write-safety contract, backups,
   patch validation, scope checks, and confirmation. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
-- Live monitoring remains deferred. Its entry contract is documented in
-  [docs/specs/post-mvp.md](docs/specs/post-mvp.md). Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
-
 ## Status and roadmap
 
 Phases 0 through 4 are complete. Phase 5 compressed rollout readers (#57),
-refresh/frozen reporting (#58), and versioned JSON reporting (#59) are
-implemented; the remaining deferred capabilities are documented above.
+refresh/frozen reporting (#58), versioned JSON reporting (#59), and bounded
+local live monitoring (#60) are implemented; the remaining deferred
+capabilities are documented above.
 
 - Phase 0 Foundation: [#1](https://github.com/yuru-sha/codexlens/issues/1)–[#4](https://github.com/yuru-sha/codexlens/issues/4)
 - Phase 1 Codex ingestion: [#5](https://github.com/yuru-sha/codexlens/issues/5)–[#10](https://github.com/yuru-sha/codexlens/issues/10)
@@ -136,6 +144,8 @@ implemented; the remaining deferred capabilities are documented above.
 - Phase 4 Advisor: [#21](https://github.com/yuru-sha/codexlens/issues/21)–[#24](https://github.com/yuru-sha/codexlens/issues/24)
 - Phase 5 compressed rollout reader milestone: [#57](https://github.com/yuru-sha/codexlens/issues/57) (implemented)
 - Phase 5 refresh and frozen reporting: [#58](https://github.com/yuru-sha/codexlens/issues/58) (implemented)
+- Phase 5 versioned JSON reporting: [#59](https://github.com/yuru-sha/codexlens/issues/59) (implemented)
+- Phase 5 local live monitoring: [#60](https://github.com/yuru-sha/codexlens/issues/60) (implemented)
 
 ## Development
 
