@@ -510,10 +510,15 @@ fn canonical_existing(path: &Path, expected: ExistingKind) -> Result<PathBuf, Ap
             path_label(path)
         )));
     }
-    if path
-        .components()
-        .any(|component| component == Component::ParentDir)
-    {
+    let has_parent_component = path.components().any(|component| {
+        component == Component::ParentDir
+            || matches!(component, Component::Normal(name) if name == "..")
+    }) || path
+        .as_os_str()
+        .to_string_lossy()
+        .split(['\\', '/'])
+        .any(|component| component == "..");
+    if has_parent_component {
         return Err(invalid_batch(format!(
             "raw parent traversal is not allowed: {}",
             path_label(path)
@@ -523,7 +528,7 @@ fn canonical_existing(path: &Path, expected: ExistingKind) -> Result<PathBuf, Ap
     let mut current = PathBuf::new();
     for (index, component) in components.iter().enumerate() {
         current.push(component.as_os_str());
-        if current.as_os_str().is_empty() {
+        if matches!(component, Component::Prefix(_)) || current.as_os_str().is_empty() {
             continue;
         }
         let metadata = fs::symlink_metadata(&current).map_err(|error| {
@@ -949,7 +954,13 @@ mod tests {
             )],
         );
 
-        let mut traversal = proposal(&root.join("..").join("x.md"), ProposalAction::Add);
+        let traversal_path = PathBuf::from(format!(
+            "{}{}..{}x.md",
+            root.display(),
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        ));
+        let mut traversal = proposal(&traversal_path, ProposalAction::Add);
         traversal.target_scope = FindingScope::Project(root.clone());
         traversal.expected_target_hash = Some(content_hash(b"old\n"));
         let error = prepare_apply_proposals(&data, &[traversal]).unwrap_err();

@@ -165,6 +165,12 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
 
+GitHub Actions runs the build and full test suite with Rust 1.85.0 on
+`macos-latest` and `windows-latest`; these tests use only the repository's
+synthetic fixtures and do not require a real Codex home. Windows hosted-runner
+build/test coverage is the verification boundary—Windows runtime behavior,
+packaging, and installers are not supported claims.
+
 See [AGENTS.md](AGENTS.md) for repository rules and the synthetic fixture
 policy.
 
