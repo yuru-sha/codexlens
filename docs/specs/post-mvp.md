@@ -1,16 +1,16 @@
 # Post-MVP input and reporting contracts
 
-Status: entry contract for future feature issues. The refresh/frozen reporting
-capability in section 2 is implemented by issue #58; the other capabilities
-remain deferred.
+Status: entry contract for future feature issues. The compressed rollout reader
+in section 1 and refresh/frozen reporting in section 2 are implemented by
+issues #57 and #58; the other capabilities remain deferred.
 
 Issue #53 tracks the capabilities that cross the MVP input, runtime, output,
 or write boundary. A feature issue must select one capability, implement its
 compatibility and privacy tests, and pass the relevant safety checks before it
 changes the current command surface.
-This contract-only document does not close the issue: the positive tests below
-remain acceptance criteria for the feature issues that implement each
-capability.
+The positive tests below are the acceptance criteria for the compressed-reader
+and refresh/frozen implementations, and for the future feature issues that
+implement the remaining capabilities.
 
 ## Shared boundary
 
@@ -37,12 +37,13 @@ upstream input -> adapter -> canonical records -> derived store -> lens/report
 
 ## Current regression coverage
 
-The executable guards for deferred boundaries remain negative or read-only;
-the section 2 capability has positive compatibility/privacy coverage:
+The executable guards for the implemented and still-deferred boundaries are
+kept explicit:
 
-- `compressed_rollout_input_is_explicitly_unsupported_and_read_only` checks
-  the current unsupported-reader diagnostic, bounded privacy behavior, and
-  unchanged compressed source.
+- `compressed_rollout_input_is_ingested_incrementally_and_read_only` and
+  `corrupt_compressed_rollout_does_not_block_valid_sibling` cover compressed
+  reader parity, bounded corruption handling, incremental replacement, and
+  unchanged sources.
 - `refresh_and_frozen_reporting_are_explicit_and_read_only`,
   `machine_readable_output_is_not_currently_exposed`,
   `live_monitoring_is_not_currently_exposed`, and
@@ -57,9 +58,9 @@ the section 2 capability has positive compatibility/privacy coverage:
   reporting behavior.
 
 The positive compatibility/privacy cases listed in each section are required
-executable tests in the feature issue that introduces that capability. Section
-2 is now implemented; the remaining sections retain their deferred boundary
-until their feature issues land.
+executable tests in the feature issue that introduces that capability. Sections
+1 and 2 are implemented; the remaining sections retain their deferred
+boundary until their feature issues land.
 
 ## 1. Compressed rollout readers
 

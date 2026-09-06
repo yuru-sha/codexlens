@@ -85,6 +85,8 @@ To build or update a store from raw inputs:
 $ cargo run -- refresh --codex-home "$CODEX_HOME" --store .codexlens.sqlite
 ```
 
+The adapter provides compressed rollout readers for plain and zstd-compressed rollout JSONL; reporting never reopens raw inputs.
+
 The final MVP readiness review, verification evidence, and next-phase entry
 condition are recorded in [docs/readiness/mvp.md](docs/readiness/mvp.md).
 
@@ -115,22 +117,23 @@ contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
 
 - `optimize --apply`: requires an explicit write-safety contract, backups,
   patch validation, scope checks, and confirmation. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
-- Compressed rollout readers: plain JSONL is the current reader boundary;
-  compressed inputs are reported as unsupported. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 - Machine-readable output and live monitoring: neither is part of the MVP
   command surface. Their entry contracts are documented in
   [docs/specs/post-mvp.md](docs/specs/post-mvp.md). Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 
 ## Status and roadmap
 
-Phases 0 through 4 are complete, and Phase 5 refresh/frozen reporting is
-implemented. The remaining deferred capabilities are documented above.
+Phases 0 through 4 are complete. Phase 5 compressed rollout readers (#57) and
+refresh/frozen reporting (#58) are implemented; the remaining deferred
+capabilities are documented above.
 
 - Phase 0 Foundation: [#1](https://github.com/yuru-sha/codexlens/issues/1)–[#4](https://github.com/yuru-sha/codexlens/issues/4)
 - Phase 1 Codex ingestion: [#5](https://github.com/yuru-sha/codexlens/issues/5)–[#10](https://github.com/yuru-sha/codexlens/issues/10)
 - Phase 2 Instructions: [#11](https://github.com/yuru-sha/codexlens/issues/11)–[#14](https://github.com/yuru-sha/codexlens/issues/14)
 - Phase 3 Lenses: [#15](https://github.com/yuru-sha/codexlens/issues/15)–[#20](https://github.com/yuru-sha/codexlens/issues/20)
 - Phase 4 Advisor: [#21](https://github.com/yuru-sha/codexlens/issues/21)–[#24](https://github.com/yuru-sha/codexlens/issues/24)
+- Phase 5 compressed rollout reader milestone: [#57](https://github.com/yuru-sha/codexlens/issues/57) (implemented)
+- Phase 5 refresh and frozen reporting: [#58](https://github.com/yuru-sha/codexlens/issues/58) (implemented)
 
 ## Development
 
