@@ -4,8 +4,8 @@ Analyze Codex sessions and turn recurring friction into actionable
 `AGENTS.md` improvements.
 
 > MVP status: local ingestion, instruction capture, deterministic lenses, the
-> advisor, and the read-only reporting CLI are implemented. The binary reads a
-> derived store; it does not ingest raw files or apply proposals.
+> advisor, and the read-only reporting CLI are implemented. `refresh` is the
+> explicit raw-input workflow; reporting never refreshes implicitly.
 
 ## Goal
 
@@ -40,16 +40,18 @@ billing accuracy.
 
 ## CLI surface
 
-The binary is a reporting surface over an existing derived SQLite store. It
-does not create or refresh that store from raw rollout or state inputs. Every
-command accepts `-s, --store PATH`, which defaults to `.codexlens.sqlite`.
-Reports are human-readable and read-only with respect to the supplied store
-and target instruction files. Legacy-store reporting may create a temporary
-migrated copy, which is removed afterward; `optimize --diff` also reads the
-recommended instruction files in order to render a diff.
+The binary has an explicit refresh workflow and a separate reporting surface
+over the derived SQLite store. Reporting commands accept `-s, --store PATH`,
+which defaults to `.codexlens.sqlite`, and `--frozen` to state that the
+selected store must be used exactly as recorded. Both normal and frozen
+reporting are read-only with respect to raw inputs and never refresh
+implicitly. Legacy-store reporting may create a temporary migrated copy,
+which is removed afterward; `optimize --diff` also reads the recommended
+instruction files in order to render a diff.
 
 | Command | Input | Output purpose | Read-only behavior |
 | --- | --- | --- | --- |
+| `refresh` | discovered Codex home, rollout/state inputs, and instruction files | build or update the derived store | writes only the selected derived store; raw inputs remain unchanged |
 | `analyze` | derived store | all lens findings | reads the store only |
 | `sessions` | derived store | stored session metadata and freshness | reads the store only |
 | `failures` | derived store | failure-lens findings | reads the store only |
@@ -71,10 +73,19 @@ invalid stores return a bounded, actionable error. Older supported store
 schemas are migrated only in a temporary copy, leaving the supplied store
 unchanged.
 
-The current binary has no ingestion or refresh command. Raw rollout/state
-ingestion remains the adapter and store boundary; the adapter supports plain
-and zstd-compressed rollout JSONL, and reporting never reopens those raw
-inputs.
+`refresh` accepts `--codex-home PATH` (or `--home PATH`),
+`--include-archived`, `--config PATH`, and `--store PATH`. Without
+`--codex-home`, discovery uses `CODEX_HOME` and the platform default. A
+successful refresh prints per-source ingest/skip summaries and recorded store
+freshness; discovery and parse diagnostics remain bounded and explicit.
+
+To build or update a store from raw inputs:
+
+```bash
+$ cargo run -- refresh --codex-home "$CODEX_HOME" --store .codexlens.sqlite
+```
+
+The adapter provides compressed rollout readers for plain and zstd-compressed rollout JSONL; reporting never reopens raw inputs.
 
 The final MVP readiness review, verification evidence, and next-phase entry
 condition are recorded in [docs/readiness/mvp.md](docs/readiness/mvp.md).
@@ -106,21 +117,15 @@ contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
 
 - `optimize --apply`: requires an explicit write-safety contract, backups,
   patch validation, scope checks, and confirmation. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
-- `--frozen` reporting mode: skipping refresh is not a current CLI behavior;
-  the refresh/frozen boundary is documented in
-  [docs/specs/post-mvp.md](docs/specs/post-mvp.md), and implementation remains deferred.
-  Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 - Machine-readable output and live monitoring: neither is part of the MVP
   command surface. Their entry contracts are documented in
   [docs/specs/post-mvp.md](docs/specs/post-mvp.md). Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 
 ## Status and roadmap
 
-Phases 0 through 4 are complete. The Phase 5 compressed rollout reader
-milestone is implemented in #57; its remaining capabilities stay deferred.
-The current MVP endpoint is the local, deterministic reporting surface
-documented above; future work starts with the deferred capabilities rather than
-an implicit expansion of the boundary.
+Phases 0 through 4 are complete. Phase 5 compressed rollout readers (#57) and
+refresh/frozen reporting (#58) are implemented; the remaining deferred
+capabilities are documented above.
 
 - Phase 0 Foundation: [#1](https://github.com/yuru-sha/codexlens/issues/1)–[#4](https://github.com/yuru-sha/codexlens/issues/4)
 - Phase 1 Codex ingestion: [#5](https://github.com/yuru-sha/codexlens/issues/5)–[#10](https://github.com/yuru-sha/codexlens/issues/10)
@@ -128,6 +133,7 @@ an implicit expansion of the boundary.
 - Phase 3 Lenses: [#15](https://github.com/yuru-sha/codexlens/issues/15)–[#20](https://github.com/yuru-sha/codexlens/issues/20)
 - Phase 4 Advisor: [#21](https://github.com/yuru-sha/codexlens/issues/21)–[#24](https://github.com/yuru-sha/codexlens/issues/24)
 - Phase 5 compressed rollout reader milestone: [#57](https://github.com/yuru-sha/codexlens/issues/57) (implemented)
+- Phase 5 refresh and frozen reporting: [#58](https://github.com/yuru-sha/codexlens/issues/58) (implemented)
 
 ## Development
 

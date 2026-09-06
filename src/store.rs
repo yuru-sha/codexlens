@@ -386,7 +386,7 @@ impl Store {
                 .filter(|diagnostic| diagnostic.source.path == input.path)
                 .map(canonical_state_diagnostic)
                 .collect::<Vec<_>>();
-            if !diagnostics.is_empty() {
+            if state_changed {
                 self.persist_diagnostics(&input.identity, &diagnostics)?;
             }
         }
@@ -674,6 +674,10 @@ impl Store {
         let identity = source_identity.to_string_lossy();
         let timestamp = current_timestamp();
         let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM diagnostics WHERE source_identity = ?1",
+            params![identity.as_ref()],
+        )?;
         insert_diagnostics(&transaction, identity.as_ref(), diagnostics, &timestamp)?;
         transaction.commit()?;
         Ok(())
@@ -3071,6 +3075,78 @@ mod tests {
             1
         );
         let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn changed_state_recomputes_diagnostics_across_sources() {
+        let first = temp_path("diagnostics-first.sqlite");
+        let second = temp_path("diagnostics-second.sqlite");
+        create_database(
+            &first,
+            include_str!("../tests/fixtures/state/enrichment.sql"),
+        );
+        create_database(
+            &second,
+            include_str!("../tests/fixtures/state/enrichment.sql"),
+        );
+        let second_connection = Connection::open(&second).unwrap();
+        second_connection
+            .execute("UPDATE threads SET project_path = '/state-project-v2'", [])
+            .unwrap();
+        drop(second_connection);
+
+        let inputs = vec![
+            DiscoveredInput {
+                path: first.clone(),
+                identity: fs::canonicalize(&first).unwrap(),
+                kind: InputKind::StateDatabase,
+                reader: None,
+            },
+            DiscoveredInput {
+                path: second.clone(),
+                identity: fs::canonicalize(&second).unwrap(),
+                kind: InputKind::StateDatabase,
+                reader: None,
+            },
+        ];
+        let mut store = Store::in_memory().unwrap();
+        store
+            .ingest_inputs(&inputs, &IngestOptions::default())
+            .unwrap();
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM diagnostics WHERE kind = 'metadata_conflict'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let first_connection = Connection::open(&first).unwrap();
+        first_connection
+            .execute("UPDATE threads SET project_path = '/state-project-v2'", [])
+            .unwrap();
+        drop(first_connection);
+        store
+            .ingest_inputs(&inputs, &IngestOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM diagnostics WHERE kind = 'metadata_conflict'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        let _ = fs::remove_file(first);
+        let _ = fs::remove_file(second);
     }
 
     #[test]
