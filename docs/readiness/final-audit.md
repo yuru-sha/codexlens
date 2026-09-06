@@ -1,15 +1,15 @@
 # Final regression and safety audit
 
-Status: passed for the Phase 6 release-preparation candidate.
+Status: local audit passed; audit-branch CI remains the merge gate.
 
-Release candidate under audit: `a7ec8f2a11f8daa21074f686d80b176db92af4da`.
+Baseline release candidate: `a7ec8f2a11f8daa21074f686d80b176db92af4da`.
 Observed 2026-09-07 (Asia/Tokyo).
-The audit adds no product capability; it records the release evidence and keeps
-the boundary checks discoverable.
+The audit branch adds no product capability; it records release evidence and
+adds only boundary checks.
 
 ## Quality gates
 
-The local audit ran on macOS arm64 with Rust 1.92.0:
+The audit branch was verified locally on macOS arm64 with Rust 1.92.0:
 
 | Command | Result |
 | --- | --- |
@@ -19,10 +19,10 @@ The local audit ran on macOS arm64 with Rust 1.92.0:
 | `cargo test --all-features` | PASS — 168 tests, 5 suites |
 | `cargo test --all-features --test cli` | PASS — 40 tests |
 
-The release candidate's [GitHub Actions run](https://github.com/yuru-sha/codexlens/actions/runs/34049913765)
-also passed all four checks: Ubuntu Rust 1.85.0 and 1.92.0, `macos-latest`, and
-`windows-latest`. The macOS and Windows jobs run the pinned build/test
-coverage.
+The [GitHub Actions run for the baseline candidate](https://github.com/yuru-sha/codexlens/actions/runs/34049913765)
+passed all four checks: Ubuntu Rust 1.85.0 and 1.92.0, `macos-latest`, and
+`windows-latest`. This is baseline-only evidence; the audit branch's own CI is
+the final platform gate.
 
 ## Determinism and privacy
 
@@ -33,13 +33,17 @@ coverage.
   `reporting_is_deterministic_bounded_and_does_not_refresh_or_write`,
   `optimize_json_bounds_and_redacts_large_diff_content`, and
   `optimize_json_omits_redacted_diff_without_leaking_secret`.
-- The complete reporting command surface is exercised by
-  `reporting_command_surface_stays_read_only_and_private` for source read-only
-  behavior and absence of a synthetic raw marker.
+- The complete reporting command surface, including human, JSON, and frozen
+  variants, is exercised by `reporting_command_surface_stays_read_only_and_private`
+  for source read-only behavior and absence of a synthetic raw marker.
 - The committed `tests/fixtures/` tree was scanned for real local paths,
   credentials, private keys, network-upload commands, and personal data.
   Both scans returned no matches; token-count field names are synthetic format
-  data:
+  data. `git ls-files tests/fixtures | xargs wc -c` listed 27 bounded files;
+  the largest was 3,080 bytes. A bounded manual review of every file confirmed
+  that prompt, command, and output values are fictional and that no personal
+  identifiers are present. Text scans cannot prove provenance, so the
+  repository's synthetic-fixture policy remains the control:
 
   ```text
   git grep -n -E '(/Users/|/home/|C:[\\/]|[A-Za-z]:[\\/]Users|BEGIN [A-Z ]+PRIVATE KEY|api[_-]?key|password|credential|authorization|bearer|sk-[A-Za-z0-9])' -- tests/fixtures
@@ -78,5 +82,6 @@ macOS, and Windows hosted runners; Windows hosted-runner build/test coverage is
 the supported verification boundary. No Windows runtime, packaging, or
 installer support is claimed.
 
-No release-blocking finding was observed. No speculative feature work or
-follow-up issue was added by this audit.
+No release-blocking finding was observed locally. No speculative feature work
+or follow-up issue was added by this audit; final release status remains gated
+on the audit branch CI.

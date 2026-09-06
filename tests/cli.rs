@@ -295,6 +295,21 @@ fn run_args(args: &[&str], store: &Path) -> Output {
         .unwrap()
 }
 
+fn run_args_with_flags(args: &[&str], flags: &[&str], store: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(args)
+        .args(flags)
+        .arg("--store")
+        .arg(store)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+fn assert_file_unchanged(path: &Path, before: &[u8], label: &str) {
+    assert_eq!(fs::read(path).unwrap(), before, "{label} changed");
+}
+
 fn refresh_home() -> (PathBuf, PathBuf) {
     let home = temp_store_path("refresh-home");
     let session_directory = home.join("sessions").join("2026");
@@ -1574,8 +1589,8 @@ fn reporting_is_deterministic_bounded_and_does_not_refresh_or_write() {
     let stdout = String::from_utf8_lossy(&first.stdout);
     assert_doctor_report(&stdout);
     assert!(!stdout.contains("do-not-report"));
-    assert_eq!(fs::read(&store).unwrap(), store_before);
-    assert_eq!(fs::read(&raw_source).unwrap(), raw_before);
+    assert_file_unchanged(&store, &store_before, "derived store");
+    assert_file_unchanged(&raw_source, &raw_before, "raw source");
 
     let _ = fs::remove_file(raw_source);
     let _ = fs::remove_file(store);
@@ -1599,37 +1614,38 @@ fn reporting_command_surface_stays_read_only_and_private() {
     fs::write(&source, source_payload).unwrap();
     let source_before = fs::read(&source).unwrap();
 
+    let variants: &[(&str, &[&str])] = &[
+        ("human", &[]),
+        ("json", &["--format", "json"]),
+        ("frozen", &["--frozen"]),
+        ("frozen json", &["--format", "json", "--frozen"]),
+    ];
     for args in REPORTING_COMMANDS {
-        let output = run_args(args, &store);
-        assert!(
-            output.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            !output
-                .stdout
-                .windows(secret_marker.len())
-                .any(|window| window == secret_marker),
-            "{args:?} leaked the raw marker to stdout"
-        );
-        assert!(
-            !output
-                .stderr
-                .windows(secret_marker.len())
-                .any(|window| window == secret_marker),
-            "{args:?} leaked the raw marker to stderr"
-        );
-        assert_eq!(
-            fs::read(&store).unwrap(),
-            store_before,
-            "{args:?} changed store"
-        );
-        assert_eq!(
-            fs::read(&source).unwrap(),
-            source_before,
-            "{args:?} changed source"
-        );
+        for (variant, flags) in variants {
+            let output = run_args_with_flags(args, flags, &store);
+            let label = format!("{args:?} ({variant})");
+            assert!(
+                output.status.success(),
+                "{label}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                !output
+                    .stdout
+                    .windows(secret_marker.len())
+                    .any(|window| window == secret_marker),
+                "{label} leaked the raw marker to stdout"
+            );
+            assert!(
+                !output
+                    .stderr
+                    .windows(secret_marker.len())
+                    .any(|window| window == secret_marker),
+                "{label} leaked the raw marker to stderr"
+            );
+            assert_file_unchanged(&store, &store_before, &format!("{label} store"));
+            assert_file_unchanged(&source, &source_before, &format!("{label} source"));
+        }
     }
 
     let _ = fs::remove_dir_all(home);
