@@ -1052,7 +1052,7 @@ fn reporting_commands_reject_same_version_mismatched_schema_without_writing() {
 }
 
 #[test]
-fn readiness_document_tracks_the_mvp_boundary_and_entry_condition() {
+fn readiness_document_tracks_phase5_completion_and_phase6_entry_condition() {
     let readme =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
     let readiness =
@@ -1068,9 +1068,17 @@ fn readiness_document_tracks_the_mvp_boundary_and_entry_condition() {
         "cargo test --all-features",
         "optimize --apply",
         "compressed rollout",
-        "#53",
+        "refresh",
+        "versioned JSON",
+        "monitor",
+        "#57",
+        "#58",
+        "#59",
+        "#60",
+        "#61",
         "#54",
-        "Next-phase entry condition",
+        "Phase 5 is complete",
+        "Phase 6 entry condition",
         "read-only",
     ] {
         assert!(
@@ -1078,6 +1086,8 @@ fn readiness_document_tracks_the_mvp_boundary_and_entry_condition() {
             "missing readiness marker: {marker}"
         );
     }
+    assert!(!readiness.contains("## Deferred work"));
+    assert!(!readiness.contains("remain deferred"));
 }
 
 #[test]
@@ -1089,6 +1099,18 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
     assert!(readme.contains("## CLI surface"));
     assert!(readme.contains("explicit raw-input workflow"));
     assert!(readme.contains("never refreshes implicitly"));
+    assert!(readme.contains("Phase 5 compressed rollout reader milestone"));
+    assert!(readme.contains("Phase 5 safe optimize apply"));
+    assert!(readme.contains("Phase 6"));
+    assert!(!readme.contains("## Deliberately deferred"));
+    for stale in [
+        "optimize --apply is unavailable",
+        "compressed inputs are reported as unsupported",
+        "skipping refresh is not a current CLI behavior",
+        "neither is part of the MVP command surface",
+    ] {
+        assert!(!readme.contains(stale), "stale README claim: {stale}");
+    }
     for args in REPORTING_COMMANDS {
         let command = args.join(" ");
         assert!(
@@ -1141,6 +1163,7 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
         "`--codex-home PATH`",
         "zstd-compressed rollout",
         "`--frozen`",
+        "optional cursor file",
     ] {
         assert!(
             readme_lower.contains(&boundary.to_ascii_lowercase()),
@@ -1150,7 +1173,7 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
 }
 
 #[test]
-fn post_mvp_contract_spec_tracks_each_deferred_boundary() {
+fn post_mvp_contract_spec_tracks_each_implemented_phase5_boundary() {
     let spec =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/specs/post-mvp.md"))
             .unwrap();
@@ -1190,6 +1213,31 @@ fn post_mvp_contract_spec_tracks_each_deferred_boundary() {
         );
     }
     for marker in [
+        "compatibility and privacy contract for the implemented Phase 5",
+        "Implementation status: implemented by Issue #57",
+        "Implementation status: implemented by Issue #58",
+        "Implementation status: implemented by Issue #59",
+        "Implementation status: implemented by Issue #60",
+        "Implementation status: implemented by Issue #61",
+        "Before a future feature issue extends",
+        "primary compatibility and privacy boundaries",
+        "The remaining cases are contract requirements",
+    ] {
+        assert!(
+            spec.contains(marker),
+            "missing implementation marker: {marker}"
+        );
+    }
+    assert!(!spec.contains("implemented and still-deferred boundaries"));
+    for stale in [
+        "The refresh command and `--frozen` option must be explicit",
+        "Add a compressed rollout reader in the adapter only",
+        "Introduce an explicit refresh workflow",
+        "Add live monitoring only as an explicit local runtime boundary",
+    ] {
+        assert!(!spec.contains(stale), "stale post-MVP claim: {stale}");
+    }
+    for marker in [
         "Current regression coverage",
         "Compatibility tests",
         "Privacy tests",
@@ -1200,7 +1248,7 @@ fn post_mvp_contract_spec_tracks_each_deferred_boundary() {
         "backup",
         "recovery",
         "confirmation",
-        "before implementation starts",
+        "before implementation",
         "period_start",
         "schema_version",
         "nullable",

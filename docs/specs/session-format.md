@@ -5,8 +5,8 @@ are implementation input, not part of the canonical model.
 
 ## 1. Discovery
 
-The default Codex home is `~/.codex`. A future CLI option may override it; the
-resolution order is:
+The default Codex home is `~/.codex`. The explicit `--codex-home`/`--home` CLI
+option may override it; the resolution order is:
 
 1. explicit command-line path;
 2. `CODEX_HOME`;
