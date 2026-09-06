@@ -907,6 +907,7 @@ fn redact_sensitive(value: &str) -> String {
         "client_secret",
         "secret_key",
         "private_key",
+        "authorization",
     ] {
         redacted = redact_named_value(&redacted, name);
     }
@@ -1162,7 +1163,13 @@ fn redact_named_value(value: &str, name: &str) -> String {
             .next()
             .filter(|character| matches!(character, '\'' | '"'));
         let content_start = value_start + quoted.map_or(0, char::len_utf8);
-        let end = secret_value_end(value, content_start, quoted);
+        let end = if name == "authorization" && quoted.is_none() {
+            value[content_start..]
+                .find(['\r', '\n'])
+                .map_or(value.len(), |offset| content_start + offset)
+        } else {
+            secret_value_end(value, content_start, quoted)
+        };
         redacted.push_str(&value[cursor..content_start]);
         redacted.push_str("[redacted]");
         if let Some(delimiter) = quoted {

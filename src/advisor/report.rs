@@ -721,6 +721,8 @@ mod tests {
         let diffs = [
             "Authorization: Bearer bearer-secret\n",
             "Authorization: Bearer: bearer-delimited-secret\n",
+            "Authorization: Basic basic-secret\n",
+            "Authorization: Token token-auth-secret\n",
             "-----BEGIN PRIVATE KEY-----\nprivate-secret\n-----END PRIVATE KEY-----\n",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature-secret\n",
             "eyJhbGciOiJub25lIn0.e30.short-signature\n",
@@ -757,6 +759,8 @@ mod tests {
         for secret in [
             "bearer-secret",
             "bearer-delimited-secret",
+            "basic-secret",
+            "token-auth-secret",
             "private-secret",
             "signature-secret",
             "short-signature",
