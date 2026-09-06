@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use codexlens::advisor::{
-    DoctorOptions, doctor, proposals_for_findings, render_diffs, render_doctor,
-    render_proposal_summary,
+    DoctorOptions, doctor, proposals_for_findings, render_diffs, render_doctor, render_json_diff,
+    render_json_finding_report, render_json_sessions, render_proposal_summary,
 };
 use codexlens::analysis::{
     Finding, analyze_default, corrections, failures, instructions, knowledge, rework, verification,
@@ -86,6 +86,14 @@ struct StoreOptions {
         value_name = "PATH"
     )]
     store: PathBuf,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    Human,
+    Json,
 }
 
 struct TemporaryStoreCopy {
@@ -133,18 +141,21 @@ impl Drop for TemporaryStoreCopy {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Analyze { store } => run_finding_report(&store, analyze_default),
+        Command::Analyze { store } => run_finding_report(&store, analyze_default, "analyze"),
         Command::Sessions { store } => {
             let (data, freshness) = load_store(&store)?;
-            print!("{}", render_sessions(&data, &freshness));
+            match store.format {
+                OutputFormat::Human => print!("{}", render_sessions(&data, &freshness)),
+                OutputFormat::Json => print!("{}", render_json_sessions(&data, &freshness)?),
+            }
             Ok(())
         }
-        Command::Failures { store } => run_finding_report(&store, failures),
-        Command::Corrections { store } => run_finding_report(&store, corrections),
-        Command::Rework { store } => run_finding_report(&store, rework),
-        Command::Verification { store } => run_finding_report(&store, verification),
-        Command::Knowledge { store } => run_finding_report(&store, knowledge),
-        Command::Instructions { store } => run_finding_report(&store, instructions),
+        Command::Failures { store } => run_finding_report(&store, failures, "failures"),
+        Command::Corrections { store } => run_finding_report(&store, corrections, "corrections"),
+        Command::Rework { store } => run_finding_report(&store, rework, "rework"),
+        Command::Verification { store } => run_finding_report(&store, verification, "verification"),
+        Command::Knowledge { store } => run_finding_report(&store, knowledge, "knowledge"),
+        Command::Instructions { store } => run_finding_report(&store, instructions, "instructions"),
         Command::Doctor { store, limit } => {
             let (data, findings, freshness) = load_analysis(&store)?;
             let report = doctor(
@@ -156,7 +167,12 @@ fn main() -> Result<()> {
                     ..DoctorOptions::default()
                 },
             );
-            print!("{}", render_doctor(&report));
+            match store.format {
+                OutputFormat::Human => print!("{}", render_doctor(&report)),
+                OutputFormat::Json => {
+                    print!("{}", render_json_finding_report("doctor", &report)?);
+                }
+            }
             Ok(())
         }
         Command::Optimize { store, diff } => {
@@ -172,18 +188,23 @@ fn main() -> Result<()> {
                     .cmp(&right.target_path)
                     .then_with(|| left.reason.cmp(&right.reason))
             });
-            for rendered in &batch.rendered {
-                println!("{}", render_proposal_summary(rendered));
-            }
-            for skipped in &batch.skipped {
-                eprintln!(
-                    "Skipped {}: {}",
-                    skipped.target_path.display(),
-                    skipped.reason
-                );
-            }
-            if batch.rendered.is_empty() && batch.skipped.is_empty() {
-                println!("No applicable proposals.");
+            match store.format {
+                OutputFormat::Human => {
+                    for rendered in &batch.rendered {
+                        println!("{}", render_proposal_summary(rendered));
+                    }
+                    for skipped in &batch.skipped {
+                        eprintln!(
+                            "Skipped {}: {}",
+                            skipped.target_path.display(),
+                            skipped.reason
+                        );
+                    }
+                    if batch.rendered.is_empty() && batch.skipped.is_empty() {
+                        println!("No applicable proposals.");
+                    }
+                }
+                OutputFormat::Json => print!("{}", render_json_diff(&batch)?),
             }
             Ok(())
         }
@@ -251,10 +272,14 @@ fn load_store(options: &StoreOptions) -> Result<(CanonicalData, StoreFreshness)>
 fn run_finding_report(
     options: &StoreOptions,
     lens: fn(&CanonicalData) -> Vec<Finding>,
+    command: &str,
 ) -> Result<()> {
     let (data, freshness) = load_store(options)?;
     let report = doctor(&data, &lens(&data), freshness, &DoctorOptions::default());
-    print!("{}", render_doctor(&report));
+    match options.format {
+        OutputFormat::Human => print!("{}", render_doctor(&report)),
+        OutputFormat::Json => print!("{}", render_json_finding_report(command, &report)?),
+    }
     Ok(())
 }
 
@@ -291,7 +316,7 @@ fn render_sessions(data: &CanonicalData, freshness: &StoreFreshness) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use super::{Cli, Command, OutputFormat};
     use clap::Parser;
 
     #[test]
@@ -314,5 +339,14 @@ mod tests {
         ] {
             Cli::try_parse_from(["codexlens", command, "--store", "fixture.sqlite"]).unwrap();
         }
+    }
+
+    #[test]
+    fn reporting_commands_accept_json_format() {
+        let cli = Cli::try_parse_from(["codexlens", "analyze", "--format", "json"]).unwrap();
+        let Command::Analyze { store } = cli.command else {
+            panic!("expected analyze command");
+        };
+        assert_eq!(store.format, OutputFormat::Json);
     }
 }

@@ -173,7 +173,7 @@ target files. The other reporting commands select one lens or list stored
 sessions; `analyze` selects all lenses. `rework`/`stuck` and
 `knowledge`/`rediscovery` are command aliases.
 
-MVP output must include:
+MVP human-readable output must include:
 
 - finding type and severity;
 - confidence and the heuristic used;
@@ -181,6 +181,10 @@ MVP output must include:
 - counts and distinct session count;
 - links to local source path and line where available;
 - a suggested action that is explicitly a proposal.
+
+Every reporting command also supports explicit `--format json` output using
+schema version 1 from [`post-mvp.md`](post-mvp.md). JSON is one document on
+stdout; diagnostics and operational errors remain on stderr.
 
 `optimize --apply` is out of scope until a separate issue defines backup,
 patch validation, scope checks, recovery behavior, and explicit confirmation.
@@ -270,14 +274,15 @@ implementation available in the
 4. Lenses: deterministic findings over stored evidence.
 5. Advisor: `doctor`, proposal generation, and `optimize --diff`.
 
-Phases 0 through 4, including the reporting command integration, are complete
-for the MVP. Compressed readers, `--frozen`, machine-readable output, live
-monitoring, and `optimize --apply` remain deliberately deferred.
+Phases 0 through 4, including the reporting command integration, and the
+versioned JSON output in #59 are complete for the MVP. Compressed readers,
+`--frozen`, live monitoring, and `optimize --apply` remain deliberately
+deferred.
 
 Every phase must leave the repository buildable and its behavior covered by
 focused deterministic tests.
 
 The deferred input and reporting boundaries are specified in
 [`post-mvp.md`](post-mvp.md). That contract must be selected and accepted by
-a feature issue before compressed input, refresh, machine output, monitoring,
-or proposal application changes this architecture.
+a feature issue before compressed input, refresh, monitoring, or proposal
+application changes this architecture.

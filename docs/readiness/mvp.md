@@ -47,8 +47,8 @@ behavior of `optimize --diff`.
 
 The deferred capabilities and their rationale are tracked in
 [#53](https://github.com/yuru-sha/codexlens/issues/53): compressed rollout
-readers, refresh/frozen-mode behavior, machine-readable output, live
-monitoring, and `optimize --apply`. They remain deferred because each expands
+readers, refresh/frozen-mode behavior, live monitoring, and `optimize --apply`.
+They remain deferred because each expands
 an input, runtime, output, or write boundary that needs its own contract.
 The entry contracts and required compatibility/privacy test gates are in
 [`docs/specs/post-mvp.md`](../specs/post-mvp.md).

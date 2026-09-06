@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -11,6 +12,8 @@ use codexlens::model::{
 use codexlens::rollout::RolloutParseOptions;
 use codexlens::store::{IngestInputKind, IngestOptions, SCHEMA_VERSION, Store};
 use rusqlite::{Connection, params};
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 static NEXT_TEMP_STORE: AtomicUsize = AtomicUsize::new(0);
 
@@ -28,6 +31,184 @@ const REPORTING_COMMANDS: &[&[&str]] = &[
     &["doctor"],
     &["optimize", "--diff"],
 ];
+
+#[derive(Debug, Deserialize)]
+struct KnownScope {
+    kind: String,
+    value: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownFreshness {
+    state: String,
+    source_count: usize,
+    latest_ingested_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownSource {
+    kind: String,
+    path: String,
+    line: Option<usize>,
+    ingested_at: Option<String>,
+    parser_schema_version: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownEvidence {
+    session_id: Option<String>,
+    source: KnownSource,
+    role: String,
+    excerpt: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownFinding {
+    kind: String,
+    severity: String,
+    confidence: String,
+    scope: KnownScope,
+    key: String,
+    summary: String,
+    evidence: Vec<KnownEvidence>,
+    occurrences: usize,
+    distinct_sessions: usize,
+    affected_paths: Vec<String>,
+    observed_commands: Vec<String>,
+    sequence: Vec<String>,
+    suggested_action: String,
+    limitations: Vec<String>,
+    verification_status: Option<String>,
+    heuristic: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownFindingGroup {
+    scope: KnownScope,
+    findings: Vec<KnownFinding>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownFindingData {
+    period_start: Option<String>,
+    period_end: Option<String>,
+    session_count: usize,
+    freshness: KnownFreshness,
+    finding_counts: BTreeMap<String, usize>,
+    groups: Vec<KnownFindingGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownFindingDocument {
+    schema_version: u32,
+    command: String,
+    data: KnownFindingData,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownSession {
+    id: String,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    cwd: Option<String>,
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownSessionsData {
+    freshness: KnownFreshness,
+    sessions: Vec<KnownSession>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownSessionsDocument {
+    schema_version: u32,
+    command: String,
+    data: KnownSessionsData,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownProposal {
+    target_scope: KnownScope,
+    target_path: String,
+    action: String,
+    observed_problem: String,
+    evidence_count: usize,
+    distinct_sessions: usize,
+    confidence: String,
+    heuristic: String,
+    evidence: Vec<KnownEvidence>,
+    proposed_text: Option<String>,
+    existing_text: Option<String>,
+    source_path: Option<String>,
+    expected_target_hash: Option<String>,
+    expected_source_hash: Option<String>,
+    target_rationale: String,
+    limitations: Vec<String>,
+    review_reminder: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownRenderedDiff {
+    proposal: KnownProposal,
+    diff: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownSkippedProposal {
+    target_path: String,
+    reason: String,
+    proposal: Option<KnownProposal>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownOptimizeData {
+    rendered: Vec<KnownRenderedDiff>,
+    skipped: Vec<KnownSkippedProposal>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownOptimizeDocument {
+    schema_version: u32,
+    command: String,
+    data: KnownOptimizeData,
+}
+
+fn assert_known_proposal(proposal: &KnownProposal) {
+    let _ = (
+        &proposal.target_scope.kind,
+        &proposal.target_scope.value,
+        &proposal.target_path,
+        &proposal.action,
+        &proposal.observed_problem,
+        proposal.evidence_count,
+        proposal.distinct_sessions,
+        &proposal.confidence,
+        &proposal.heuristic,
+        &proposal.proposed_text,
+        &proposal.existing_text,
+        &proposal.source_path,
+        &proposal.expected_target_hash,
+        &proposal.expected_source_hash,
+        &proposal.target_rationale,
+        &proposal.limitations,
+        &proposal.review_reminder,
+    );
+    assert!(!proposal.evidence.is_empty());
+    for evidence in &proposal.evidence {
+        let source = &evidence.source;
+        let _ = (
+            &evidence.session_id,
+            &source.kind,
+            &source.path,
+            &source.line,
+            &source.ingested_at,
+            source.parser_schema_version,
+            &evidence.role,
+            &evidence.excerpt,
+        );
+    }
+}
 
 fn temp_store_path(label: &str) -> PathBuf {
     let nonce = NEXT_TEMP_STORE.fetch_add(1, Ordering::Relaxed);
@@ -172,7 +353,125 @@ fn assert_doctor_report(stdout: &str) {
     );
 }
 
+fn parse_json_report(output: &Output, command: &str) -> Value {
+    assert!(
+        output.status.success(),
+        "{command} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty(), "{command}: stderr is not empty");
+    let document: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("{command} did not emit one JSON document: {error}"));
+    assert_eq!(document["schema_version"], 1);
+    assert_eq!(document["command"], command);
+    assert!(document["data"].is_object());
+    document
+}
+
+fn human_finding_counts(stdout: &str) -> BTreeMap<String, usize> {
+    let Some(value) = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Finding counts: "))
+    else {
+        panic!("human report has no finding counts: {stdout}");
+    };
+    if value == "none" {
+        return BTreeMap::new();
+    }
+    value
+        .split(", ")
+        .map(|entry| {
+            let (kind, count) = entry.split_once('=').unwrap();
+            (kind.to_owned(), count.parse().unwrap())
+        })
+        .collect()
+}
+
+fn human_finding_order(stdout: &str) -> Vec<String> {
+    let mut scope = String::new();
+    let mut findings = Vec::new();
+    for line in stdout.lines() {
+        if line.starts_with('[') {
+            scope = line.to_owned();
+        } else if let Some(finding) = line.strip_prefix("- ") {
+            let classification = finding.split_once(':').unwrap().0;
+            findings.push(format!("{scope}|{classification}"));
+        }
+    }
+    findings
+}
+
+fn human_evidence_refs(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("  evidence: "))
+        .map(|value| value.split_once(" — ").map_or(value, |(source, _)| source))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn json_scope_label(scope: &Value) -> String {
+    let kind = scope["kind"].as_str().unwrap();
+    match scope.get("value").and_then(Value::as_str) {
+        Some(value) => format!("[{kind}:{value}]"),
+        None => format!("[{kind}]"),
+    }
+}
+
+fn json_finding_counts(document: &Value) -> BTreeMap<String, usize> {
+    document["data"]["finding_counts"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(kind, count)| (kind.clone(), count.as_u64().unwrap() as usize))
+        .collect()
+}
+
+fn json_finding_order(document: &Value) -> Vec<String> {
+    document["data"]["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|group| {
+            let scope = json_scope_label(&group["scope"]);
+            group["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(move |finding| {
+                    format!(
+                        "{scope}|{} / {} / {}",
+                        finding["kind"].as_str().unwrap(),
+                        finding["severity"].as_str().unwrap(),
+                        finding["confidence"].as_str().unwrap()
+                    )
+                })
+        })
+        .collect()
+}
+
+fn json_evidence_refs(document: &Value) -> Vec<String> {
+    document["data"]["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|group| group["findings"].as_array().unwrap())
+        .flat_map(|finding| finding["evidence"].as_array().unwrap())
+        .map(|evidence| {
+            let source = &evidence["source"];
+            match source["line"].as_u64() {
+                Some(line) => format!("{}:{line}", source["path"].as_str().unwrap()),
+                None => source["path"].as_str().unwrap().to_owned(),
+            }
+        })
+        .collect()
+}
+
 fn rendered_diff_store() -> (PathBuf, PathBuf, PathBuf) {
+    rendered_diff_store_with_content("Existing synthetic guidance.\n")
+}
+
+fn rendered_diff_store_with_content(content: &str) -> (PathBuf, PathBuf, PathBuf) {
     let source = fixture_store();
     let mut data = {
         let store = Store::open_read_only(&source).unwrap();
@@ -196,7 +495,6 @@ fn rendered_diff_store() -> (PathBuf, PathBuf, PathBuf) {
     let project_root = temp_store_path("rendered-project");
     fs::create_dir(&project_root).unwrap();
     let target = project_root.join("AGENTS.md");
-    let content = "Existing synthetic guidance.\n";
     fs::write(&target, content).unwrap();
     let content_hash = codexlens::instructions::content_hash(content.as_bytes());
     let project = project_root.to_string_lossy().into_owned();
@@ -826,8 +1124,521 @@ fn refresh_and_frozen_reporting_are_not_currently_exposed() {
 }
 
 #[test]
-fn machine_readable_output_is_not_currently_exposed() {
-    assert_deferred_surface_is_rejected(&["analyze", "--format", "json"]);
+fn machine_readable_output_is_versioned_deterministic_and_canonical() {
+    let store = fixture_store();
+    for (args, command) in [
+        (&["analyze", "--format", "json"][..], "analyze"),
+        (&["sessions", "--format", "json"][..], "sessions"),
+        (&["failures", "--format", "json"][..], "failures"),
+        (&["corrections", "--format", "json"][..], "corrections"),
+        (&["rework", "--format", "json"][..], "rework"),
+        (&["stuck", "--format", "json"][..], "rework"),
+        (&["verification", "--format", "json"][..], "verification"),
+        (&["knowledge", "--format", "json"][..], "knowledge"),
+        (&["rediscovery", "--format", "json"][..], "knowledge"),
+        (&["instructions", "--format", "json"][..], "instructions"),
+        (&["doctor", "--format", "json"][..], "doctor"),
+    ] {
+        let first = run_args(args, &store);
+        let second = run_args(args, &store);
+        assert_eq!(first.stdout, second.stdout, "{args:?} is not deterministic");
+        let document = parse_json_report(&first, command);
+        let data = document["data"].as_object().unwrap();
+        if command == "sessions" {
+            assert!(data["freshness"].is_object());
+            assert!(data["sessions"].is_array());
+            for session in data["sessions"].as_array().unwrap() {
+                for field in ["id", "created_at", "updated_at", "cwd", "project"] {
+                    assert!(
+                        session.get(field).is_some(),
+                        "missing session field {field}"
+                    );
+                }
+            }
+        } else {
+            for field in [
+                "period_start",
+                "period_end",
+                "session_count",
+                "freshness",
+                "finding_counts",
+                "groups",
+            ] {
+                assert!(
+                    data.get(field).is_some(),
+                    "missing finding report field {field}"
+                );
+            }
+            for group in data["groups"].as_array().unwrap() {
+                assert!(group["scope"].is_object());
+                for finding in group["findings"].as_array().unwrap() {
+                    for field in [
+                        "kind",
+                        "severity",
+                        "confidence",
+                        "scope",
+                        "key",
+                        "summary",
+                        "evidence",
+                        "occurrences",
+                        "distinct_sessions",
+                        "affected_paths",
+                        "observed_commands",
+                        "sequence",
+                        "suggested_action",
+                        "limitations",
+                        "verification_status",
+                        "heuristic",
+                    ] {
+                        assert!(
+                            finding.get(field).is_some(),
+                            "missing finding field {field}"
+                        );
+                    }
+                    for evidence in finding["evidence"].as_array().unwrap() {
+                        for field in ["session_id", "source", "role", "excerpt"] {
+                            assert!(
+                                evidence.get(field).is_some(),
+                                "missing evidence field {field}"
+                            );
+                        }
+                        for field in [
+                            "kind",
+                            "path",
+                            "line",
+                            "ingested_at",
+                            "parser_schema_version",
+                        ] {
+                            assert!(
+                                evidence["source"].get(field).is_some(),
+                                "missing source field {field}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn json_doctor_matches_human_counts_scopes_evidence_and_order() {
+    let store = fixture_store();
+    let human = run_args(&["doctor"], &store);
+    let machine = run_args(&["doctor", "--format", "json"], &store);
+    assert!(human.status.success());
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    let document = parse_json_report(&machine, "doctor");
+
+    assert_eq!(
+        human_finding_counts(&human_stdout),
+        json_finding_counts(&document)
+    );
+    assert_eq!(
+        human_finding_order(&human_stdout),
+        json_finding_order(&document)
+    );
+    assert_eq!(
+        human_evidence_refs(&human_stdout),
+        json_evidence_refs(&document)
+    );
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn optimize_json_contains_typed_proposals_and_keeps_skips_in_document() {
+    let (store, target, project_root) = rendered_diff_store();
+    let output = run_args(&["optimize", "--diff", "--format", "json"], &store);
+    let document = parse_json_report(&output, "optimize_diff");
+    let data = document["data"].as_object().unwrap();
+    assert!(data["rendered"].is_array());
+    assert!(data["skipped"].is_array());
+    let rendered = &data["rendered"].as_array().unwrap()[0];
+    assert!(rendered["diff"].is_string());
+    for field in [
+        "target_scope",
+        "target_path",
+        "action",
+        "observed_problem",
+        "evidence_count",
+        "distinct_sessions",
+        "confidence",
+        "heuristic",
+        "evidence",
+        "proposed_text",
+        "existing_text",
+        "source_path",
+        "expected_target_hash",
+        "expected_source_hash",
+        "target_rationale",
+        "limitations",
+        "review_reminder",
+    ] {
+        assert!(
+            rendered["proposal"].get(field).is_some(),
+            "missing proposal field {field}"
+        );
+    }
+    assert_eq!(
+        rendered["proposal"]["action"], "add",
+        "unexpected proposal action"
+    );
+    for skipped in data["skipped"].as_array().unwrap() {
+        for field in ["target_path", "reason", "proposal"] {
+            assert!(
+                skipped.get(field).is_some(),
+                "missing skipped field {field}"
+            );
+        }
+    }
+    let typed: KnownOptimizeDocument = serde_json::from_value(document.clone()).unwrap();
+    assert_eq!(typed.schema_version, 1);
+    assert_eq!(typed.command, "optimize_diff");
+    assert!(!typed.data.rendered.is_empty());
+    for rendered in &typed.data.rendered {
+        assert!(!rendered.diff.is_empty());
+        assert_known_proposal(&rendered.proposal);
+    }
+    for skipped in &typed.data.skipped {
+        let _ = (&skipped.target_path, &skipped.reason);
+        if let Some(proposal) = &skipped.proposal {
+            assert_known_proposal(proposal);
+        }
+    }
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn optimize_json_bounds_and_redacts_large_diff_content() {
+    let content = format!(
+        "synthetic guidance\n{}",
+        "synthetic guidance\n".repeat(4_000)
+    );
+    let (store, target, project_root) = rendered_diff_store_with_content(&content);
+    let output = run_args(&["optimize", "--diff", "--format", "json"], &store);
+    let mut document = parse_json_report(&output, "optimize_diff");
+    assert!(document["data"]["rendered"].as_array().unwrap().is_empty());
+    assert!(
+        document["data"]["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("16384-byte JSON limit"))
+            }),
+        "unexpected optimize diff skips: {}",
+        document["data"]["skipped"]
+    );
+    let oversized_index = document["data"]["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|entry| {
+            entry["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("16384-byte JSON limit"))
+        })
+        .unwrap();
+    document["data"]["skipped"][oversized_index]["future_optional"] = json!(true);
+    document["data"]["skipped"][oversized_index]["proposal"]["future_optional"] = json!(true);
+    document["data"]["skipped"][oversized_index]["proposal"]["target_scope"]["future_optional"] =
+        json!(true);
+    document["data"]["skipped"][oversized_index]["proposal"]["evidence"][0]["future_optional"] =
+        json!(true);
+    document["data"]["skipped"][oversized_index]["proposal"]["evidence"][0]["source"]["future_optional"] =
+        json!(true);
+    let typed: KnownOptimizeDocument = serde_json::from_value(document.clone()).unwrap();
+    assert!(typed.data.rendered.is_empty());
+    assert!(typed.data.skipped.iter().any(|skipped| {
+        skipped.reason.contains("16384-byte JSON limit")
+            && skipped.proposal.as_ref().is_some_and(|proposal| {
+                assert_known_proposal(proposal);
+                true
+            })
+    }));
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn optimize_json_omits_redacted_diff_without_leaking_secret() {
+    let (store, target, project_root) = rendered_diff_store_with_content("token=diff-secret\n");
+    let output = run_args(&["optimize", "--diff", "--format", "json"], &store);
+    let mut document = parse_json_report(&output, "optimize_diff");
+    assert!(document["data"]["rendered"].as_array().unwrap().is_empty());
+    assert!(
+        document["data"]["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("redaction"))
+                    && entry["proposal"].is_object()
+                    && entry["proposal"]["evidence"].is_array()
+            })
+    );
+    let redacted_index = document["data"]["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|entry| {
+            entry["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("redaction"))
+        })
+        .unwrap();
+    document["data"]["skipped"][redacted_index]["future_optional"] = json!(true);
+    document["data"]["skipped"][redacted_index]["proposal"]["future_optional"] = json!(true);
+    document["data"]["skipped"][redacted_index]["proposal"]["target_scope"]["future_optional"] =
+        json!(true);
+    document["data"]["skipped"][redacted_index]["proposal"]["evidence"][0]["future_optional"] =
+        json!(true);
+    document["data"]["skipped"][redacted_index]["proposal"]["evidence"][0]["source"]["future_optional"] =
+        json!(true);
+    let typed: KnownOptimizeDocument = serde_json::from_value(document.clone()).unwrap();
+    assert!(typed.data.rendered.is_empty());
+    assert!(typed.data.skipped.iter().any(|skipped| {
+        skipped.reason.contains("redaction")
+            && skipped.proposal.as_ref().is_some_and(|proposal| {
+                assert_known_proposal(proposal);
+                true
+            })
+    }));
+    assert!(
+        !output
+            .stdout
+            .windows("diff-secret".len())
+            .any(|window| { window == "diff-secret".as_bytes() })
+    );
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn json_errors_stay_on_stderr_for_every_reporting_command() {
+    let store = temp_store_path("missing-json");
+    for args in [
+        &["analyze", "--format", "json"][..],
+        &["sessions", "--format", "json"][..],
+        &["failures", "--format", "json"][..],
+        &["corrections", "--format", "json"][..],
+        &["rework", "--format", "json"][..],
+        &["stuck", "--format", "json"][..],
+        &["verification", "--format", "json"][..],
+        &["knowledge", "--format", "json"][..],
+        &["rediscovery", "--format", "json"][..],
+        &["instructions", "--format", "json"][..],
+        &["doctor", "--format", "json"][..],
+        &["optimize", "--diff", "--format", "json"][..],
+    ] {
+        let output = run_args(args, &store);
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        assert!(output.stdout.is_empty(), "{args:?} wrote to stdout");
+        assert!(!output.stderr.is_empty(), "{args:?} omitted the error");
+        assert!(output.stderr.len() < 512, "{args:?} error is unbounded");
+        assert!(
+            !output.stderr.starts_with(b"{"),
+            "{args:?} wrote JSON to stderr"
+        );
+    }
+}
+
+#[test]
+fn json_schema_readers_can_ignore_unknown_optional_fields() {
+    let store = fixture_store();
+    let mut document = parse_json_report(
+        &run_args(&["analyze", "--format", "json"], &store),
+        "analyze",
+    );
+    document["future_optional"] = json!({"new_field": true});
+    document["data"]["future_optional"] = json!("ignored");
+    document["data"]["groups"][0]["future_optional"] = json!(true);
+    document["data"]["groups"][0]["scope"]["future_optional"] = json!(true);
+    document["data"]["groups"][0]["findings"][0]["future_optional"] = json!(true);
+    document["data"]["groups"][0]["findings"][0]["scope"]["future_optional"] = json!(true);
+    document["data"]["groups"][0]["findings"][0]["evidence"][0]["future_optional"] = json!(true);
+    document["data"]["groups"][0]["findings"][0]["evidence"][0]["source"]["future_optional"] =
+        json!(true);
+    let decoded: KnownFindingDocument = serde_json::from_value(document).unwrap();
+    assert_eq!(decoded.schema_version, 1);
+    assert_eq!(decoded.command, "analyze");
+    assert!(decoded.data.period_start.is_some());
+    assert!(decoded.data.period_end.is_some());
+    assert_eq!(decoded.data.session_count, 2);
+    assert_eq!(decoded.data.freshness.state, "recorded");
+    assert!(decoded.data.freshness.source_count > 0);
+    assert!(decoded.data.freshness.latest_ingested_at.is_some());
+    assert!(!decoded.data.finding_counts.is_empty());
+    assert!(!decoded.data.groups.is_empty());
+    assert!(decoded.data.groups.iter().any(|group| {
+        let _ = (&group.scope.kind, &group.scope.value);
+        group.findings.iter().any(|finding| {
+            let _ = (
+                &finding.kind,
+                &finding.severity,
+                &finding.confidence,
+                &finding.scope.kind,
+                &finding.scope.value,
+                &finding.key,
+                &finding.summary,
+                finding.occurrences,
+                finding.distinct_sessions,
+                &finding.affected_paths,
+                &finding.observed_commands,
+                &finding.sequence,
+                &finding.suggested_action,
+                &finding.limitations,
+                &finding.verification_status,
+                &finding.heuristic,
+            );
+            finding.evidence.iter().any(|evidence| {
+                let source = &evidence.source;
+                let _ = (
+                    &evidence.session_id,
+                    &source.kind,
+                    &source.path,
+                    &source.line,
+                    &source.ingested_at,
+                    source.parser_schema_version,
+                    &evidence.role,
+                    &evidence.excerpt,
+                );
+                true
+            })
+        })
+    }));
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn json_schema_readers_cover_sessions_and_optimize_shapes() {
+    let sessions_store = fixture_store();
+    let mut sessions_document = parse_json_report(
+        &run_args(&["sessions", "--format", "json"], &sessions_store),
+        "sessions",
+    );
+    sessions_document["future_optional"] = json!(true);
+    sessions_document["data"]["future_optional"] = json!("ignored");
+    sessions_document["data"]["freshness"]["future_optional"] = json!(1);
+    sessions_document["data"]["sessions"][0]["future_optional"] = json!(false);
+    let sessions: KnownSessionsDocument = serde_json::from_value(sessions_document).unwrap();
+    assert_eq!(sessions.schema_version, 1);
+    assert_eq!(sessions.command, "sessions");
+    assert_eq!(sessions.data.freshness.state, "recorded");
+    assert!(!sessions.data.sessions.is_empty());
+    for session in &sessions.data.sessions {
+        let _ = (
+            &session.id,
+            &session.created_at,
+            &session.updated_at,
+            &session.cwd,
+            &session.project,
+        );
+    }
+    let _ = fs::remove_file(sessions_store);
+
+    let (store, target, project_root) = rendered_diff_store();
+    let mut optimize_document = parse_json_report(
+        &run_args(&["optimize", "--diff", "--format", "json"], &store),
+        "optimize_diff",
+    );
+    optimize_document["future_optional"] = json!(true);
+    optimize_document["data"]["future_optional"] = json!("ignored");
+    optimize_document["data"]["rendered"][0]["future_optional"] = json!(1);
+    optimize_document["data"]["rendered"][0]["proposal"]["future_optional"] = json!(2);
+    optimize_document["data"]["rendered"][0]["proposal"]["evidence"][0]["future_optional"] =
+        json!(3);
+    if !optimize_document["data"]["skipped"]
+        .as_array()
+        .unwrap()
+        .is_empty()
+    {
+        optimize_document["data"]["skipped"][0]["future_optional"] = json!(4);
+    }
+    let optimize: KnownOptimizeDocument = serde_json::from_value(optimize_document).unwrap();
+    assert_eq!(optimize.schema_version, 1);
+    assert_eq!(optimize.command, "optimize_diff");
+    assert!(!optimize.data.rendered.is_empty());
+    for rendered in &optimize.data.rendered {
+        assert!(!rendered.diff.is_empty());
+        assert_known_proposal(&rendered.proposal);
+    }
+    for skipped in &optimize.data.skipped {
+        let _ = (&skipped.target_path, &skipped.reason);
+        if let Some(proposal) = &skipped.proposal {
+            assert_known_proposal(proposal);
+        }
+    }
+    let pre_render_store = fixture_store();
+    let pre_render_document = parse_json_report(
+        &run_args(
+            &["optimize", "--diff", "--format", "json"],
+            &pre_render_store,
+        ),
+        "optimize_diff",
+    );
+    let pre_render: KnownOptimizeDocument = serde_json::from_value(pre_render_document).unwrap();
+    assert!(pre_render.data.rendered.is_empty());
+    assert!(!pre_render.data.skipped.is_empty());
+    assert!(
+        pre_render
+            .data
+            .skipped
+            .iter()
+            .all(|skipped| skipped.proposal.is_none())
+    );
+    let _ = fs::remove_file(pre_render_store);
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn empty_json_reports_keep_nullable_fields_and_empty_arrays() {
+    let store = empty_store();
+    for args in [
+        &["analyze", "--format", "json"][..],
+        &["sessions", "--format", "json"][..],
+        &["optimize", "--diff", "--format", "json"][..],
+    ] {
+        let document = parse_json_report(
+            &run_args(args, &store),
+            match args[0] {
+                "optimize" => "optimize_diff",
+                command => command,
+            },
+        );
+        let data = &document["data"];
+        match args[0] {
+            "analyze" => {
+                assert!(data["period_start"].is_null());
+                assert!(data["period_end"].is_null());
+                assert_eq!(data["session_count"], 0);
+                assert_eq!(data["freshness"]["state"], "empty");
+                assert!(data["freshness"]["latest_ingested_at"].is_null());
+                assert_eq!(data["groups"], Value::Array(Vec::new()));
+            }
+            "sessions" => assert_eq!(data["sessions"], Value::Array(Vec::new())),
+            "optimize" => {
+                assert_eq!(data["rendered"], Value::Array(Vec::new()));
+                assert_eq!(data["skipped"], Value::Array(Vec::new()));
+            }
+            _ => unreachable!(),
+        }
+    }
+    let _ = fs::remove_file(store);
 }
 
 #[test]

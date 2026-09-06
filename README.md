@@ -43,10 +43,11 @@ billing accuracy.
 The binary is a reporting surface over an existing derived SQLite store. It
 does not create or refresh that store from raw rollout or state inputs. Every
 command accepts `-s, --store PATH`, which defaults to `.codexlens.sqlite`.
-Reports are human-readable and read-only with respect to the supplied store
-and target instruction files. Legacy-store reporting may create a temporary
-migrated copy, which is removed afterward; `optimize --diff` also reads the
-recommended instruction files in order to render a diff.
+Reports are human-readable by default and accept `--format json` for the
+versioned machine-readable schema. Both formats are read-only with respect to
+the supplied store and target instruction files. Legacy-store reporting may
+create a temporary migrated copy, which is removed afterward; `optimize --diff`
+also reads the recommended instruction files in order to render a diff.
 
 | Command | Input | Output purpose | Read-only behavior |
 | --- | --- | --- | --- |
@@ -66,10 +67,11 @@ recommended instruction files in order to render a diff.
 `doctor` accepts the optional `--limit COUNT` to cap findings per scope.
 `optimize` currently requires `--diff`; the command is advisory and
 read-only. `analyze` reports every lens, while the focused analysis commands
-report one lens through the same deterministic report format. Missing or
-invalid stores return a bounded, actionable error. Older supported store
-schemas are migrated only in a temporary copy, leaving the supplied store
-unchanged.
+report one lens through the same deterministic report format. Add
+`--format json` to any reporting command for schema version 1; aliases emit
+their canonical command name. Missing or invalid stores return a bounded,
+actionable error. Older supported store schemas are migrated only in a
+temporary copy, leaving the supplied store unchanged.
 
 The current binary has no ingestion or refresh command. Raw rollout/state
 ingestion remains the adapter and store boundary, and reporting never reopens
@@ -91,6 +93,7 @@ cargo run -- knowledge --store .codexlens.sqlite
 cargo run -- instructions --store .codexlens.sqlite
 cargo run -- doctor --store .codexlens.sqlite
 cargo run -- optimize --diff --store .codexlens.sqlite
+cargo run -- doctor --format json --store .codexlens.sqlite
 ```
 
 The Phase 3 lenses and Phase 4 advisor remain exposed from the
@@ -111,13 +114,13 @@ contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
   the refresh/frozen boundary is documented in
   [docs/specs/post-mvp.md](docs/specs/post-mvp.md), and implementation remains deferred.
   Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
-- Machine-readable output and live monitoring: neither is part of the MVP
-  command surface. Their entry contracts are documented in
+- Live monitoring remains deferred. Its entry contract is documented in
   [docs/specs/post-mvp.md](docs/specs/post-mvp.md). Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 
 ## Status and roadmap
 
-Phases 0 through 4 are complete. The current MVP endpoint is the local,
+Phases 0 through 4 and the versioned JSON reporting work in #59 are complete.
+The current MVP endpoint is the local,
 deterministic reporting surface documented above; future work starts with the
 deferred capabilities rather than an implicit expansion of the boundary.
 

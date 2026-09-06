@@ -4,14 +4,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::analysis::{Finding, FindingScope, bounded_excerpt, sort_findings};
-use crate::model::{CanonicalData, SourceRef};
-use crate::store::StoreFreshness;
+use crate::analysis::{
+    EvidenceRef, EvidenceRole, Finding, FindingScope, VerificationStatus, bounded_excerpt,
+    sort_findings,
+};
+use crate::model::{CanonicalData, SourceKind, SourceRef};
+use crate::store::{FreshnessState, StoreFreshness};
 
-use super::diff::RenderedDiff;
-use super::proposal::{MAX_PROPOSAL_TEXT_BYTES, bounded_evidence, heuristic_for};
+use super::diff::{DiffBatch, RenderedDiff, SkippedProposal};
+use super::proposal::{MAX_PROPOSAL_TEXT_BYTES, Proposal, bounded_evidence, heuristic_for};
 
 const DEFAULT_REPORT_EXCERPT_BYTES: usize = 256;
+// ponytail: cap machine diffs at 16 KiB; add a streamed artifact only when consumers need full patches.
+const MAX_JSON_DIFF_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorOptions {
@@ -48,6 +53,269 @@ pub struct DoctorReport {
     pub freshness: StoreFreshness,
     pub finding_counts: BTreeMap<String, usize>,
     pub groups: Vec<DoctorGroup>,
+}
+
+const JSON_SCHEMA_VERSION: u32 = 1;
+
+pub fn render_json_finding_report(
+    command: &str,
+    report: &DoctorReport,
+) -> Result<String, serde_json::Error> {
+    let groups = report
+        .groups
+        .iter()
+        .map(|group| {
+            serde_json::json!({
+                "scope": scope_json(&group.scope),
+                "findings": group
+                    .findings
+                    .iter()
+                    .map(|reported| finding_json(&reported.finding, &reported.heuristic))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    json_document(
+        command,
+        serde_json::json!({
+            "period_start": report.period_start,
+            "period_end": report.period_end,
+            "session_count": report.session_count,
+            "freshness": freshness_json(&report.freshness),
+            "finding_counts": report.finding_counts,
+            "groups": groups,
+        }),
+    )
+}
+
+pub fn render_json_sessions(
+    data: &CanonicalData,
+    freshness: &StoreFreshness,
+) -> Result<String, serde_json::Error> {
+    let mut sessions = data.sessions.iter().collect::<Vec<_>>();
+    sessions.sort_by(|left, right| left.id.cmp(&right.id));
+    sessions.dedup_by(|left, right| left.id == right.id);
+    json_document(
+        "sessions",
+        serde_json::json!({
+            "freshness": freshness_json(freshness),
+            "sessions": sessions.into_iter().map(|session| {
+                serde_json::json!({
+                    "id": session.id,
+                    "created_at": session.created_at,
+                    "updated_at": session.updated_at,
+                    "cwd": session.cwd,
+                    "project": session.project,
+                })
+            }).collect::<Vec<_>>(),
+        }),
+    )
+}
+
+pub fn render_json_diff(batch: &DiffBatch) -> Result<String, serde_json::Error> {
+    let mut rendered = batch.rendered.iter().collect::<Vec<_>>();
+    rendered.sort_by(|left, right| {
+        left.proposal
+            .target_path
+            .cmp(&right.proposal.target_path)
+            .then_with(|| {
+                left.proposal
+                    .action
+                    .as_str()
+                    .cmp(right.proposal.action.as_str())
+            })
+            .then_with(|| {
+                left.proposal
+                    .observed_problem
+                    .cmp(&right.proposal.observed_problem)
+            })
+    });
+    let mut skipped = batch
+        .skipped
+        .iter()
+        .cloned()
+        .map(|skipped| (skipped, None))
+        .collect::<Vec<(SkippedProposal, Option<&Proposal>)>>();
+    let mut rendered_json = Vec::new();
+    for rendered_diff in rendered {
+        let redacted_diff = bounded_excerpt(&rendered_diff.diff, usize::MAX);
+        if redacted_diff == rendered_diff.diff && redacted_diff.len() <= MAX_JSON_DIFF_BYTES {
+            rendered_json.push(rendered_diff_json(rendered_diff, &redacted_diff));
+        } else {
+            let reason = if redacted_diff != rendered_diff.diff {
+                "rendered diff required redaction and was omitted to keep the unified diff applicable"
+                    .to_owned()
+            } else {
+                format!(
+                    "rendered diff exceeds the {MAX_JSON_DIFF_BYTES}-byte JSON limit and was omitted"
+                )
+            };
+            skipped.push((
+                SkippedProposal {
+                    target_path: rendered_diff.proposal.target_path.clone(),
+                    reason,
+                },
+                Some(&rendered_diff.proposal),
+            ));
+        }
+    }
+    skipped.sort_by(|left, right| {
+        left.0
+            .target_path
+            .cmp(&right.0.target_path)
+            .then_with(|| left.0.reason.cmp(&right.0.reason))
+    });
+    json_document(
+        "optimize_diff",
+        serde_json::json!({
+            "rendered": rendered_json,
+            "skipped": skipped
+                .into_iter()
+                .map(|(skipped, proposal)| {
+                    serde_json::json!({
+                        "target_path": skipped.target_path.to_string_lossy(),
+                        "reason": bounded_excerpt(&skipped.reason, MAX_PROPOSAL_TEXT_BYTES),
+                        "proposal": proposal.map(proposal_json),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        }),
+    )
+}
+
+fn json_document(command: &str, data: serde_json::Value) -> Result<String, serde_json::Error> {
+    let mut output = serde_json::to_string(&serde_json::json!({
+        "schema_version": JSON_SCHEMA_VERSION,
+        "command": command,
+        "data": data,
+    }))?;
+    output.push('\n');
+    Ok(output)
+}
+
+fn freshness_json(freshness: &StoreFreshness) -> serde_json::Value {
+    serde_json::json!({
+        "state": match freshness.state {
+            FreshnessState::Empty => "empty",
+            FreshnessState::Recorded => "recorded",
+        },
+        "source_count": freshness.source_count,
+        "latest_ingested_at": freshness.latest_ingested_at,
+    })
+}
+
+fn scope_json(scope: &FindingScope) -> serde_json::Value {
+    match scope {
+        FindingScope::Global => serde_json::json!({"kind": "global"}),
+        FindingScope::Project(path) => serde_json::json!({
+            "kind": "project",
+            "value": path.to_string_lossy(),
+        }),
+        FindingScope::Instruction(path) => serde_json::json!({
+            "kind": "instruction",
+            "value": path.to_string_lossy(),
+        }),
+        FindingScope::Path(path) => serde_json::json!({
+            "kind": "path",
+            "value": path,
+        }),
+    }
+}
+
+fn finding_json(finding: &Finding, heuristic: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": finding.kind.as_str(),
+        "severity": finding.severity.as_str(),
+        "confidence": finding.confidence.as_str(),
+        "scope": scope_json(&finding.scope),
+        "key": finding.key,
+        "summary": finding.summary,
+        "evidence": finding.evidence.iter().map(evidence_json).collect::<Vec<_>>(),
+        "occurrences": finding.occurrences,
+        "distinct_sessions": finding.distinct_sessions,
+        "affected_paths": finding.affected_paths,
+        "observed_commands": finding.observed_commands,
+        "sequence": finding.sequence,
+        "suggested_action": finding.suggested_action,
+        "limitations": finding.limitations,
+        "verification_status": finding.verification_status.map(VerificationStatus::as_str),
+        "heuristic": heuristic,
+    })
+}
+
+fn evidence_json(evidence: &EvidenceRef) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": evidence.session_id,
+        "source": source_json(&evidence.source),
+        "role": evidence_role(&evidence.role),
+        "excerpt": evidence
+            .excerpt
+            .as_deref()
+            .map(|excerpt| bounded_excerpt(excerpt, MAX_PROPOSAL_TEXT_BYTES)),
+    })
+}
+
+fn source_json(source: &SourceRef) -> serde_json::Value {
+    serde_json::json!({
+        "kind": match source.kind {
+            SourceKind::Rollout => "rollout",
+            SourceKind::State => "state",
+        },
+        "path": source.path.to_string_lossy(),
+        "line": source.line,
+        "ingested_at": source.ingested_at,
+        "parser_schema_version": source.parser_schema_version,
+    })
+}
+
+fn evidence_role(role: &EvidenceRole) -> &'static str {
+    match role {
+        EvidenceRole::Observation => "observation",
+        EvidenceRole::PrecedingAction => "preceding_action",
+        EvidenceRole::FileOperation => "file_operation",
+        EvidenceRole::VerificationCommand => "verification_command",
+        EvidenceRole::InstructionSnapshot => "instruction_snapshot",
+        EvidenceRole::InstructionFile => "instruction_file",
+    }
+}
+
+fn rendered_diff_json(rendered: &RenderedDiff, diff: &str) -> serde_json::Value {
+    serde_json::json!({
+        "proposal": proposal_json(&rendered.proposal),
+        "diff": diff,
+    })
+}
+
+fn proposal_json(proposal: &Proposal) -> serde_json::Value {
+    serde_json::json!({
+        "target_scope": scope_json(&proposal.target_scope),
+        "target_path": proposal.target_path.to_string_lossy(),
+        "action": proposal.action.as_str(),
+        "observed_problem": bounded_excerpt(&proposal.observed_problem, MAX_PROPOSAL_TEXT_BYTES),
+        "evidence_count": proposal.evidence_count,
+        "distinct_sessions": proposal.distinct_sessions,
+        "confidence": proposal.confidence.as_str(),
+        "heuristic": proposal.heuristic,
+        "evidence": proposal.evidence.iter().map(evidence_json).collect::<Vec<_>>(),
+        "proposed_text": proposal
+            .proposed_text
+            .as_deref()
+            .map(|text| bounded_excerpt(text, MAX_PROPOSAL_TEXT_BYTES)),
+        "existing_text": proposal
+            .existing_text
+            .as_deref()
+            .map(|text| bounded_excerpt(text, MAX_PROPOSAL_TEXT_BYTES)),
+        "source_path": proposal.source_path.as_ref().map(|path| path.to_string_lossy()),
+        "expected_target_hash": proposal.expected_target_hash,
+        "expected_source_hash": proposal.expected_source_hash,
+        "target_rationale": bounded_excerpt(&proposal.target_rationale, MAX_PROPOSAL_TEXT_BYTES),
+        "limitations": proposal
+            .limitations
+            .iter()
+            .map(|limitation| bounded_excerpt(limitation, MAX_PROPOSAL_TEXT_BYTES))
+            .collect::<Vec<_>>(),
+        "review_reminder": bounded_excerpt(&proposal.review_reminder, MAX_PROPOSAL_TEXT_BYTES),
+    })
 }
 
 pub fn doctor(
@@ -370,5 +638,23 @@ mod tests {
             heuristic_for(&value),
             "verification outcome was not observed in the available rollout"
         );
+    }
+
+    #[test]
+    fn json_report_keeps_sensitive_excerpts_redacted_and_bounded() {
+        let mut value = finding(FindingScope::Global, FindingType::Failure, None);
+        value.summary = "token=summary-secret".to_owned();
+        value.evidence[0].excerpt = Some("token=evidence-secret".repeat(100));
+        let report = doctor(
+            &CanonicalData::default(),
+            &[value],
+            StoreFreshness::recorded(1, None),
+            &DoctorOptions::default(),
+        );
+        let output = render_json_finding_report("doctor", &report).unwrap();
+        assert!(!output.contains("summary-secret"));
+        assert!(!output.contains("evidence-secret"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.ends_with('\n'));
     }
 }
