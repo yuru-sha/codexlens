@@ -29,6 +29,13 @@ pub struct DiffBatch {
     pub skipped: Vec<SkippedProposal>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedChange {
+    pub(crate) path: PathBuf,
+    pub(crate) before: String,
+    pub(crate) after: String,
+}
+
 #[derive(Debug, Error)]
 pub enum DiffError {
     #[error("invalid proposal: {0}")]
@@ -52,6 +59,11 @@ pub enum DiffError {
 }
 
 pub fn render_diff(proposal: &Proposal) -> Result<String, DiffError> {
+    let changes = prepare_changes(proposal)?;
+    Ok(render_prepared_diff(&changes))
+}
+
+pub(crate) fn prepare_changes(proposal: &Proposal) -> Result<Vec<PreparedChange>, DiffError> {
     proposal.validate()?;
     match proposal.action {
         ProposalAction::Add => {
@@ -66,7 +78,11 @@ pub fn render_diff(proposal: &Proposal) -> Result<String, DiffError> {
                 &current,
                 proposal.proposed_text.as_deref().unwrap_or_default(),
             );
-            Ok(unified_diff(&proposal.target_path, &current, &updated))
+            Ok(vec![PreparedChange {
+                path: proposal.target_path.clone(),
+                before: current,
+                after: updated,
+            }])
         }
         ProposalAction::Modify => {
             let current = read_target(&proposal.target_path)?;
@@ -82,7 +98,11 @@ pub fn render_diff(proposal: &Proposal) -> Result<String, DiffError> {
                 proposal.proposed_text.as_deref().unwrap_or_default(),
                 &proposal.target_path,
             )?;
-            Ok(unified_diff(&proposal.target_path, &current, &updated))
+            Ok(vec![PreparedChange {
+                path: proposal.target_path.clone(),
+                before: current,
+                after: updated,
+            }])
         }
         ProposalAction::Remove => {
             let current = read_target(&proposal.target_path)?;
@@ -98,7 +118,11 @@ pub fn render_diff(proposal: &Proposal) -> Result<String, DiffError> {
                 "",
                 &proposal.target_path,
             )?;
-            Ok(unified_diff(&proposal.target_path, &current, &updated))
+            Ok(vec![PreparedChange {
+                path: proposal.target_path.clone(),
+                before: current,
+                after: updated,
+            }])
         }
         ProposalAction::MoveToDocs | ProposalAction::SplitScope => {
             let source_path = proposal.source_path.as_ref().ok_or_else(|| {
@@ -143,15 +167,27 @@ pub fn render_diff(proposal: &Proposal) -> Result<String, DiffError> {
                 &target,
                 proposal.proposed_text.as_deref().unwrap_or_default(),
             );
-            let mut output = unified_diff(source_path, &source, &source_updated);
-            output.push_str(&unified_diff(
-                &proposal.target_path,
-                &target,
-                &target_updated,
-            ));
-            Ok(output)
+            Ok(vec![
+                PreparedChange {
+                    path: source_path.clone(),
+                    before: source,
+                    after: source_updated,
+                },
+                PreparedChange {
+                    path: proposal.target_path.clone(),
+                    before: target,
+                    after: target_updated,
+                },
+            ])
         }
     }
+}
+
+fn render_prepared_diff(changes: &[PreparedChange]) -> String {
+    changes
+        .iter()
+        .map(|change| unified_diff(&change.path, &change.before, &change.after))
+        .collect()
 }
 
 pub fn render_diffs(proposals: &[Proposal]) -> DiffBatch {

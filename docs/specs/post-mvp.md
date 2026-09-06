@@ -2,16 +2,15 @@
 
 Status: entry contract for future feature issues. The compressed rollout reader
 in section 1, refresh/frozen reporting in section 2, machine-readable output in
-section 3, and live monitoring in section 4 are implemented by issues #57,
-#58, #59, and #60; `optimize --apply` remains deferred.
+section 3, live monitoring in section 4, and safe apply in section 5 are
+implemented by issues #57, #58, #59, #60, and #61.
 
 Issue #53 tracks the capabilities that cross the MVP input, runtime, output,
 or write boundary. A feature issue must select one capability, implement its
 compatibility and privacy tests, and pass the relevant safety checks before it
 changes the current command surface.
 The positive tests below are the acceptance criteria for the implemented
-capabilities and for the future feature issues that implement the remaining
-capabilities.
+capabilities and for future feature issues that extend the current boundaries.
 
 ## Shared boundary
 
@@ -24,7 +23,7 @@ upstream input -> adapter -> canonical records -> derived store -> lens/report
 - Upstream field names stop at the adapter.
 - Raw rollout/state inputs and application source files are source read-only:
   refreshes and reports may read them but never rewrite, rename, truncate,
-  repair, or delete them. The only future write exception is the explicit,
+  repair, or delete them. The only write exception is the explicit,
   validated instruction-target contract in section 5.
 - Processing stays local and deterministic. No network or LLM is required.
 - Missing, malformed, unsupported, and incomplete input is explicit and
@@ -45,10 +44,9 @@ kept explicit:
   `corrupt_compressed_rollout_does_not_block_valid_sibling` cover compressed
   reader parity, bounded corruption handling, incremental replacement, and
   unchanged sources.
-- `refresh_and_frozen_reporting_are_explicit_and_read_only` and
-  `optimize_apply_is_not_currently_exposed` check the refresh boundary and the
-  remaining deferred CLI boundary independently; rejected errors stay bounded
-  and stores stay unchanged.
+- `refresh_and_frozen_reporting_are_explicit_and_read_only` checks the refresh
+  boundary independently; rejected errors stay bounded and stores stay
+  unchanged.
 - `monitor_command_updates_a_local_store_and_honors_max_polls`, together with
   the monitor integration tests, covers partial lines, finite replay,
   restart, rotation/truncation, duplicate identities, state fingerprints, and
@@ -56,6 +54,8 @@ kept explicit:
 - `machine_readable_output_is_versioned_deterministic_and_canonical` and
   `optimize_json_contains_typed_proposals_and_keeps_skips_in_document` cover
   the implemented JSON command shapes and canonical aliases.
+- `optimize_apply_requires_explicit_confirmation` checks the implemented write
+  boundary; rejected confirmation stays bounded and the store stays unchanged.
 - `reporting_is_deterministic_bounded_and_does_not_refresh_or_write` checks
   repeated human-readable output, bounded/redacted evidence, and unchanged
   derived/raw files.
@@ -65,9 +65,8 @@ kept explicit:
   reporting behavior.
 
 The positive compatibility/privacy cases listed in each section are required
-executable tests in the feature issue that introduces that capability. Sections
-1 through 4 are implemented; section 5 retains its deferred boundary until its
-feature issue lands.
+executable tests in the feature issue that introduces or extends that
+capability. Sections 1 through 5 are implemented.
 
 ## 1. Compressed rollout readers
 
@@ -455,9 +454,12 @@ canonical normalization flow.
 
 ## 5. `optimize --apply`
 
+Implementation status: implemented by Issue #61. The contract below remains
+the compatibility and privacy boundary for the command.
+
 ### Scope
 
-Keep `optimize --diff` review-only and read-only. A future `optimize --apply`
+Keep `optimize --diff` review-only and read-only. `optimize --apply`
 may write only the validated proposal write set in the allowed instruction
 scope. For `add`, `modify`, and `remove`, the write set is `target_path`; for
 `move_to_docs` and `split_scope`, it is both `source_path` and `target_path`.

@@ -14,10 +14,11 @@ analytics service, or a general-purpose agent-log platform.
 
 The binary has an explicit refresh workflow for raw rollout/state inputs and a
 read-only reporting surface over the derived SQLite store. Reporting does not
-refresh implicitly, and the binary does not apply advisor proposals. The
-explicit `monitor` command is the local runtime for incremental rollout/state
-observation; it also does not modify raw sources. The supported command surface
-and examples are documented in the [README](../../README.md).
+refresh implicitly, and the explicit `monitor` command is the local runtime
+for incremental rollout/state observation; it also does not modify raw
+sources. Only an explicitly confirmed `optimize --apply` may write its
+validated instruction/documentation targets. The supported command surface and
+examples are documented in the [README](../../README.md).
 
 ## 2. Goals
 
@@ -36,7 +37,8 @@ and examples are documented in the [README](../../README.md).
 
 - Sending prompts, code, or reports to a remote service.
 - Requiring an LLM or making semantic claims that cannot be traced to evidence.
-- Editing `AGENTS.md`, `config.toml`, source files, or rollout files.
+- Editing `config.toml`, source files, rollout files, or state databases, except
+  for the validated instruction/documentation write set of `optimize --apply`.
 - Billing or quota accounting.
 - Hosted monitoring services, background daemons, or network transport.
 - Supporting every historical or future Codex event before it is observed.
@@ -178,7 +180,9 @@ Their contracts and conservative heuristics are defined in
 
 `doctor` is the compact aggregate view. `optimize --diff` groups findings into
 review-only candidate changes and renders unified diffs without writing the
-target files. The other reporting commands select one lens or list stored
+target files. `optimize --apply` revalidates and applies the complete reviewed
+write set transactionally, retaining backups and restoring all changed files
+if any write fails. The other reporting commands select one lens or list stored
 sessions; `analyze` selects all lenses. `rework`/`stuck` and
 `knowledge`/`rediscovery` are command aliases.
 
@@ -195,8 +199,11 @@ Every reporting command also supports explicit `--format json` output using
 schema version 1 from [`post-mvp.md`](post-mvp.md). JSON is one document on
 stdout; diagnostics and operational errors remain on stderr.
 
-`optimize --apply` is out of scope until a separate issue defines backup,
-patch validation, scope checks, recovery behavior, and explicit confirmation.
+The write boundary for `optimize --apply` is the validated instruction-target
+contract in [`post-mvp.md`](post-mvp.md); rollout/state inputs and the derived
+store remain read-only. The command requires explicit confirmation, validates
+the complete write set and expected hashes, retains backups, and rolls back the
+whole batch on failure.
 
 ## 6. Instruction resolution
 
@@ -281,14 +288,14 @@ implementation available in the
    incremental storage.
 3. Instructions: resolver, config settings, and effective snapshots.
 4. Lenses: deterministic findings over stored evidence.
-5. Advisor: `doctor`, proposal generation, and `optimize --diff`.
+5. Advisor: `doctor`, proposal generation, `optimize --diff`, and safe
+   `optimize --apply`.
 
-Phases 0 through 4, including the reporting command integration, are complete
-for the MVP. Phase 5 compressed rollout readers (#57), refresh/`--frozen`
-reporting (#58), versioned JSON output (#59), and live monitoring (#60) are
-implemented. Live monitoring is the explicit local runtime described in [the
-post-MVP contract](post-mvp.md#4-live-monitoring); `optimize --apply` remains
-deliberately deferred.
+Phases 0 through 5, including the reporting command integration, compressed
+rollout readers (#57), refresh/`--frozen` reporting (#58), versioned JSON output
+(#59), live monitoring (#60), and safe apply (#61), are implemented. Live
+monitoring is the explicit local runtime described in [the post-MVP
+contract](post-mvp.md#4-live-monitoring).
 
 Every phase must leave the repository buildable and its behavior covered by
 focused deterministic tests.
