@@ -136,7 +136,8 @@ The parser consumes a reader that yields `(line_number, bytes)`:
 
 - `PlainJsonlReader`: required first;
 - `ZstdJsonlReader`: deferred; current ingestion reports compressed rollout
-  input as unsupported.
+  input as unsupported. The compatibility and privacy gate for adding it is
+  defined in [`post-mvp.md`](post-mvp.md).
 
 Compression support must not leak into normalization or lenses. It is an I/O
 choice. The MVP keeps the plain reader boundary and does not add a compression
