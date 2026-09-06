@@ -486,7 +486,32 @@ fn same_file_identity(left: &Path, right: &Path) -> std::io::Result<bool> {
     Ok(left.dev() == right.dev() && left.ino() == right.ino())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn same_file_identity(left: &Path, right: &Path) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    fn identity(path: &Path) -> std::io::Result<(u32, u64)> {
+        let file = std::fs::File::open(path)?;
+        let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        let succeeded =
+            unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+        if succeeded == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let information = unsafe { information.assume_init() };
+        Ok((
+            information.dwVolumeSerialNumber,
+            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+        ))
+    }
+
+    Ok(identity(left)? == identity(right)?)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn same_file_identity(left: &Path, right: &Path) -> std::io::Result<bool> {
     Ok(fs::canonicalize(left)? == fs::canonicalize(right)?)
 }
@@ -529,13 +554,14 @@ fn load_analysis(options: &StoreOptions) -> Result<(CanonicalData, Vec<Finding>,
 }
 
 fn load_store(options: &StoreOptions) -> Result<(CanonicalData, StoreFreshness)> {
+    let store_display = bounded_display(&options.store);
     if !options.store.is_file() {
-        bail!("store does not exist: {}", options.store.display());
+        bail!("store does not exist: {store_display}");
     }
     let schema_version = Store::read_schema_version(&options.store).with_context(|| {
         format!(
             "failed to inspect derived store {}; provide a valid SQLite store",
-            options.store.display()
+            store_display
         )
     })?;
     let mut migrated_copy = None;
@@ -545,14 +571,11 @@ fn load_store(options: &StoreOptions) -> Result<(CanonicalData, StoreFreshness)>
             let copy = TemporaryStoreCopy::create(&options.store).with_context(|| {
                 format!(
                     "failed to prepare a temporary copy of legacy derived store {}",
-                    options.store.display()
+                    store_display
                 )
             })?;
             let migrated = Store::open(copy.path()).with_context(|| {
-                format!(
-                    "failed to migrate legacy derived store {}",
-                    options.store.display()
-                )
+                format!("failed to migrate legacy derived store {}", store_display)
             })?;
             drop(migrated);
             migrated_copy = Some(copy);
@@ -568,15 +591,15 @@ fn load_store(options: &StoreOptions) -> Result<(CanonicalData, StoreFreshness)>
     let store = Store::open_read_only(report_path).with_context(|| {
         format!(
             "failed to open derived store {}; provide a valid SQLite store",
-            options.store.display()
+            store_display
         )
     })?;
     let data = store
         .load_canonical()
-        .with_context(|| format!("failed to load derived store {}", options.store.display()))?;
+        .with_context(|| format!("failed to load derived store {store_display}"))?;
     let freshness = store
         .freshness()
-        .with_context(|| format!("failed to read freshness for {}", options.store.display()))?;
+        .with_context(|| format!("failed to read freshness for {store_display}"))?;
     Ok((data, freshness))
 }
 

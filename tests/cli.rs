@@ -450,6 +450,41 @@ fn reporting_commands_explain_missing_store() {
 }
 
 #[test]
+fn reporting_errors_bound_long_store_paths() {
+    let root = temp_store_path("reporting-long");
+    let mut parent = root.join("long");
+    for index in 0..4 {
+        parent = parent.join(format!("segment-{index}-{}", "x".repeat(40)));
+    }
+    fs::create_dir_all(&parent).unwrap();
+
+    let missing = parent.join("missing-store-secret-tail.sqlite");
+    for args in REPORTING_COMMANDS {
+        let output = run_args(args, &missing);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        assert!(
+            stderr.contains("store does not exist"),
+            "{args:?}: {stderr}"
+        );
+        assert!(stderr.len() < 512, "{args:?}: {stderr}");
+        assert!(!stderr.contains("secret-tail"), "{args:?}: {stderr}");
+    }
+
+    let invalid = parent.join("invalid-store-secret-tail.sqlite");
+    fs::write(&invalid, b"not a sqlite database").unwrap();
+    for args in REPORTING_COMMANDS {
+        let output = run_args(args, &invalid);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        assert!(stderr.len() < 512, "{args:?}: {stderr}");
+        assert!(!stderr.contains("secret-tail"), "{args:?}: {stderr}");
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn reporting_commands_are_deterministic_and_aliases_match() {
     let store = fixture_store();
     for args in REPORTING_COMMANDS {
@@ -1201,7 +1236,7 @@ fn refresh_protects_turn_context_instruction_sources() {
     let _ = fs::remove_dir_all(home);
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn refresh_rejects_a_hard_link_to_a_raw_input_as_the_derived_store() {
     let (home, source) = refresh_home();
@@ -1224,7 +1259,7 @@ fn refresh_rejects_a_hard_link_to_a_raw_input_as_the_derived_store() {
     let _ = fs::remove_file(store);
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn refresh_rejects_a_hard_link_to_an_instruction_source_as_the_derived_store() {
     let (home, _) = refresh_home();
