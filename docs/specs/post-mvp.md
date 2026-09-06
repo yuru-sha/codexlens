@@ -1,15 +1,14 @@
 # Post-MVP input and reporting contracts
 
-Status: entry contract for future feature issues. The capabilities in this
-document are not implemented by the MVP.
+Status: entry contract for future feature issues. Section 5 is implemented by
+Issue #61; the other capabilities in this document remain deferred.
 
 Issue #53 tracks the capabilities that cross the MVP input, runtime, output,
 or write boundary. A feature issue must select one capability, implement its
 compatibility and privacy tests, and pass the relevant safety checks before it
 changes the current command surface.
-This contract-only document does not close the issue: the positive tests below
-remain acceptance criteria for the feature issues that implement each
-capability.
+For deferred capabilities, the positive tests below remain acceptance criteria
+for the feature issues that implement them.
 
 ## Shared boundary
 
@@ -22,7 +21,7 @@ upstream input -> adapter -> canonical records -> derived store -> lens/report
 - Upstream field names stop at the adapter.
 - Raw rollout/state inputs and application source files are source read-only:
   refreshes and reports may read them but never rewrite, rename, truncate,
-  repair, or delete them. The only future write exception is the explicit,
+  repair, or delete them. The only write exception is the explicit,
   validated instruction-target contract in section 5.
 - Processing stays local and deterministic. No network or LLM is required.
 - Missing, malformed, unsupported, and incomplete input is explicit and
@@ -43,10 +42,11 @@ negative or read-only until a capability issue is explicitly agreed:
   the current unsupported-reader diagnostic, bounded privacy behavior, and
   unchanged compressed source.
 - `refresh_and_frozen_reporting_are_not_currently_exposed`,
-  `machine_readable_output_is_not_currently_exposed`,
-  `live_monitoring_is_not_currently_exposed`, and
-  `optimize_apply_is_not_currently_exposed` check each deferred CLI boundary
+  `machine_readable_output_is_not_currently_exposed`, and
+  `live_monitoring_is_not_currently_exposed` check each deferred CLI boundary
   independently; rejected errors stay bounded and stores stay unchanged.
+- `optimize_apply_requires_explicit_confirmation` checks the implemented write
+  boundary; rejected confirmation stays bounded and the store stays unchanged.
 - `reporting_is_deterministic_bounded_and_does_not_refresh_or_write` checks
   repeated human-readable output, bounded/redacted evidence, and unchanged
   derived/raw files.
@@ -389,9 +389,12 @@ history for the first implementation.
 
 ## 5. `optimize --apply`
 
+Implementation status: implemented by Issue #61. The contract below remains
+the compatibility and privacy boundary for the command.
+
 ### Scope
 
-Keep `optimize --diff` review-only and read-only. A future `optimize --apply`
+Keep `optimize --diff` review-only and read-only. `optimize --apply`
 may write only the validated proposal write set in the allowed instruction
 scope. For `add`, `modify`, and `remove`, the write set is `target_path`; for
 `move_to_docs` and `split_scope`, it is both `source_path` and `target_path`.

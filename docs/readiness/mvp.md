@@ -2,10 +2,10 @@
 
 Status: ready to enter the next feature phase.
 
-Review scope: the refactor and local reporting work through the current MVP
-endpoint. The review checks the architecture, session-format, and analysis
-specifications against the implementation, then verifies the supported CLI
-surface and its boundaries.
+Review scope: the refactor, local reporting work, and safe proposal-apply
+workflow through the current MVP endpoint. The review checks the architecture,
+session-format, analysis, and post-MVP write contract against the implementation,
+then verifies the supported CLI surface and its boundaries.
 
 ## Verification
 
@@ -24,19 +24,21 @@ pass the same matrix before this change is merged.
 
 CLI integration coverage exercises every supported reporting command with
 synthetic stores, including empty and minimal stores, aliases, deterministic
-repeated runs, bounded errors, legacy-store migration, and the read-only
-behavior of `optimize --diff`.
+repeated runs, bounded errors, legacy-store migration, read-only `--diff`, and
+confirmed safe apply behavior.
 
 ## Review result
 
-- The CLI's user-facing reporting surface is limited to canonical-data lenses,
-  derived-store reports, and review-only proposal diffs; ingestion and store
-  APIs remain library boundaries rather than CLI reporting behavior.
+- The CLI's user-facing surface is limited to canonical-data lenses,
+  derived-store reports, review-only proposal diffs, and the explicitly
+  confirmed validated apply workflow; ingestion and store APIs remain library
+  boundaries rather than CLI reporting behavior.
 - Finding and report ordering is deterministic; evidence retains source paths
   and line numbers where available, and reports bound/redact human-facing
   excerpts.
-- Reporting reads the derived store without reopening raw rollout/state input.
-  `optimize --diff` reads target instruction files but never writes them.
+- Reporting and apply read the derived store without reopening raw rollout/state
+  input. `optimize --diff` never writes target instruction files, while
+  `optimize --apply` writes only its validated write set and retains backups.
 - No blocking issue remains for the current MVP reporting path. The
   architecture specification now records that corrections/findings are
   derived in memory; [#54](https://github.com/yuru-sha/codexlens/issues/54)
@@ -45,11 +47,11 @@ behavior of `optimize --diff`.
 
 ## Deferred work
 
-The deferred capabilities and their rationale are tracked in
+The remaining deferred capabilities and their rationale are tracked in
 [#53](https://github.com/yuru-sha/codexlens/issues/53): compressed rollout
-readers, refresh/frozen-mode behavior, machine-readable output, live
-monitoring, and `optimize --apply`. They remain deferred because each expands
-an input, runtime, output, or write boundary that needs its own contract.
+readers, refresh/frozen-mode behavior, machine-readable output, and live
+monitoring. `optimize --apply` is implemented under its agreed write contract
+in [#61](https://github.com/yuru-sha/codexlens/issues/61).
 The entry contracts and required compatibility/privacy test gates are in
 [`docs/specs/post-mvp.md`](../specs/post-mvp.md).
 

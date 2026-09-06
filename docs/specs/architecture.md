@@ -12,9 +12,10 @@ scoped proposal for improving `AGENTS.md` or nearby project documentation.
 The product is an evidence tool, not a replacement for Codex, a hosted
 analytics service, or a general-purpose agent-log platform.
 
-The current binary is a read-only reporting surface over an existing derived
-SQLite store. It does not ingest or refresh raw rollout/state inputs, and it
-does not apply advisor proposals. The supported command surface and examples
+The current binary is a local reporting and safe-apply surface over an existing
+derived SQLite store. It does not ingest or refresh raw rollout/state inputs;
+only an explicitly confirmed `optimize --apply` may write its validated
+instruction/documentation targets. The supported command surface and examples
 are documented in the [README](../../README.md).
 
 ## 2. Goals
@@ -32,7 +33,7 @@ are documented in the [README](../../README.md).
 
 - Sending prompts, code, or reports to a remote service.
 - Requiring an LLM or making semantic claims that cannot be traced to evidence.
-- Editing `AGENTS.md`, `config.toml`, source files, or rollout files.
+- Editing `config.toml`, source files, rollout files, or state databases.
 - Billing or quota accounting.
 - Live monitoring of a running Codex process.
 - Supporting every historical or future Codex event before it is observed.
@@ -169,7 +170,9 @@ Their contracts and conservative heuristics are defined in
 
 `doctor` is the compact aggregate view. `optimize --diff` groups findings into
 review-only candidate changes and renders unified diffs without writing the
-target files. The other reporting commands select one lens or list stored
+target files. `optimize --apply` revalidates and applies the complete reviewed
+write set transactionally, retaining backups and restoring all changed files
+if any write fails. The other reporting commands select one lens or list stored
 sessions; `analyze` selects all lenses. `rework`/`stuck` and
 `knowledge`/`rediscovery` are command aliases.
 
@@ -182,8 +185,9 @@ MVP output must include:
 - links to local source path and line where available;
 - a suggested action that is explicitly a proposal.
 
-`optimize --apply` is out of scope until a separate issue defines backup,
-patch validation, scope checks, recovery behavior, and explicit confirmation.
+The write boundary for `optimize --apply` is the validated instruction-target
+contract in [`post-mvp.md`](post-mvp.md); rollout/state inputs and the derived
+store remain read-only.
 
 ## 6. Instruction resolution
 
@@ -268,11 +272,12 @@ implementation available in the
    incremental storage.
 3. Instructions: resolver, config settings, and effective snapshots.
 4. Lenses: deterministic findings over stored evidence.
-5. Advisor: `doctor`, proposal generation, and `optimize --diff`.
+5. Advisor: `doctor`, proposal generation, `optimize --diff`, and safe
+   `optimize --apply`.
 
-Phases 0 through 4, including the reporting command integration, are complete
-for the MVP. Compressed readers, `--frozen`, machine-readable output, live
-monitoring, and `optimize --apply` remain deliberately deferred.
+Phases 0 through 5, including the reporting command integration and safe apply
+workflow, are complete for the MVP. Compressed readers, `--frozen`,
+machine-readable output, and live monitoring remain deliberately deferred.
 
 Every phase must leave the repository buildable and its behavior covered by
 focused deterministic tests.

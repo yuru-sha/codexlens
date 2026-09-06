@@ -31,7 +31,8 @@ const REPORTING_COMMANDS: &[&[&str]] = &[
 
 fn temp_store_path(label: &str) -> PathBuf {
     let nonce = NEXT_TEMP_STORE.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
+    let base = fs::canonicalize(std::env::temp_dir()).unwrap();
+    let path = base.join(format!(
         "codexlens-cli-{}-{label}-{nonce}.sqlite",
         std::process::id(),
     ));
@@ -282,6 +283,36 @@ fn optimize_diff_renders_a_proposal_without_writing_the_target() {
     assert_eq!(repeated.stdout, output.stdout);
     assert_eq!(repeated.stderr, output.stderr);
     assert_eq!(fs::read_to_string(&target).unwrap(), before);
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn optimize_apply_requires_confirmation_and_applies_only_reviewed_proposals() {
+    let (store, target, project_root) = rendered_diff_store();
+    let before_target = fs::read(&target).unwrap();
+    let before_store = fs::read(&store).unwrap();
+
+    let missing_confirmation = run_args(&["optimize", "--apply"], &store);
+
+    assert!(!missing_confirmation.status.success());
+    assert!(String::from_utf8_lossy(&missing_confirmation.stderr).contains("--yes"));
+    assert_eq!(fs::read(&target).unwrap(), before_target);
+    assert_eq!(fs::read(&store).unwrap(), before_store);
+
+    let applied = run_args(&["optimize", "--apply", "--yes"], &store);
+
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    assert!(String::from_utf8_lossy(&applied.stdout).contains("Applied"));
+    assert!(String::from_utf8_lossy(&applied.stdout).contains("backup"));
+    assert_ne!(fs::read(&target).unwrap(), before_target);
+    assert_eq!(fs::read(&store).unwrap(), before_store);
 
     let _ = fs::remove_file(store);
     let _ = fs::remove_file(target);
@@ -836,6 +867,15 @@ fn live_monitoring_is_not_currently_exposed() {
 }
 
 #[test]
-fn optimize_apply_is_not_currently_exposed() {
-    assert_deferred_surface_is_rejected(&["optimize", "--apply"]);
+fn optimize_apply_requires_explicit_confirmation() {
+    let (store, target, project_root) = rendered_diff_store();
+    let before = fs::read(&store).unwrap();
+    let output = run_args(&["optimize", "--apply"], &store);
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--yes"));
+    assert_eq!(fs::read(&store).unwrap(), before);
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
 }

@@ -214,7 +214,8 @@ inputs.
 
 ## 10. `optimize`
 
-The initial advisor renders proposals only. A proposal must state:
+The advisor renders proposals and can apply only an explicitly confirmed,
+validated proposal batch. A proposal must state:
 
 - target file or scope;
 - observed problem;
@@ -225,11 +226,11 @@ The initial advisor renders proposals only. A proposal must state:
 - limitations and a review reminder.
 
 The current `optimize --diff` command produces a unified diff for high-
-confidence proposals and reports skipped proposals explicitly. `--apply` is
-intentionally excluded until safe write semantics, backups, patch validation,
-scope checks, recovery, and explicit user confirmation are specified. The
-command reads recommended instruction files but never writes, renames, or
-deletes them.
+confidence proposals and reports skipped proposals explicitly. `optimize
+--apply` requires interactive confirmation or `--yes` in non-interactive use,
+then validates the full instruction/documentation write set, re-reads and
+re-hashes every file, creates retained backups, and applies one recoverable
+transaction. It never writes rollout/state inputs or the derived store.
 
 ## 11. Phase 4 advisor contract
 
@@ -269,9 +270,10 @@ Only high-confidence proposals are rendered. Findings do not synthesize
 `modify` or `move_to_docs` proposals because they do not contain an approved
 replacement pair and the docs target has no stored baseline; both actions
 remain available for explicitly constructed, validated proposals.
-The command never writes, renames, or deletes files.
-The future write contract for `optimize --apply` is defined in
-[`post-mvp.md`](post-mvp.md) and is not implied by this review-only command.
+The command never writes, renames, or deletes files in `--diff` mode. The safe
+write contract for `optimize --apply` is defined in
+[`post-mvp.md`](post-mvp.md) and implemented only for validated
+instruction/documentation targets.
 
 ## 12. Deterministic testing
 

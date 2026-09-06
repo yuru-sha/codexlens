@@ -4,8 +4,9 @@ Analyze Codex sessions and turn recurring friction into actionable
 `AGENTS.md` improvements.
 
 > MVP status: local ingestion, instruction capture, deterministic lenses, the
-> advisor, and the read-only reporting CLI are implemented. The binary reads a
-> derived store; it does not ingest raw files or apply proposals.
+> advisor, and the reporting CLI are implemented. The binary reads a derived
+> store; only the explicit, confirmed `optimize --apply` path can update a
+> validated instruction/documentation write set.
 
 ## Goal
 
@@ -35,18 +36,19 @@ The MVP is designed to answer questions such as:
 - What small, scoped instruction change is supported by the evidence?
 
 The MVP is local-only, deterministic, and evidence-backed. It does not send
-session data to a service, require an LLM, modify source files, or claim
-billing accuracy.
+session data to a service, require an LLM, modify source files outside the
+validated instruction/documentation write set, or claim billing accuracy.
 
 ## CLI surface
 
 The binary is a reporting surface over an existing derived SQLite store. It
 does not create or refresh that store from raw rollout or state inputs. Every
 command accepts `-s, --store PATH`, which defaults to `.codexlens.sqlite`.
-Reports are human-readable and read-only with respect to the supplied store
-and target instruction files. Legacy-store reporting may create a temporary
-migrated copy, which is removed afterward; `optimize --diff` also reads the
-recommended instruction files in order to render a diff.
+Reports are human-readable. Reporting remains read-only with respect to the
+supplied store and target files; `optimize --apply` is the explicit write
+exception. Legacy-store reporting may create a temporary migrated copy, which
+is removed afterward; `optimize --diff` also reads the recommended instruction
+files in order to render a diff.
 
 | Command | Input | Output purpose | Read-only behavior |
 | --- | --- | --- | --- |
@@ -62,14 +64,18 @@ recommended instruction files in order to render a diff.
 | `instructions` | derived store | instruction-lens findings | reads the store only |
 | `doctor` | derived store | ranked findings grouped by scope | reads the store only |
 | `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | does not modify the supplied store or target files; legacy stores use a temporary migrated copy |
+| `optimize --apply --yes` | derived store and validated instruction/documentation targets | applies reviewed proposals and reports retained backups/recovery | modifies only the validated write set; never modifies the supplied store or rollout/state inputs |
 
 `doctor` accepts the optional `--limit COUNT` to cap findings per scope.
-`optimize` currently requires `--diff`; the command is advisory and
-read-only. `analyze` reports every lens, while the focused analysis commands
-report one lens through the same deterministic report format. Missing or
-invalid stores return a bounded, actionable error. Older supported store
-schemas are migrated only in a temporary copy, leaving the supplied store
-unchanged.
+`optimize` requires exactly one of `--diff` or `--apply`. `--diff` is advisory
+and read-only. `--apply` requires explicit confirmation; non-interactive use
+must add `--yes` after reviewing the diff. It validates the complete write set,
+re-reads and re-hashes every file, keeps backups after success, and rolls back
+the whole batch on failure. `analyze` reports every lens, while the focused
+analysis commands report one lens through the same deterministic report format.
+Missing or invalid stores return a bounded, actionable error. Older supported
+store schemas are migrated only in a temporary copy, leaving the supplied
+store unchanged.
 
 The current binary has no ingestion or refresh command. Raw rollout/state
 ingestion remains the adapter and store boundary, and reporting never reopens
@@ -93,7 +99,7 @@ cargo run -- doctor --store .codexlens.sqlite
 cargo run -- optimize --diff --store .codexlens.sqlite
 ```
 
-The Phase 3 lenses and Phase 4 advisor remain exposed from the
+The Phase 3 lenses, Phase 4 advisor, and Phase 5 safe apply workflow remain exposed from the
 `codexlens::analysis` and `codexlens::advisor` modules. The lenses consume
 canonical data without reopening source files; the advisor reads only the
 recommended instruction files when rendering diffs. See [the architecture specification](docs/specs/architecture.md),
@@ -103,8 +109,6 @@ contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
 
 ## Deliberately deferred
 
-- `optimize --apply`: requires an explicit write-safety contract, backups,
-  patch validation, scope checks, and confirmation. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 - Compressed rollout readers: plain JSONL is the current reader boundary;
   compressed inputs are reported as unsupported. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 - `--frozen` reporting mode: skipping refresh is not a current CLI behavior;
@@ -117,15 +121,17 @@ contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
 
 ## Status and roadmap
 
-Phases 0 through 4 are complete. The current MVP endpoint is the local,
-deterministic reporting surface documented above; future work starts with the
-deferred capabilities rather than an implicit expansion of the boundary.
+Phases 0 through 5 are complete. The current endpoint is the local,
+deterministic reporting and explicitly confirmed safe-apply surface documented
+above; future work starts with the remaining deferred capabilities rather than
+an implicit expansion of the boundary.
 
 - Phase 0 Foundation: [#1](https://github.com/yuru-sha/codexlens/issues/1)–[#4](https://github.com/yuru-sha/codexlens/issues/4)
 - Phase 1 Codex ingestion: [#5](https://github.com/yuru-sha/codexlens/issues/5)–[#10](https://github.com/yuru-sha/codexlens/issues/10)
 - Phase 2 Instructions: [#11](https://github.com/yuru-sha/codexlens/issues/11)–[#14](https://github.com/yuru-sha/codexlens/issues/14)
 - Phase 3 Lenses: [#15](https://github.com/yuru-sha/codexlens/issues/15)–[#20](https://github.com/yuru-sha/codexlens/issues/20)
 - Phase 4 Advisor: [#21](https://github.com/yuru-sha/codexlens/issues/21)–[#24](https://github.com/yuru-sha/codexlens/issues/24)
+- Phase 5 Safe optimize apply: [#61](https://github.com/yuru-sha/codexlens/issues/61)
 
 ## Development
 
