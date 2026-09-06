@@ -1593,8 +1593,10 @@ fn reporting_command_surface_stays_read_only_and_private() {
     );
 
     let store_before = fs::read(&store).unwrap();
-    let secret_marker = b"synthetic raw secret=must-not-report\n";
-    fs::write(&source, secret_marker).unwrap();
+    let secret_marker = b"synthetic raw secret=must-not-report";
+    let mut source_payload = secret_marker.to_vec();
+    source_payload.push(b'\n');
+    fs::write(&source, source_payload).unwrap();
     let source_before = fs::read(&source).unwrap();
 
     for args in REPORTING_COMMANDS {
