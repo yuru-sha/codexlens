@@ -12,7 +12,9 @@ use crate::model::{CanonicalData, SourceKind, SourceRef};
 use crate::store::{FreshnessState, StoreFreshness};
 
 use super::diff::{DiffBatch, RenderedDiff, SkippedProposal};
-use super::proposal::{MAX_PROPOSAL_TEXT_BYTES, Proposal, bounded_evidence, heuristic_for};
+use super::proposal::{
+    MAX_PROPOSAL_TEXT_BYTES, MAX_REPORT_EVIDENCE, Proposal, bounded_evidence, heuristic_for,
+};
 
 const DEFAULT_REPORT_EXCERPT_BYTES: usize = 256;
 // ponytail: cap machine diffs at 16 KiB; add a streamed artifact only when consumers need full patches.
@@ -424,25 +426,23 @@ fn scope_rank(scope: &FindingScope) -> u8 {
 }
 
 fn sanitize_finding(mut finding: Finding, excerpt_max_bytes: usize) -> Finding {
+    finding.key = bounded_excerpt(&finding.key, excerpt_max_bytes);
     finding.summary = bounded_excerpt(&finding.summary, excerpt_max_bytes);
     finding.suggested_action = bounded_excerpt(&finding.suggested_action, excerpt_max_bytes);
-    finding.observed_commands = finding
-        .observed_commands
-        .iter()
-        .map(|command| bounded_excerpt(command, excerpt_max_bytes))
-        .collect();
-    finding.sequence = finding
-        .sequence
-        .iter()
-        .map(|entry| bounded_excerpt(entry, excerpt_max_bytes))
-        .collect();
-    finding.limitations = finding
-        .limitations
-        .iter()
-        .map(|limitation| bounded_excerpt(limitation, excerpt_max_bytes))
-        .collect();
+    finding.affected_paths = bounded_strings(&finding.affected_paths, excerpt_max_bytes);
+    finding.observed_commands = bounded_strings(&finding.observed_commands, excerpt_max_bytes);
+    finding.sequence = bounded_strings(&finding.sequence, excerpt_max_bytes);
+    finding.limitations = bounded_strings(&finding.limitations, excerpt_max_bytes);
     finding.evidence = bounded_evidence(&finding.evidence, excerpt_max_bytes);
     finding
+}
+
+fn bounded_strings(values: &[String], max_bytes: usize) -> Vec<String> {
+    values
+        .iter()
+        .take(MAX_REPORT_EVIDENCE)
+        .map(|value| bounded_excerpt(value, max_bytes))
+        .collect()
 }
 
 fn period(data: &CanonicalData) -> (Option<String>, Option<String>) {
@@ -586,7 +586,8 @@ pub fn render_proposal_summary(rendered: &RenderedDiff) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::advisor::test_support::finding;
+    use crate::advisor::test_support::{finding, proposal};
+    use crate::advisor::{ProposalAction, RenderedDiff};
     use crate::analysis::{FindingScope, FindingType, VerificationStatus};
     use crate::store::StoreFreshness;
     use std::path::PathBuf;
@@ -656,5 +657,87 @@ mod tests {
         assert!(!output.contains("evidence-secret"));
         assert!(output.contains("[redacted]"));
         assert!(output.ends_with('\n'));
+    }
+
+    #[test]
+    fn json_report_sanitizes_keys_and_bounds_finding_arrays() {
+        let mut value = finding(FindingScope::Global, FindingType::Failure, None);
+        value.key = "token=key-secret".to_owned();
+        value.affected_paths = (0..MAX_REPORT_EVIDENCE + 1)
+            .map(|index| format!("path-{index}"))
+            .collect();
+        value.observed_commands = (0..MAX_REPORT_EVIDENCE + 1)
+            .map(|index| format!("command-{index}"))
+            .collect();
+        value.sequence = (0..MAX_REPORT_EVIDENCE + 1)
+            .map(|index| format!("sequence-{index}"))
+            .collect();
+        value.limitations = (0..MAX_REPORT_EVIDENCE + 1)
+            .map(|index| format!("limitation-{index}"))
+            .collect();
+        let report = doctor(
+            &CanonicalData::default(),
+            &[value],
+            StoreFreshness::recorded(1, None),
+            &DoctorOptions::default(),
+        );
+        let finding = &report.groups[0].findings[0].finding;
+        assert!(!finding.key.contains("key-secret"));
+        assert_eq!(finding.affected_paths.len(), MAX_REPORT_EVIDENCE);
+        assert_eq!(finding.observed_commands.len(), MAX_REPORT_EVIDENCE);
+        assert_eq!(finding.sequence.len(), MAX_REPORT_EVIDENCE);
+        assert_eq!(finding.limitations.len(), MAX_REPORT_EVIDENCE);
+
+        let output = render_json_finding_report("doctor", &report).unwrap();
+        assert!(!output.contains("key-secret"));
+    }
+
+    #[test]
+    fn json_diff_skips_extended_credential_formats() {
+        let diffs = [
+            "Authorization: Bearer bearer-secret\n",
+            "-----BEGIN PRIVATE KEY-----\nprivate-secret\n-----END PRIVATE KEY-----\n",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature-secret\n",
+        ];
+        let rendered = diffs
+            .iter()
+            .enumerate()
+            .map(|(index, diff)| {
+                let path = PathBuf::from(format!("/fixture/{index}.md"));
+                let mut proposal = proposal(&path, ProposalAction::Add);
+                proposal.expected_target_hash = Some("hash".to_owned());
+                RenderedDiff {
+                    proposal,
+                    diff: (*diff).to_owned(),
+                }
+            })
+            .collect();
+        let output = render_json_diff(&DiffBatch {
+            rendered,
+            skipped: Vec::new(),
+        })
+        .unwrap();
+        let document: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(
+            document["data"]["rendered"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        );
+        assert_eq!(
+            document["data"]["skipped"].as_array().unwrap().len(),
+            diffs.len()
+        );
+        for secret in ["bearer-secret", "private-secret", "signature-secret"] {
+            assert!(!output.contains(secret));
+        }
+        assert!(
+            document["data"]["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("redaction")))
+        );
     }
 }
