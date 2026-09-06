@@ -927,6 +927,54 @@ fn corrupt_compressed_rollout_does_not_block_valid_sibling() {
 }
 
 #[test]
+fn unreadable_compressed_replacement_clears_rows_and_recovers() {
+    let source = temp_store_path("recover-compressed").with_extension("jsonl.zst");
+    let source_v1 = br#"{"type":"session_meta","payload":{"id":"fixture-recover-compressed-v1"}}"#;
+    let source_v2 = br#"{"type":"session_meta","payload":{"id":"fixture-recover-compressed-v2"}}"#;
+    write_compressed(&source, source_v1);
+
+    let input = || DiscoveredInput {
+        path: source.clone(),
+        identity: fs::canonicalize(&source).unwrap(),
+        kind: InputKind::Rollout { archived: false },
+        reader: Some(ReaderKind::ZstdJsonl),
+    };
+    let mut store = Store::in_memory().unwrap();
+    let first = store
+        .ingest_inputs(&[input()], &IngestOptions::default())
+        .unwrap();
+    assert_eq!(first.files[0].sessions, 1);
+
+    fs::write(&source, b"synthetic truncated compressed input").unwrap();
+    let failed = store
+        .ingest_inputs(&[input()], &IngestOptions::default())
+        .unwrap();
+    assert!(!failed.files[0].skipped);
+    assert_eq!(failed.files[0].diagnostics, 1);
+    let data = store.load_canonical().unwrap();
+    assert!(data.sessions.is_empty());
+    assert!(data.records.is_empty());
+    assert_eq!(data.diagnostics.len(), 1);
+
+    let second = store
+        .ingest_inputs(&[input()], &IngestOptions::default())
+        .unwrap();
+    assert!(second.files[0].skipped);
+
+    write_compressed(&source, source_v2);
+    let recovered = store
+        .ingest_inputs(&[input()], &IngestOptions::default())
+        .unwrap();
+    assert!(!recovered.files[0].skipped);
+    let data = store.load_canonical().unwrap();
+    assert_eq!(data.sessions.len(), 1);
+    assert_eq!(data.sessions[0].id, "fixture-recover-compressed-v2");
+    assert!(data.diagnostics.is_empty());
+
+    let _ = fs::remove_file(source);
+}
+
+#[test]
 fn reporting_is_deterministic_bounded_and_does_not_refresh_or_write() {
     let store = fixture_store();
     let raw_source = store.with_extension("jsonl");

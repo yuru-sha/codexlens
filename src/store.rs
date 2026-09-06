@@ -689,6 +689,7 @@ impl Store {
         let identity = source_identity.to_string_lossy();
         let timestamp = current_timestamp();
         let transaction = self.connection.transaction()?;
+        delete_source(&transaction, identity.as_ref(), false)?;
         insert_diagnostics(&transaction, identity.as_ref(), diagnostics, &timestamp)?;
         upsert_ingested_file(
             &transaction,
