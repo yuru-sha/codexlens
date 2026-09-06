@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::discovery::ReaderKind;
+
 pub const DEFAULT_MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 256;
 
@@ -104,6 +106,33 @@ impl<R: Read> RolloutLineReader for PlainJsonlReader<R> {
     }
 }
 
+pub struct ZstdJsonlReader<R> {
+    reader: PlainJsonlReader<zstd::stream::read::Decoder<'static, BufReader<R>>>,
+}
+
+impl<R: Read> ZstdJsonlReader<R> {
+    pub fn new(reader: R) -> io::Result<Self> {
+        Self::with_max_line_bytes(reader, DEFAULT_MAX_LINE_BYTES)
+    }
+
+    pub fn with_max_line_bytes(reader: R, max_line_bytes: usize) -> io::Result<Self> {
+        let decoder = zstd::stream::read::Decoder::new(reader)?;
+        Ok(Self {
+            reader: PlainJsonlReader::with_max_line_bytes(decoder, max_line_bytes),
+        })
+    }
+
+    pub fn next_line(&mut self) -> io::Result<Option<ReadLine>> {
+        self.reader.next_line()
+    }
+}
+
+impl<R: Read> RolloutLineReader for ZstdJsonlReader<R> {
+    fn next_line(&mut self) -> io::Result<Option<ReadLine>> {
+        Self::next_line(self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RolloutParseOptions {
     pub max_line_bytes: usize,
@@ -196,25 +225,49 @@ struct RawEnvelope {
 }
 
 pub fn parse_rollout(path: &Path, options: &RolloutParseOptions) -> RolloutParseResult {
+    let reader = if is_zstd_path(path) {
+        ReaderKind::ZstdJsonl
+    } else {
+        ReaderKind::PlainJsonl
+    };
+    parse_rollout_with_reader(path, reader, options)
+}
+
+pub(crate) fn parse_rollout_with_reader(
+    path: &Path,
+    reader: ReaderKind,
+    options: &RolloutParseOptions,
+) -> RolloutParseResult {
+    match reader {
+        ReaderKind::PlainJsonl => parse_plain_rollout(path, options),
+        ReaderKind::ZstdJsonl => parse_zstd_rollout(path, options),
+    }
+}
+
+fn parse_plain_rollout(path: &Path, options: &RolloutParseOptions) -> RolloutParseResult {
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(error) => {
-            return RolloutParseResult {
-                records: Vec::new(),
-                diagnostics: vec![diagnostic(
-                    path,
-                    1,
-                    ParseDiagnosticKind::Unreadable,
-                    error.to_string(),
-                )],
-            };
-        }
+        Err(error) => return unreadable_result(path, error.to_string()),
     };
 
     parse_rollout_reader(
         path,
         PlainJsonlReader::with_max_line_bytes(file, options.max_line_bytes),
     )
+}
+
+pub fn parse_zstd_rollout(path: &Path, options: &RolloutParseOptions) -> RolloutParseResult {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            return unreadable_result(path, error.to_string());
+        }
+    };
+    let reader = match ZstdJsonlReader::with_max_line_bytes(file, options.max_line_bytes) {
+        Ok(reader) => reader,
+        Err(error) => return unreadable_result(path, error.to_string()),
+    };
+    parse_rollout_reader(path, reader)
 }
 
 pub fn parse_rollout_file(path: &Path, options: &RolloutParseOptions) -> RolloutParseResult {
@@ -525,6 +578,23 @@ fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
+fn is_zstd_path(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(".jsonl.zst"))
+}
+
+fn unreadable_result(path: &Path, message: String) -> RolloutParseResult {
+    RolloutParseResult {
+        records: Vec::new(),
+        diagnostics: vec![diagnostic(
+            path,
+            1,
+            ParseDiagnosticKind::Unreadable,
+            message,
+        )],
+    }
+}
+
 fn diagnostic(
     path: &Path,
     line: usize,
@@ -696,5 +766,60 @@ mod tests {
         assert_eq!(result.records.len(), 9);
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(result.diagnostics[0].kind, ParseDiagnosticKind::Unreadable);
+    }
+
+    #[test]
+    fn compressed_reader_matches_plain_reader_stream() {
+        let compressed = zstd::stream::encode_all(Cursor::new(BASIC_FIXTURE), 0).unwrap();
+        let plain = parse_rollout_reader(
+            Path::new("fixture.jsonl"),
+            PlainJsonlReader::new(Cursor::new(BASIC_FIXTURE)),
+        );
+        let compressed = parse_rollout_reader(
+            Path::new("fixture.jsonl"),
+            ZstdJsonlReader::new(Cursor::new(compressed)).unwrap(),
+        );
+
+        assert_eq!(compressed, plain);
+    }
+
+    #[test]
+    fn compressed_reader_keeps_line_bound_and_following_records() {
+        let oversized = format!(
+            "{{\"type\":\"session_meta\",\"payload\":\"{}\"}}",
+            "x".repeat(128)
+        );
+        let input = format!("{{broken\n{oversized}\n{{\"type\":\"world_state\"}}\n");
+        let compressed = zstd::stream::encode_all(Cursor::new(input.into_bytes()), 0).unwrap();
+        let result = parse_rollout_reader(
+            Path::new("bounded.jsonl"),
+            ZstdJsonlReader::with_max_line_bytes(Cursor::new(compressed), 64).unwrap(),
+        );
+
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0].source.line, 3);
+        assert_eq!(result.diagnostics.len(), 2);
+        assert_eq!(
+            result.diagnostics[0].kind,
+            ParseDiagnosticKind::MalformedJson
+        );
+        assert_eq!(
+            result.diagnostics[1].kind,
+            ParseDiagnosticKind::OversizedLine
+        );
+    }
+
+    #[test]
+    fn truncated_compressed_stream_reports_one_bounded_diagnostic() {
+        let mut compressed = zstd::stream::encode_all(Cursor::new(BASIC_FIXTURE), 0).unwrap();
+        compressed.truncate(compressed.len() / 2);
+        let result = parse_rollout_reader(
+            Path::new("truncated.jsonl.zst"),
+            ZstdJsonlReader::new(Cursor::new(compressed)).unwrap(),
+        );
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].kind, ParseDiagnosticKind::Unreadable);
+        assert!(result.diagnostics[0].message.len() <= MAX_DIAGNOSTIC_MESSAGE_BYTES);
     }
 }
