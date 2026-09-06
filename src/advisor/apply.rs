@@ -954,7 +954,13 @@ mod tests {
             )],
         );
 
-        let mut traversal = proposal(&root.join("..").join("x.md"), ProposalAction::Add);
+        let traversal_path = PathBuf::from(format!(
+            "{}{}..{}x.md",
+            root.display(),
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        ));
+        let mut traversal = proposal(&traversal_path, ProposalAction::Add);
         traversal.target_scope = FindingScope::Project(root.clone());
         traversal.expected_target_hash = Some(content_hash(b"old\n"));
         let error = prepare_apply_proposals(&data, &[traversal]).unwrap_err();
