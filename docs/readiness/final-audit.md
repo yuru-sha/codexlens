@@ -1,11 +1,11 @@
 # Final regression and safety audit
 
-Status: local audit passed; audit-branch CI remains the merge gate.
+Status: passed for the Phase 6 release-preparation candidate.
 
-Baseline release candidate: `a7ec8f2a11f8daa21074f686d80b176db92af4da`.
+Release candidate: `a874fbde4b6ac6fe0f624ebe7dc6363ca1e859b2`.
 Observed 2026-09-07 (Asia/Tokyo).
-The audit branch adds no product capability; it records release evidence and
-adds only boundary checks.
+The audit adds no product capability; it records release evidence and adds only
+boundary checks.
 
 ## Quality gates
 
@@ -19,10 +19,9 @@ The audit branch was verified locally on macOS arm64 with Rust 1.92.0:
 | `cargo test --all-features` | PASS — 168 tests, 5 suites |
 | `cargo test --all-features --test cli` | PASS — 40 tests |
 
-The [GitHub Actions run for the baseline candidate](https://github.com/yuru-sha/codexlens/actions/runs/34049913765)
+The [GitHub Actions run for this candidate](https://github.com/yuru-sha/codexlens/actions/runs/34051760663)
 passed all four checks: Ubuntu Rust 1.85.0 and 1.92.0, `macos-latest`, and
-`windows-latest`. This is baseline-only evidence; the audit branch's own CI is
-the final platform gate.
+`windows-latest`.
 
 ## Determinism and privacy
 
@@ -82,6 +81,5 @@ macOS, and Windows hosted runners; Windows hosted-runner build/test coverage is
 the supported verification boundary. No Windows runtime, packaging, or
 installer support is claimed.
 
-No release-blocking finding was observed locally. No speculative feature work
-or follow-up issue was added by this audit; final release status remains gated
-on the audit branch CI.
+No release-blocking finding was observed. No speculative feature work or
+follow-up issue was added by this audit.
