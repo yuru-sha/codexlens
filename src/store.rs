@@ -124,6 +124,8 @@ impl std::fmt::Display for StoreFreshness {
 struct IngestBatchOptions<'a> {
     storage_mode: Option<&'a str>,
     preserve_instruction_snapshots: bool,
+    replace: bool,
+    retracted_file_operations: &'a [FileOperation],
 }
 
 struct RolloutIngestContext<'a> {
@@ -438,6 +440,32 @@ impl Store {
             IngestBatchOptions {
                 storage_mode: (kind == IngestInputKind::State).then_some(STATE_STORAGE_STANDALONE),
                 preserve_instruction_snapshots: false,
+                replace: true,
+                retracted_file_operations: &[],
+            },
+        )
+    }
+
+    pub(crate) fn append_canonical_with_retractions(
+        &mut self,
+        source_path: &Path,
+        kind: IngestInputKind,
+        data: &CanonicalData,
+        retracted_file_operations: &[FileOperation],
+    ) -> Result<IngestSummary> {
+        let identity = canonical_identity(source_path)?;
+        let fingerprint = fingerprint(source_path)?;
+        self.write_batch_with_retractions(
+            source_path,
+            &identity,
+            kind,
+            &fingerprint,
+            data,
+            IngestBatchOptions {
+                storage_mode: (kind == IngestInputKind::State).then_some(STATE_STORAGE_STANDALONE),
+                preserve_instruction_snapshots: false,
+                replace: false,
+                retracted_file_operations,
             },
         )
     }
@@ -492,6 +520,8 @@ impl Store {
             IngestBatchOptions {
                 storage_mode: None,
                 preserve_instruction_snapshots: context.force_refresh && unchanged,
+                replace: true,
+                retracted_file_operations: &[],
             },
         )
     }
@@ -548,6 +578,8 @@ impl Store {
                     STATE_STORAGE_ENRICHMENT
                 }),
                 preserve_instruction_snapshots: false,
+                replace: true,
+                retracted_file_operations: &[],
             },
         )
     }
@@ -587,6 +619,8 @@ impl Store {
             IngestBatchOptions {
                 storage_mode: None,
                 preserve_instruction_snapshots: false,
+                replace: true,
+                retracted_file_operations: &[],
             },
         )
     }
@@ -635,15 +669,56 @@ impl Store {
         data: &CanonicalData,
         options: IngestBatchOptions<'_>,
     ) -> Result<IngestSummary> {
+        self.write_batch(
+            source_path,
+            source_identity,
+            kind,
+            fingerprint,
+            data,
+            options,
+        )
+    }
+
+    fn write_batch(
+        &mut self,
+        source_path: &Path,
+        source_identity: &Path,
+        kind: IngestInputKind,
+        fingerprint: &Fingerprint,
+        data: &CanonicalData,
+        options: IngestBatchOptions<'_>,
+    ) -> Result<IngestSummary> {
+        self.write_batch_with_retractions(
+            source_path,
+            source_identity,
+            kind,
+            fingerprint,
+            data,
+            options,
+        )
+    }
+
+    fn write_batch_with_retractions(
+        &mut self,
+        source_path: &Path,
+        source_identity: &Path,
+        kind: IngestInputKind,
+        fingerprint: &Fingerprint,
+        data: &CanonicalData,
+        options: IngestBatchOptions<'_>,
+    ) -> Result<IngestSummary> {
         let identity = source_identity.to_string_lossy().into_owned();
         let mut stamped_data = data.clone();
         stamp_data(&mut stamped_data, &current_timestamp());
         let transaction = self.connection.transaction()?;
-        delete_source(
-            &transaction,
-            &identity,
-            options.preserve_instruction_snapshots,
-        )?;
+        if options.replace {
+            delete_source(
+                &transaction,
+                &identity,
+                options.preserve_instruction_snapshots,
+            )?;
+        }
+        delete_file_operations(&transaction, &identity, options.retracted_file_operations)?;
         insert_data(
             &transaction,
             &identity,
@@ -1907,6 +1982,35 @@ fn delete_source(
     Ok(())
 }
 
+fn delete_file_operations(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    operations: &[FileOperation],
+) -> rusqlite::Result<()> {
+    for operation in operations {
+        transaction.execute(
+            "DELETE FROM file_operations
+             WHERE source_identity = ?1
+               AND source_path = ?2
+               AND source_line IS ?3
+               AND session_id IS ?4
+               AND turn_id IS ?5
+               AND path = ?6
+               AND operation = ?7",
+            params![
+                identity,
+                operation.provenance.path.to_string_lossy().as_ref(),
+                db_line(operation.provenance.line),
+                operation.session_id,
+                operation.turn_id,
+                operation.path,
+                operation.operation,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn insert_data(
     transaction: &Transaction<'_>,
     identity: &str,
@@ -2518,7 +2622,7 @@ fn capture_options_for_inputs(inputs: &[DiscoveredInput]) -> InstructionCaptureO
         })
 }
 
-fn resolver_for_source(path: &Path) -> InstructionResolver {
+pub(crate) fn resolver_for_source(path: &Path) -> InstructionResolver {
     codex_home_for_source(path)
         .map_or_else(InstructionCaptureOptions::default, |codex_home| {
             InstructionCaptureOptions::from_codex_home(&codex_home, None).0

@@ -15,8 +15,9 @@ analytics service, or a general-purpose agent-log platform.
 The binary has an explicit refresh workflow for raw rollout/state inputs and a
 read-only reporting surface over the derived SQLite store. Reporting does not
 refresh implicitly, and the binary does not apply advisor proposals. The
-supported command surface and examples are documented in the
-[README](../../README.md).
+explicit `monitor` command is the local runtime for incremental rollout/state
+observation; it also does not modify raw sources. The supported command surface
+and examples are documented in the [README](../../README.md).
 
 ## 2. Goals
 
@@ -28,6 +29,8 @@ supported command surface and examples are documented in the
   knowledge with effective instruction snapshots.
 - Produce deterministic, explainable findings with source evidence.
 - Keep all MVP processing local and rule-based.
+- Observe append-only local sources with bounded cursors and deterministic stop
+  boundaries.
 
 ## 3. Non-goals for the MVP
 
@@ -35,7 +38,7 @@ supported command surface and examples are documented in the
 - Requiring an LLM or making semantic claims that cannot be traced to evidence.
 - Editing `AGENTS.md`, `config.toml`, source files, or rollout files.
 - Billing or quota accounting.
-- Live monitoring of a running Codex process.
+- Hosted monitoring services, background daemons, or network transport.
 - Supporting every historical or future Codex event before it is observed.
 - Reusing implementation code from
   [`cclens`](https://github.com/lambdalisue/cclens) or
@@ -63,12 +66,14 @@ Codex local state + project instructions
                          doctor / optimize
 ```
 
-The store is the boundary between ingestion and reporting:
+The store is the boundary between monitoring/ingestion and reporting:
 
 - adapters read files and map them to canonical records;
 - storage persists canonical facts and provenance;
 - lenses read the store and emit findings;
 - reports render findings without reopening raw inputs.
+- the explicit monitor appends complete rollout batches or replaces changed
+  state snapshots without changing raw sources.
 
 Incremental source identity is the canonical path plus byte length, modified
 time when available, and a streaming FNV-1a fingerprint. An unchanged identity
@@ -280,8 +285,10 @@ implementation available in the
 
 Phases 0 through 4, including the reporting command integration, are complete
 for the MVP. Phase 5 compressed rollout readers (#57), refresh/`--frozen`
-reporting (#58), and versioned JSON output (#59) are implemented. Live
-monitoring and `optimize --apply` remain deliberately deferred.
+reporting (#58), versioned JSON output (#59), and live monitoring (#60) are
+implemented. Live monitoring is the explicit local runtime described in [the
+post-MVP contract](post-mvp.md#4-live-monitoring); `optimize --apply` remains
+deliberately deferred.
 
 Every phase must leave the repository buildable and its behavior covered by
 focused deterministic tests.

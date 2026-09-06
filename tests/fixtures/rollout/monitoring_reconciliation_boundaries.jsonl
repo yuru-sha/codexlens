@@ -1,0 +1,8 @@
+{"timestamp":"2026-01-07T00:00:00.000Z","type":"session_meta","payload":{"id":"monitor-reconcile-failure-session","cwd":"/fixture/monitor-reconcile","project":"/fixture/monitor-reconcile"}}
+{"timestamp":"2026-01-07T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"monitor-reconcile-failure-turn","cwd":"/fixture/monitor-reconcile","user_instructions":"Synthetic monitoring instructions."}}
+{"timestamp":"2026-01-07T00:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"monitor-reconcile-failure-call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: src/failed.rs\n*** End Patch"}}
+{"timestamp":"2026-01-07T00:00:03.000Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"monitor-reconcile-failure-call","patch":"*** Update File: src/failed.rs\n*** End Patch","cwd":"/fixture/monitor-reconcile","stderr":"failed","exit_code":1,"status":"failed"}}
+{"timestamp":"2026-01-07T00:01:00.000Z","type":"session_meta","payload":{"id":"monitor-reconcile-no-id-session","cwd":"/fixture/monitor-reconcile","project":"/fixture/monitor-reconcile"}}
+{"timestamp":"2026-01-07T00:01:01.000Z","type":"turn_context","payload":{"turn_id":"monitor-reconcile-no-id-turn","cwd":"/fixture/monitor-reconcile","user_instructions":"Synthetic monitoring instructions."}}
+{"timestamp":"2026-01-07T00:01:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"edit_file","input":{"path":"src/no-id.rs"}}}
+{"timestamp":"2026-01-07T00:01:03.000Z","type":"event_msg","payload":{"type":"patch_apply_end","patch":"*** Update File: src/no-id.rs\n*** End Patch","cwd":"/fixture/monitor-reconcile","stdout":"ok","exit_code":0,"status":"completed"}}

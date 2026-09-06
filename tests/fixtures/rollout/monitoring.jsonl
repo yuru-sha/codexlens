@@ -1,0 +1,5 @@
+{"timestamp":"2026-01-05T00:00:00.000Z","type":"session_meta","payload":{"id":"monitor-session-001","cwd":"/fixture/monitor","project":"/fixture/monitor"}}
+{"timestamp":"2026-01-05T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"monitor-turn-001","cwd":"/fixture/monitor","user_instructions":"Synthetic monitoring instructions."}}
+{"timestamp":"2026-01-05T00:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"monitor-call-001","call_id":"monitor-call-001","name":"exec_command","input":"{\"cmd\":\"cargo test\"}"}}
+{"timestamp":"2026-01-05T00:00:03.000Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"monitor-call-001","turn_id":"monitor-turn-001","command":["cargo","test"],"cwd":"file:///fixture/monitor","stdout":"ok","exit_code":0,"status":"completed"}}
+{"timestamp":"2026-01-05T00:00:04.000Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"monitor-turn-001"}}

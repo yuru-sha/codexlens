@@ -1,9 +1,9 @@
 # Post-MVP input and reporting contracts
 
 Status: entry contract for future feature issues. The compressed rollout reader
-in section 1, refresh/frozen reporting in section 2, and machine-readable
-output in section 3 are implemented by issues #57, #58, and #59; the other
-capabilities remain deferred.
+in section 1, refresh/frozen reporting in section 2, machine-readable output in
+section 3, and live monitoring in section 4 are implemented by issues #57,
+#58, #59, and #60; `optimize --apply` remains deferred.
 
 Issue #53 tracks the capabilities that cross the MVP input, runtime, output,
 or write boundary. A feature issue must select one capability, implement its
@@ -45,11 +45,14 @@ kept explicit:
   `corrupt_compressed_rollout_does_not_block_valid_sibling` cover compressed
   reader parity, bounded corruption handling, incremental replacement, and
   unchanged sources.
-- `refresh_and_frozen_reporting_are_explicit_and_read_only`,
-  `live_monitoring_is_not_currently_exposed`, and
-  `optimize_apply_is_not_currently_exposed` check the refresh boundary and
-  each deferred CLI boundary independently; rejected errors stay bounded and
-  stores stay unchanged.
+- `refresh_and_frozen_reporting_are_explicit_and_read_only` and
+  `optimize_apply_is_not_currently_exposed` check the refresh boundary and the
+  remaining deferred CLI boundary independently; rejected errors stay bounded
+  and stores stay unchanged.
+- `monitor_command_updates_a_local_store_and_honors_max_polls`, together with
+  the monitor integration tests, covers partial lines, finite replay,
+  restart, rotation/truncation, duplicate identities, state fingerprints, and
+  deterministic stop timing.
 - `machine_readable_output_is_versioned_deterministic_and_canonical` and
   `optimize_json_contains_typed_proposals_and_keeps_skips_in_document` cover
   the implemented JSON command shapes and canonical aliases.
@@ -63,8 +66,8 @@ kept explicit:
 
 The positive compatibility/privacy cases listed in each section are required
 executable tests in the feature issue that introduces that capability. Sections
-1 through 3 are implemented; the remaining sections retain their deferred
-boundary until their feature issues land.
+1 through 4 are implemented; section 5 retains its deferred boundary until its
+feature issue lands.
 
 ## 1. Compressed rollout readers
 
@@ -413,6 +416,42 @@ history for the first implementation.
   deletes the observed source.
 - A stopped monitor releases its source handles and does not retain raw
   session payloads beyond the documented derived-store boundary.
+
+Issue #60 implements this section with the explicit local `monitor` command,
+bounded rollout cursors, state fingerprints, and the existing adapter and
+canonical normalization flow.
+
+### Implementation decisions for issue #60
+
+- `monitor --source PATH --kind rollout|state` is the explicit local runtime
+  boundary. `--max-polls` provides a deterministic finite stop boundary for
+  automation; without it the command continues polling locally. `--cursor PATH`
+  persists the bounded cursor at a clean stop and reloads it on the next
+  invocation; the cursor path must not alias the source or derived store.
+- A rollout cursor records the canonical source path, the byte offset after the
+  last complete newline, the physical line and canonical sequence counts, a
+  bounded FNV-1a prefix digest, and a bounded recent identity window. The
+  monitor passes only complete newline-terminated bytes to the existing JSONL
+  adapter, so an incomplete final line remains source data and is retried on
+  the next poll.
+- A source smaller than the recorded offset is a `truncated` transition. A
+  changed prefix at the recorded offset is a `rotated` transition. Both reset
+  the cursor and replace that source's derived rows atomically before reading
+  the new complete prefix; neither transition silently appends old and new
+  generations together.
+- Explicit `event_id`, `record_id`, or `id` values are checked in a bounded
+  recent window. A repeated identity is reported as a diagnostic and skipped;
+  identities older than the configured window are treated as new events.
+- State databases have no line offset. The monitor fingerprints the complete
+  read-only source and reuses the existing state adapter only when that
+  fingerprint changes. Rollout batches append canonical rows to the derived
+  store using the existing normalizer, while session, turn, pending tool-call
+  candidates (including calls without an ID), and recent tool-result
+  correlation context are carried as bounded canonical state rather than raw
+  payloads. Call/result-derived file operations use the same bounded call
+  identity to avoid double counting across poll boundaries. If a later failure
+  invalidates a provisional call-derived operation, the append transaction
+  retracts that operation so live and batch ingestion remain equivalent.
 
 ## 5. `optimize --apply`
 
