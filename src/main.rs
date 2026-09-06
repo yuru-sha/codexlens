@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use codexlens::advisor::{
-    DoctorOptions, doctor, proposals_for_findings, render_diffs, render_doctor, render_json_diff,
-    render_json_finding_report, render_json_sessions, render_proposal_summary,
+    DiffBatch, DoctorOptions, doctor, proposals_for_findings, render_diffs, render_doctor,
+    render_json_diff, render_json_finding_report, render_json_sessions, render_proposal_summary,
 };
 use codexlens::analysis::{
     Finding, analyze_default, corrections, failures, instructions, knowledge, rework, verification,
@@ -130,6 +130,24 @@ enum OutputFormat {
     Json,
 }
 
+impl OutputFormat {
+    fn write_report(
+        self,
+        human: impl FnOnce() -> (String, String),
+        json: impl FnOnce() -> Result<String, serde_json::Error>,
+    ) -> Result<()> {
+        match self {
+            Self::Human => {
+                let (stdout, stderr) = human();
+                print!("{stdout}");
+                eprint!("{stderr}");
+            }
+            Self::Json => print!("{}", json()?),
+        }
+        Ok(())
+    }
+}
+
 struct TemporaryStoreCopy {
     path: PathBuf,
 }
@@ -246,11 +264,10 @@ fn main() -> Result<()> {
         Command::Analyze { store } => run_finding_report(&store, analyze_default, "analyze"),
         Command::Sessions { store } => {
             let (data, freshness) = load_store(&store)?;
-            match store.format {
-                OutputFormat::Human => print!("{}", render_sessions(&data, &freshness)),
-                OutputFormat::Json => print!("{}", render_json_sessions(&data, &freshness)?),
-            }
-            Ok(())
+            store.format.write_report(
+                || (render_sessions(&data, &freshness), String::new()),
+                || render_json_sessions(&data, &freshness),
+            )
         }
         Command::Failures { store } => run_finding_report(&store, failures, "failures"),
         Command::Corrections { store } => run_finding_report(&store, corrections, "corrections"),
@@ -269,13 +286,10 @@ fn main() -> Result<()> {
                     ..DoctorOptions::default()
                 },
             );
-            match store.format {
-                OutputFormat::Human => print!("{}", render_doctor(&report)),
-                OutputFormat::Json => {
-                    print!("{}", render_json_finding_report("doctor", &report)?);
-                }
-            }
-            Ok(())
+            store.format.write_report(
+                || (render_doctor(&report), String::new()),
+                || render_json_finding_report("doctor", &report),
+            )
         }
         Command::Optimize { store, diff } => {
             if !diff {
@@ -290,25 +304,10 @@ fn main() -> Result<()> {
                     .cmp(&right.target_path)
                     .then_with(|| left.reason.cmp(&right.reason))
             });
-            match store.format {
-                OutputFormat::Human => {
-                    for rendered in &batch.rendered {
-                        println!("{}", render_proposal_summary(rendered));
-                    }
-                    for skipped in &batch.skipped {
-                        eprintln!(
-                            "Skipped {}: {}",
-                            skipped.target_path.display(),
-                            skipped.reason
-                        );
-                    }
-                    if batch.rendered.is_empty() && batch.skipped.is_empty() {
-                        println!("No applicable proposals.");
-                    }
-                }
-                OutputFormat::Json => print!("{}", render_json_diff(&batch)?),
-            }
-            Ok(())
+            store.format.write_report(
+                || render_optimize_human(&batch),
+                || render_json_diff(&batch),
+            )
         }
     }
 }
@@ -631,11 +630,30 @@ fn run_finding_report(
 ) -> Result<()> {
     let (data, freshness) = load_store(options)?;
     let report = doctor(&data, &lens(&data), freshness, &DoctorOptions::default());
-    match options.format {
-        OutputFormat::Human => print!("{}", render_doctor(&report)),
-        OutputFormat::Json => print!("{}", render_json_finding_report(command, &report)?),
+    options.format.write_report(
+        || (render_doctor(&report), String::new()),
+        || render_json_finding_report(command, &report),
+    )
+}
+
+fn render_optimize_human(batch: &DiffBatch) -> (String, String) {
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    for rendered in &batch.rendered {
+        stdout.push_str(&render_proposal_summary(rendered));
+        stdout.push('\n');
     }
-    Ok(())
+    for skipped in &batch.skipped {
+        stderr.push_str(&format!(
+            "Skipped {}: {}\n",
+            skipped.target_path.display(),
+            skipped.reason
+        ));
+    }
+    if batch.rendered.is_empty() && batch.skipped.is_empty() {
+        stdout.push_str("No applicable proposals.\n");
+    }
+    (stdout, stderr)
 }
 
 fn render_sessions(data: &CanonicalData, freshness: &StoreFreshness) -> String {
