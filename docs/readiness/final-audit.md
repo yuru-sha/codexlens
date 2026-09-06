@@ -2,7 +2,9 @@
 
 Status: passed for the Phase 6 release-preparation candidate.
 
-Release candidate: the current audit-branch `HEAD`.
+Audited implementation/test candidate: `481cd60b8549273b367dbd364c74fb8a6b70a937`.
+This audit record is a documentation-only follow-up and does not change the
+candidate's product or test code.
 Observed 2026-09-07 (Asia/Tokyo).
 The audit adds no product capability; it records release evidence and adds only
 boundary checks.
@@ -19,9 +21,9 @@ The audit branch was verified locally on macOS arm64 with Rust 1.92.0:
 | `cargo test --all-features` | PASS — 168 tests, 5 suites |
 | `cargo test --all-features --test cli` | PASS — 40 tests |
 
-The [latest GitHub Actions run for this branch](https://github.com/yuru-sha/codexlens/actions/workflows/ci.yml?query=branch%3Afeature%2Fphase-6-perform-final-regression-and-safety-audi)
-passed all four checks: Ubuntu Rust 1.85.0 and 1.92.0, `macos-latest`, and
-`windows-latest`.
+The [GitHub Actions run 34052850062](https://github.com/yuru-sha/codexlens/actions/runs/34052850062)
+for that candidate passed all four checks: Ubuntu Rust 1.85.0 and 1.92.0,
+`macos-latest`, and `windows-latest`.
 
 ## Determinism and privacy
 
