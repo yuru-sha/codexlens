@@ -633,7 +633,12 @@ fn optimize_apply_requires_confirmation_and_applies_only_reviewed_proposals() {
     let missing_confirmation = run_args(&["optimize", "--apply"], &store);
 
     assert!(!missing_confirmation.status.success());
-    assert!(String::from_utf8_lossy(&missing_confirmation.stderr).contains("--yes"));
+    assert!(
+        String::from_utf8_lossy(&missing_confirmation.stderr).contains("--yes"),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&missing_confirmation.stdout),
+        String::from_utf8_lossy(&missing_confirmation.stderr)
+    );
     assert_eq!(fs::read(&target).unwrap(), before_target);
     assert_eq!(fs::read(&store).unwrap(), before_store);
 
@@ -2280,7 +2285,12 @@ fn optimize_apply_requires_explicit_confirmation() {
     let output = run_args(&["optimize", "--apply"], &store);
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--yes"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--yes"),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(fs::read(&store).unwrap(), before);
     let _ = fs::remove_file(store);
     let _ = fs::remove_file(target);
