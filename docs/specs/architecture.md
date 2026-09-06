@@ -12,11 +12,12 @@ scoped proposal for improving `AGENTS.md` or nearby project documentation.
 The product is an evidence tool, not a replacement for Codex, a hosted
 analytics service, or a general-purpose agent-log platform.
 
-The current binary is a local reporting surface over a derived SQLite store.
-Reports are read-only; the explicit `monitor` command is the only runtime that
-reads raw rollout/state inputs and writes derived rows. It does not modify raw
-sources or apply advisor proposals. The supported command surface and examples
-are documented in the [README](../../README.md).
+The binary has an explicit refresh workflow for raw rollout/state inputs and a
+read-only reporting surface over the derived SQLite store. Reporting does not
+refresh implicitly, and the binary does not apply advisor proposals. The
+explicit `monitor` command is the local runtime for incremental rollout/state
+observation; it also does not modify raw sources. The supported command surface
+and examples are documented in the [README](../../README.md).
 
 ## 2. Goals
 
@@ -85,11 +86,14 @@ metadata for rollout normalization and are not stored as separate session rows;
 this keeps one canonical stored session per rollout source. Direct state-only
 ingestion still persists state sessions when explicitly requested.
 
-Reporting commands consume the existing derived store in read-only mode. They
-do not reopen raw rollout/state inputs or refresh the store. Analysis,
-`sessions`, and `doctor` reports make the recorded freshness state visible;
-`optimize --diff` reports proposal and diff state instead. A future `--frozen`
-mode is deferred until a refresh workflow exists.
+The explicit `refresh` command discovers raw rollout/state inputs, captures
+instruction context, and delegates identity, incremental ingest, and
+per-source replacement transactions to the store. Reporting commands consume
+the existing derived store in read-only mode; they do not reopen raw
+rollout/state inputs or refresh the store. `--frozen` makes that store-only
+contract explicit. Analysis, `sessions`, and `doctor` reports make the
+recorded freshness state visible; `optimize --diff` reports proposal and diff
+state instead.
 
 ## 5. Components
 
@@ -98,7 +102,7 @@ mode is deferred until a refresh workflow exists.
 The adapter owns:
 
 - `CODEX_HOME` and file discovery;
-- plain JSONL reading; compressed rollout readers are deferred;
+- plain and compressed JSONL reading;
 - `state_*.sqlite` thread metadata;
 - rollout envelope and event-shape decoding;
 - `AGENTS.md`/override discovery;
@@ -178,7 +182,7 @@ target files. The other reporting commands select one lens or list stored
 sessions; `analyze` selects all lenses. `rework`/`stuck` and
 `knowledge`/`rediscovery` are command aliases.
 
-MVP output must include:
+MVP human-readable output must include:
 
 - finding type and severity;
 - confidence and the heuristic used;
@@ -186,6 +190,10 @@ MVP output must include:
 - counts and distinct session count;
 - links to local source path and line where available;
 - a suggested action that is explicitly a proposal.
+
+Every reporting command also supports explicit `--format json` output using
+schema version 1 from [`post-mvp.md`](post-mvp.md). JSON is one document on
+stdout; diagnostics and operational errors remain on stderr.
 
 `optimize --apply` is out of scope until a separate issue defines backup,
 patch validation, scope checks, recovery behavior, and explicit confirmation.
@@ -276,15 +284,15 @@ implementation available in the
 5. Advisor: `doctor`, proposal generation, and `optimize --diff`.
 
 Phases 0 through 4, including the reporting command integration, are complete
-for the MVP. Live monitoring is implemented as the explicit local runtime
-described in [the post-MVP contract](post-mvp.md#4-live-monitoring).
-Compressed readers, `--frozen`, machine-readable output, and
-`optimize --apply` remain deliberately deferred.
+for the MVP. Phase 5 compressed rollout readers (#57), refresh/`--frozen`
+reporting (#58), versioned JSON output (#59), and live monitoring (#60) are
+implemented. Live monitoring is the explicit local runtime described in [the
+post-MVP contract](post-mvp.md#4-live-monitoring); `optimize --apply` remains
+deliberately deferred.
 
 Every phase must leave the repository buildable and its behavior covered by
 focused deterministic tests.
 
-The deferred input and reporting boundaries are specified in
-[`post-mvp.md`](post-mvp.md). That contract must be selected and accepted by
-a feature issue before compressed input, refresh, machine output, monitoring,
-or proposal application changes this architecture.
+The remaining deferred input and reporting boundaries are specified in
+[`post-mvp.md`](post-mvp.md). Each boundary must be selected and accepted by a
+feature issue before it changes this architecture.

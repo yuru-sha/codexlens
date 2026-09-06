@@ -22,7 +22,9 @@ use crate::model::{
     ToolOutcome, ToolResult, Turn, TurnLifecycleEvent,
 };
 use crate::normalize::{normalize_rollout, normalize_rollout_with_instructions};
-use crate::rollout::{ParseDiagnosticKind, RolloutParseOptions, parse_rollout};
+use crate::rollout::{
+    ParseDiagnosticKind, RolloutParseOptions, parse_rollout, parse_rollout_with_reader,
+};
 use crate::state::{
     StateDiagnostic, StateDiagnosticKind, StateReadResult, merge_state_results, read_state_database,
 };
@@ -125,6 +127,12 @@ struct IngestBatchOptions<'a> {
     replace: bool,
 }
 
+struct RolloutIngestContext<'a> {
+    state_sessions: &'a [Session],
+    force_refresh: bool,
+    resolver: &'a InstructionResolver,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestReport {
     pub files: Vec<IngestSummary>,
@@ -220,7 +228,12 @@ impl Store {
         resolver: &InstructionResolver,
     ) -> Result<IngestSummary> {
         let identity = canonical_identity(path).unwrap_or_else(|_| path.to_path_buf());
-        self.ingest_rollout_at(path, &identity, options, &[], false, resolver)
+        let context = RolloutIngestContext {
+            state_sessions: &[],
+            force_refresh: false,
+            resolver,
+        };
+        self.ingest_rollout_at(path, &identity, None, options, &context)
     }
 
     pub fn ingest_state_database(&mut self, path: &Path) -> Result<IngestSummary> {
@@ -292,11 +305,14 @@ impl Store {
         let mut state_reads = Vec::new();
         let mut state_changed = false;
         let mut state_refresh_blocked = false;
-        let has_plain_rollout = inputs.iter().any(|input| {
+        let has_rollout = inputs.iter().any(|input| {
             matches!(input.kind, InputKind::Rollout { .. })
-                && matches!(input.reader, Some(ReaderKind::PlainJsonl))
+                && matches!(
+                    input.reader,
+                    Some(ReaderKind::PlainJsonl | ReaderKind::ZstdJsonl)
+                )
         });
-        let state_storage_mode = if has_plain_rollout {
+        let state_storage_mode = if has_rollout {
             STATE_STORAGE_ENRICHMENT
         } else {
             STATE_STORAGE_STANDALONE
@@ -353,7 +369,7 @@ impl Store {
                     &identity,
                     &fingerprint,
                     read,
-                    !has_plain_rollout,
+                    !has_rollout,
                     resolver,
                 )?);
             }
@@ -371,30 +387,30 @@ impl Store {
                 .filter(|diagnostic| diagnostic.source.path == input.path)
                 .map(canonical_state_diagnostic)
                 .collect::<Vec<_>>();
-            if !diagnostics.is_empty() {
+            if state_changed {
                 self.persist_diagnostics(&input.identity, &diagnostics)?;
             }
         }
 
+        let context = RolloutIngestContext {
+            state_sessions: &state_sessions,
+            force_refresh: state_changed && !state_refresh_blocked,
+            resolver,
+        };
         for input in inputs {
             let InputKind::Rollout { .. } = input.kind else {
                 continue;
             };
             match input.reader {
-                Some(ReaderKind::PlainJsonl) => report.files.push(self.ingest_rollout_at(
-                    &input.path,
-                    &input.identity,
-                    &options.rollout,
-                    &state_sessions,
-                    state_changed && !state_refresh_blocked,
-                    resolver,
-                )?),
-                Some(ReaderKind::ZstdJsonl) => report.files.push(self.ingest_unsupported(
-                    &input.path,
-                    &input.identity,
-                    IngestInputKind::Rollout,
-                    "compressed rollout input is not supported by the current reader",
-                )?),
+                Some(ReaderKind::PlainJsonl | ReaderKind::ZstdJsonl) => {
+                    report.files.push(self.ingest_rollout_at(
+                        &input.path,
+                        &input.identity,
+                        input.reader,
+                        &options.rollout,
+                        &context,
+                    )?)
+                }
                 None => report.files.push(self.ingest_unsupported(
                     &input.path,
                     &input.identity,
@@ -454,10 +470,9 @@ impl Store {
         &mut self,
         path: &Path,
         identity: &Path,
+        reader: Option<ReaderKind>,
         options: &RolloutParseOptions,
-        state_sessions: &[Session],
-        force_refresh: bool,
-        resolver: &InstructionResolver,
+        context: &RolloutIngestContext<'_>,
     ) -> Result<IngestSummary> {
         let fingerprint = match fingerprint(path) {
             Ok(fingerprint) => fingerprint,
@@ -469,20 +484,29 @@ impl Store {
         };
         let unchanged =
             self.is_unchanged(identity, &fingerprint, IngestInputKind::Rollout, None)?;
-        if !force_refresh && unchanged {
+        if !context.force_refresh && unchanged {
             return Ok(skipped_summary(path.to_path_buf()));
         }
-        let parsed = parse_rollout(path, options);
+        let parsed = reader.map_or_else(
+            || parse_rollout(path, options),
+            |reader| parse_rollout_with_reader(path, reader, options),
+        );
         if parsed
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.kind == ParseDiagnosticKind::Unreadable)
         {
             let data = normalize_rollout(&parsed);
-            self.persist_diagnostics(identity, &data.diagnostics)?;
+            self.persist_rollout_diagnostics_with_fingerprint(
+                path,
+                identity,
+                &fingerprint,
+                &data.diagnostics,
+            )?;
             return Ok(summary_from_data(path.to_path_buf(), &data, false));
         }
-        let data = normalize_rollout_with_instructions(&parsed, state_sessions, resolver);
+        let data =
+            normalize_rollout_with_instructions(&parsed, context.state_sessions, context.resolver);
         self.ingest_batch(
             path,
             identity,
@@ -491,7 +515,7 @@ impl Store {
             &data,
             IngestBatchOptions {
                 storage_mode: None,
-                preserve_instruction_snapshots: force_refresh && unchanged,
+                preserve_instruction_snapshots: context.force_refresh && unchanged,
                 replace: true,
             },
         )
@@ -674,18 +698,13 @@ impl Store {
             &stamped_data,
             options.preserve_instruction_snapshots,
         )?;
-        transaction.execute(
-            "INSERT INTO ingested_files (identity, source_path, input_kind, size, modified_ns, digest, storage_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(identity) DO UPDATE SET source_path = excluded.source_path, input_kind = excluded.input_kind, size = excluded.size, modified_ns = excluded.modified_ns, digest = excluded.digest, storage_mode = excluded.storage_mode",
-            params![
-                identity,
-                source_path.to_string_lossy().as_ref(),
-                kind.as_str(),
-                i64::try_from(fingerprint.size).unwrap_or(i64::MAX),
-                fingerprint.modified_ns.map(|value| value.to_string()),
-                fingerprint.digest.to_string(),
-                options.storage_mode,
-            ],
+        upsert_ingested_file(
+            &transaction,
+            &identity,
+            source_path,
+            kind,
+            fingerprint,
+            options.storage_mode,
         )?;
         transaction.commit()?;
         Ok(summary_from_data(
@@ -703,14 +722,76 @@ impl Store {
         let identity = source_identity.to_string_lossy();
         let timestamp = current_timestamp();
         let transaction = self.connection.transaction()?;
-        for (index, diagnostic) in diagnostics.iter().enumerate() {
-            let mut stamped = diagnostic.clone();
-            stamped.source.stamp_ingest_time(&timestamp);
-            insert_diagnostic(&transaction, identity.as_ref(), &stamped, index)?;
-        }
+        transaction.execute(
+            "DELETE FROM diagnostics WHERE source_identity = ?1",
+            params![identity.as_ref()],
+        )?;
+        insert_diagnostics(&transaction, identity.as_ref(), diagnostics, &timestamp)?;
         transaction.commit()?;
         Ok(())
     }
+
+    fn persist_rollout_diagnostics_with_fingerprint(
+        &mut self,
+        source_path: &Path,
+        source_identity: &Path,
+        fingerprint: &Fingerprint,
+        diagnostics: &[CanonicalDiagnostic],
+    ) -> Result<()> {
+        let identity = source_identity.to_string_lossy();
+        let timestamp = current_timestamp();
+        let transaction = self.connection.transaction()?;
+        delete_source(&transaction, identity.as_ref(), false)?;
+        insert_diagnostics(&transaction, identity.as_ref(), diagnostics, &timestamp)?;
+        upsert_ingested_file(
+            &transaction,
+            identity.as_ref(),
+            source_path,
+            IngestInputKind::Rollout,
+            fingerprint,
+            None,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
+fn insert_diagnostics(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    diagnostics: &[CanonicalDiagnostic],
+    timestamp: &str,
+) -> Result<()> {
+    for (index, diagnostic) in diagnostics.iter().enumerate() {
+        let mut stamped = diagnostic.clone();
+        stamped.source.stamp_ingest_time(timestamp);
+        insert_diagnostic(transaction, identity, &stamped, index)?;
+    }
+    Ok(())
+}
+
+fn upsert_ingested_file(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    source_path: &Path,
+    kind: IngestInputKind,
+    fingerprint: &Fingerprint,
+    storage_mode: Option<&str>,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO ingested_files (identity, source_path, input_kind, size, modified_ns, digest, storage_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(identity) DO UPDATE SET source_path = excluded.source_path, input_kind = excluded.input_kind, size = excluded.size, modified_ns = excluded.modified_ns, digest = excluded.digest, storage_mode = excluded.storage_mode",
+        params![
+            identity,
+            source_path.to_string_lossy().as_ref(),
+            kind.as_str(),
+            i64::try_from(fingerprint.size).unwrap_or(i64::MAX),
+            fingerprint.modified_ns.map(|value| value.to_string()),
+            fingerprint.digest.to_string(),
+            storage_mode,
+        ],
+    )?;
+    Ok(())
 }
 
 fn load_canonical(connection: &Connection) -> Result<CanonicalData> {
@@ -3042,6 +3123,78 @@ mod tests {
             1
         );
         let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn changed_state_recomputes_diagnostics_across_sources() {
+        let first = temp_path("diagnostics-first.sqlite");
+        let second = temp_path("diagnostics-second.sqlite");
+        create_database(
+            &first,
+            include_str!("../tests/fixtures/state/enrichment.sql"),
+        );
+        create_database(
+            &second,
+            include_str!("../tests/fixtures/state/enrichment.sql"),
+        );
+        let second_connection = Connection::open(&second).unwrap();
+        second_connection
+            .execute("UPDATE threads SET project_path = '/state-project-v2'", [])
+            .unwrap();
+        drop(second_connection);
+
+        let inputs = vec![
+            DiscoveredInput {
+                path: first.clone(),
+                identity: fs::canonicalize(&first).unwrap(),
+                kind: InputKind::StateDatabase,
+                reader: None,
+            },
+            DiscoveredInput {
+                path: second.clone(),
+                identity: fs::canonicalize(&second).unwrap(),
+                kind: InputKind::StateDatabase,
+                reader: None,
+            },
+        ];
+        let mut store = Store::in_memory().unwrap();
+        store
+            .ingest_inputs(&inputs, &IngestOptions::default())
+            .unwrap();
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM diagnostics WHERE kind = 'metadata_conflict'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let first_connection = Connection::open(&first).unwrap();
+        first_connection
+            .execute("UPDATE threads SET project_path = '/state-project-v2'", [])
+            .unwrap();
+        drop(first_connection);
+        store
+            .ingest_inputs(&inputs, &IngestOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM diagnostics WHERE kind = 'metadata_conflict'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        let _ = fs::remove_file(first);
+        let _ = fs::remove_file(second);
     }
 
     #[test]
