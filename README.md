@@ -105,8 +105,10 @@ a clean stop for reuse on the next invocation. Use `--kind rollout|state`;
 `--max-polls COUNT` makes a finite run, and omitting it keeps polling at
 `--interval-ms MILLISECONDS` until stopped.
 
-The final MVP readiness review, verification evidence, and next-phase entry
-condition are recorded in [docs/readiness/mvp.md](docs/readiness/mvp.md).
+The final MVP readiness review and next-phase entry condition are recorded in
+[docs/readiness/mvp.md](docs/readiness/mvp.md). The Phase 6 regression and
+safety evidence is recorded in
+[docs/readiness/final-audit.md](docs/readiness/final-audit.md).
 
 The command examples below use an existing derived store at the default path:
 

@@ -505,14 +505,17 @@ fn state_monitor_reingests_only_when_the_read_only_source_changes() {
 
     let mut store = Store::in_memory().unwrap();
     let mut monitor = LocalMonitor::state(&source, None, MonitorOptions::default()).unwrap();
+    let source_before = fs::read(&source).unwrap();
     assert_eq!(
         monitor.poll(&mut store).unwrap().status,
         MonitorStatus::Updated
     );
+    assert_eq!(fs::read(&source).unwrap(), source_before);
     assert_eq!(
         monitor.poll(&mut store).unwrap().status,
         MonitorStatus::Idle
     );
+    assert_eq!(fs::read(&source).unwrap(), source_before);
 
     let connection = Connection::open(&source).unwrap();
     connection
@@ -522,10 +525,12 @@ fn state_monitor_reingests_only_when_the_read_only_source_changes() {
         )
         .unwrap();
     drop(connection);
+    let source_after_update = fs::read(&source).unwrap();
     assert_eq!(
         monitor.poll(&mut store).unwrap().status,
         MonitorStatus::Updated
     );
+    assert_eq!(fs::read(&source).unwrap(), source_after_update);
     assert_eq!(
         store.load_canonical().unwrap().sessions[0]
             .updated_at

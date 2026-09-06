@@ -286,13 +286,34 @@ fn minimal_store() -> PathBuf {
 }
 
 fn run_args(args: &[&str], store: &Path) -> Output {
+    run_args_with_flags(args, &[], store)
+}
+
+fn run_args_with_flags(args: &[&str], flags: &[&str], store: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_codexlens"))
         .args(args)
+        .args(flags)
         .arg("--store")
         .arg(store)
         .stdin(Stdio::null())
         .output()
         .unwrap()
+}
+
+fn assert_file_unchanged(path: &Path, before: &[u8], label: &str) {
+    assert_eq!(fs::read(path).unwrap(), before, "{label} changed");
+}
+
+fn assert_output_omits(output: &Output, marker: &[u8], label: &str) {
+    for (stream, bytes) in [
+        ("stdout", output.stdout.as_slice()),
+        ("stderr", output.stderr.as_slice()),
+    ] {
+        assert!(
+            !bytes.windows(marker.len()).any(|window| window == marker),
+            "{label} leaked the raw marker to {stream}"
+        );
+    }
 }
 
 fn refresh_home() -> (PathBuf, PathBuf) {
@@ -641,6 +662,9 @@ fn optimize_apply_requires_confirmation_and_applies_only_reviewed_proposals() {
     let (store, target, project_root) = rendered_diff_store();
     let before_target = fs::read(&target).unwrap();
     let before_store = fs::read(&store).unwrap();
+    let raw_source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/analysis/lenses.jsonl");
+    let raw_before = fs::read(&raw_source).unwrap();
 
     let missing_confirmation = run_args(&["optimize", "--apply"], &store);
 
@@ -648,6 +672,7 @@ fn optimize_apply_requires_confirmation_and_applies_only_reviewed_proposals() {
     assert!(String::from_utf8_lossy(&missing_confirmation.stderr).contains("--yes"));
     assert_eq!(fs::read(&target).unwrap(), before_target);
     assert_eq!(fs::read(&store).unwrap(), before_store);
+    assert_file_unchanged(&raw_source, &raw_before, "apply raw fixture");
 
     let applied = run_args(&["optimize", "--apply", "--yes"], &store);
 
@@ -656,11 +681,30 @@ fn optimize_apply_requires_confirmation_and_applies_only_reviewed_proposals() {
         "{}",
         String::from_utf8_lossy(&applied.stderr)
     );
-    assert!(String::from_utf8_lossy(&applied.stdout).contains("Applied"));
-    assert!(String::from_utf8_lossy(&applied.stdout).contains("backup"));
+    let applied_stdout = String::from_utf8_lossy(&applied.stdout);
+    assert!(applied_stdout.contains("Applied"));
+    assert!(applied_stdout.contains("backup"));
+    assert!(applied_stdout.contains("Recovery: not needed."));
+    let backup_dir = applied_stdout
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Backups retained at ")
+                .and_then(|path| path.strip_suffix('.'))
+                .map(PathBuf::from)
+        })
+        .expect("apply must report its backup directory");
+    let manifest = fs::read_to_string(backup_dir.join("manifest.tsv")).unwrap();
+    let canonical_target = fs::canonicalize(&target).unwrap();
+    assert!(manifest.contains(&canonical_target.display().to_string()));
+    assert_eq!(
+        fs::read(backup_dir.join("0000.bak")).unwrap(),
+        before_target
+    );
     assert_ne!(fs::read(&target).unwrap(), before_target);
     assert_eq!(fs::read(&store).unwrap(), before_store);
+    assert_file_unchanged(&raw_source, &raw_before, "apply raw fixture");
 
+    let _ = fs::remove_dir_all(backup_dir);
     let _ = fs::remove_file(store);
     let _ = fs::remove_file(target);
     let _ = fs::remove_dir(project_root);
@@ -757,12 +801,14 @@ fn monitor_command_updates_a_local_store_and_honors_max_polls() {
     let source = temp_rollout_path("monitor");
     let store = temp_store_path("monitor-store");
     let cursor = source.with_extension("cursor.json");
+    let secret_marker = b"synthetic raw secret=must-not-report";
     fs::write(
         &source,
-        br#"{"type":"session_meta","payload":{"id":"cli-monitor-session"}}
+        br#"{"type":"session_meta","payload":{"id":"cli-monitor-session","note":"synthetic raw secret=must-not-report"}}
 "#,
     )
     .unwrap();
+    let source_before = fs::read(&source).unwrap();
 
     let output = run_args(
         &[
@@ -781,6 +827,8 @@ fn monitor_command_updates_a_local_store_and_honors_max_polls() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_output_omits(&output, secret_marker, "monitor initial");
+    assert_file_unchanged(&source, &source_before, "monitor initial source");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Monitor Rollout: Updated"), "{stdout}");
     let saved_cursor: codexlens::monitor::MonitorCursor =
@@ -793,6 +841,7 @@ fn monitor_command_updates_a_local_store_and_honors_max_polls() {
         .unwrap()
         .write_all(b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"cli-monitor-session-2\"}}\n")
         .unwrap();
+    let source_after_append = fs::read(&source).unwrap();
     let restarted = run_args(
         &[
             "monitor",
@@ -810,6 +859,8 @@ fn monitor_command_updates_a_local_store_and_honors_max_polls() {
         "{}",
         String::from_utf8_lossy(&restarted.stderr)
     );
+    assert_output_omits(&restarted, secret_marker, "monitor restart");
+    assert_file_unchanged(&source, &source_after_append, "monitor restart source");
     assert!(
         String::from_utf8_lossy(&restarted.stdout).contains("(1 records"),
         "{}",
@@ -1101,6 +1152,41 @@ fn readiness_document_tracks_phase5_completion_and_phase6_entry_condition() {
     }
     assert!(!readiness.contains("## Deferred work"));
     assert!(!readiness.contains("remain deferred"));
+}
+
+#[test]
+fn final_audit_records_release_evidence_and_boundaries() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme = fs::read_to_string(root.join("README.md")).unwrap();
+    let readiness = fs::read_to_string(root.join("docs/readiness/mvp.md")).unwrap();
+    let audit = fs::read_to_string(root.join("docs/readiness/final-audit.md")).unwrap();
+
+    assert!(readme.contains("docs/readiness/final-audit.md"));
+    assert!(readiness.contains("final-audit.md"));
+    for marker in [
+        "cargo fmt --all -- --check",
+        "cargo clippy --all-targets --all-features -- -D warnings",
+        "cargo build --all-features",
+        "cargo test --all-features",
+        "Rust 1.85.0",
+        "Rust 1.92.0",
+        "macos-latest",
+        "windows-latest",
+        "deterministic",
+        "bounded and redacted",
+        "source read-only",
+        "optimize --diff",
+        "optimize --apply",
+        "backup",
+        "recovery",
+        "tests/fixtures",
+        "No speculative feature work",
+    ] {
+        assert!(
+            audit.contains(marker),
+            "missing final-audit marker: {marker}"
+        );
+    }
 }
 
 #[test]
@@ -1539,10 +1625,53 @@ fn reporting_is_deterministic_bounded_and_does_not_refresh_or_write() {
     let stdout = String::from_utf8_lossy(&first.stdout);
     assert_doctor_report(&stdout);
     assert!(!stdout.contains("do-not-report"));
-    assert_eq!(fs::read(&store).unwrap(), store_before);
-    assert_eq!(fs::read(&raw_source).unwrap(), raw_before);
+    assert_file_unchanged(&store, &store_before, "derived store");
+    assert_file_unchanged(&raw_source, &raw_before, "raw source");
 
     let _ = fs::remove_file(raw_source);
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn reporting_command_surface_stays_read_only_and_private() {
+    let (home, source) = refresh_home();
+    let store = temp_store_path("reporting-command-surface");
+    let refreshed = run_refresh(&home, &store);
+    assert!(
+        refreshed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&refreshed.stderr)
+    );
+
+    let store_before = fs::read(&store).unwrap();
+    let secret_marker = b"synthetic raw secret=must-not-report";
+    let mut source_payload = secret_marker.to_vec();
+    source_payload.push(b'\n');
+    fs::write(&source, source_payload).unwrap();
+    let source_before = fs::read(&source).unwrap();
+
+    let variants: &[(&str, &[&str])] = &[
+        ("human", &[]),
+        ("json", &["--format", "json"]),
+        ("frozen", &["--frozen"]),
+        ("frozen json", &["--format", "json", "--frozen"]),
+    ];
+    for args in REPORTING_COMMANDS {
+        for (variant, flags) in variants {
+            let output = run_args_with_flags(args, flags, &store);
+            let label = format!("{args:?} ({variant})");
+            assert!(
+                output.status.success(),
+                "{label}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_output_omits(&output, secret_marker, &label);
+            assert_file_unchanged(&store, &store_before, &format!("{label} store"));
+            assert_file_unchanged(&source, &source_before, &format!("{label} source"));
+        }
+    }
+
+    let _ = fs::remove_dir_all(home);
     let _ = fs::remove_file(store);
 }
 
@@ -1550,6 +1679,14 @@ fn reporting_is_deterministic_bounded_and_does_not_refresh_or_write() {
 fn refresh_and_frozen_reporting_are_explicit_and_read_only() {
     let (home, source) = refresh_home();
     let store = temp_store_path("refresh-store");
+    let secret_marker = b"synthetic raw secret=must-not-report";
+    fs::write(
+        &source,
+        br#"{"type":"session_meta","payload":{"id":"refresh-secret-session","note":"synthetic raw secret=must-not-report"}}
+"#,
+    )
+    .unwrap();
+    let source_before = fs::read(&source).unwrap();
 
     let first = run_refresh(&home, &store);
     assert!(
@@ -1557,6 +1694,8 @@ fn refresh_and_frozen_reporting_are_explicit_and_read_only() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
+    assert_output_omits(&first, secret_marker, "refresh initial");
+    assert_file_unchanged(&source, &source_before, "refresh initial source");
     assert!(String::from_utf8_lossy(&first.stdout).contains("ingested"));
     let first_store = fs::read(&store).unwrap();
 
@@ -1566,6 +1705,8 @@ fn refresh_and_frozen_reporting_are_explicit_and_read_only() {
         "{}",
         String::from_utf8_lossy(&second.stderr)
     );
+    assert_output_omits(&second, secret_marker, "refresh repeat");
+    assert_file_unchanged(&source, &source_before, "refresh repeat source");
     assert!(String::from_utf8_lossy(&second.stdout).contains("skipped"));
     assert_eq!(
         Store::open_read_only(&store)
