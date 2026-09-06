@@ -1,6 +1,7 @@
 //! Validated, transactional proposal application.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -699,11 +700,11 @@ fn create_backups(backup_dir: &Path, paths: &[PathBuf]) -> std::io::Result<Vec<B
 }
 
 fn write_manifest(backup_dir: &Path, backups: &[Backup]) -> std::io::Result<()> {
-    let manifest = backups
-        .iter()
-        .enumerate()
-        .map(|(index, backup)| format!("{index:04}\t{}\n", path_label(&backup.path)))
-        .collect::<String>();
+    let mut manifest = String::new();
+    for (index, backup) in backups.iter().enumerate() {
+        writeln!(&mut manifest, "{index:04}\t{}", path_label(&backup.path))
+            .expect("writing a manifest to String cannot fail");
+    }
     fs::write(backup_dir.join("manifest.tsv"), manifest)
 }
 
