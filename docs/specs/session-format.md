@@ -17,8 +17,8 @@ The adapter discovers, without following symlinks outside an explicit root:
 - `state_*.sqlite` directly under Codex home;
 - `sessions/**/*.jsonl`;
 - optionally `archived_sessions/**` when the user requests archived history;
-- `.jsonl.zst` paths may be discovered, but current ingestion reports
-  compressed input as unsupported.
+- `.jsonl.zst` paths may be discovered and read by the compressed rollout
+  reader.
 
 Discovery is best-effort. A missing state database must not prevent rollout
 ingestion, and a missing rollout must not prevent state metadata ingestion.
@@ -135,13 +135,12 @@ non-empty values remain diagnostics; evidence is not silently overwritten.
 The parser consumes a reader that yields `(line_number, bytes)`:
 
 - `PlainJsonlReader`: required first;
-- `ZstdJsonlReader`: deferred; current ingestion reports compressed rollout
-  input as unsupported. The compatibility and privacy gate for adding it is
-  defined in [`post-mvp.md`](post-mvp.md).
+- `ZstdJsonlReader`: reads the decompressed bytes of a `.jsonl.zst` source
+  through the same bounded line interface.
 
 Compression support must not leak into normalization or lenses. It is an I/O
-choice. The MVP keeps the plain reader boundary and does not add a compression
-dependency until a future compressed-reader issue needs it.
+choice. The compressed source path remains canonical provenance, while its
+compressed bytes are used for incremental change detection.
 
 Large lines must be streamed. The adapter may enforce a configurable maximum
 line size and report an oversized-line diagnostic rather than allocating
