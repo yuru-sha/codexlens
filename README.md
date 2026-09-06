@@ -42,12 +42,13 @@ billing accuracy.
 
 The binary has an explicit refresh workflow and a separate reporting surface
 over the derived SQLite store. Reporting commands accept `-s, --store PATH`,
-which defaults to `.codexlens.sqlite`, and `--frozen` to state that the
-selected store must be used exactly as recorded. Both normal and frozen
-reporting are read-only with respect to raw inputs and never refresh
-implicitly. Legacy-store reporting may create a temporary migrated copy,
-which is removed afterward; `optimize --diff` also reads the recommended
-instruction files in order to render a diff.
+which defaults to `.codexlens.sqlite`, `--frozen` to state that the selected
+store must be used exactly as recorded, and `--format json` for the versioned
+machine-readable schema. Both normal and frozen reporting formats are
+read-only with respect to raw inputs and never refresh implicitly.
+Legacy-store reporting may create a temporary migrated copy, which is removed
+afterward; `optimize --diff` also reads the recommended instruction files in
+order to render a diff.
 
 | Command | Input | Output purpose | Read-only behavior |
 | --- | --- | --- | --- |
@@ -68,10 +69,11 @@ instruction files in order to render a diff.
 `doctor` accepts the optional `--limit COUNT` to cap findings per scope.
 `optimize` currently requires `--diff`; the command is advisory and
 read-only. `analyze` reports every lens, while the focused analysis commands
-report one lens through the same deterministic report format. Missing or
-invalid stores return a bounded, actionable error. Older supported store
-schemas are migrated only in a temporary copy, leaving the supplied store
-unchanged.
+report one lens through the same deterministic report format. Add
+`--format json` to any reporting command for schema version 1; aliases emit
+their canonical command name. Missing or invalid stores return a bounded,
+actionable error. Older supported store schemas are migrated only in a
+temporary copy, leaving the supplied store unchanged.
 
 `refresh` accepts `--codex-home PATH` (or `--home PATH`),
 `--include-archived`, `--config PATH`, and `--store PATH`. Without
@@ -103,6 +105,7 @@ cargo run -- knowledge --store .codexlens.sqlite
 cargo run -- instructions --store .codexlens.sqlite
 cargo run -- doctor --store .codexlens.sqlite
 cargo run -- optimize --diff --store .codexlens.sqlite
+cargo run -- doctor --format json --store .codexlens.sqlite
 ```
 
 The Phase 3 lenses and Phase 4 advisor remain exposed from the
@@ -117,15 +120,14 @@ contracts are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
 
 - `optimize --apply`: requires an explicit write-safety contract, backups,
   patch validation, scope checks, and confirmation. Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
-- Machine-readable output and live monitoring: neither is part of the MVP
-  command surface. Their entry contracts are documented in
+- Live monitoring remains deferred. Its entry contract is documented in
   [docs/specs/post-mvp.md](docs/specs/post-mvp.md). Tracked in [#53](https://github.com/yuru-sha/codexlens/issues/53).
 
 ## Status and roadmap
 
-Phases 0 through 4 are complete. Phase 5 compressed rollout readers (#57) and
-refresh/frozen reporting (#58) are implemented; the remaining deferred
-capabilities are documented above.
+Phases 0 through 4 are complete. Phase 5 compressed rollout readers (#57),
+refresh/frozen reporting (#58), and versioned JSON reporting (#59) are
+implemented; the remaining deferred capabilities are documented above.
 
 - Phase 0 Foundation: [#1](https://github.com/yuru-sha/codexlens/issues/1)–[#4](https://github.com/yuru-sha/codexlens/issues/4)
 - Phase 1 Codex ingestion: [#5](https://github.com/yuru-sha/codexlens/issues/5)–[#10](https://github.com/yuru-sha/codexlens/issues/10)

@@ -1,16 +1,17 @@
 # Post-MVP input and reporting contracts
 
 Status: entry contract for future feature issues. The compressed rollout reader
-in section 1 and refresh/frozen reporting in section 2 are implemented by
-issues #57 and #58; the other capabilities remain deferred.
+in section 1, refresh/frozen reporting in section 2, and machine-readable
+output in section 3 are implemented by issues #57, #58, and #59; the other
+capabilities remain deferred.
 
 Issue #53 tracks the capabilities that cross the MVP input, runtime, output,
 or write boundary. A feature issue must select one capability, implement its
 compatibility and privacy tests, and pass the relevant safety checks before it
 changes the current command surface.
-The positive tests below are the acceptance criteria for the compressed-reader
-and refresh/frozen implementations, and for the future feature issues that
-implement the remaining capabilities.
+The positive tests below are the acceptance criteria for the implemented
+capabilities and for the future feature issues that implement the remaining
+capabilities.
 
 ## Shared boundary
 
@@ -45,10 +46,13 @@ kept explicit:
   reader parity, bounded corruption handling, incremental replacement, and
   unchanged sources.
 - `refresh_and_frozen_reporting_are_explicit_and_read_only`,
-  `machine_readable_output_is_not_currently_exposed`,
   `live_monitoring_is_not_currently_exposed`, and
-  `optimize_apply_is_not_currently_exposed` check each deferred CLI boundary
-  independently; rejected errors stay bounded and stores stay unchanged.
+  `optimize_apply_is_not_currently_exposed` check the refresh boundary and
+  each deferred CLI boundary independently; rejected errors stay bounded and
+  stores stay unchanged.
+- `machine_readable_output_is_versioned_deterministic_and_canonical` and
+  `optimize_json_contains_typed_proposals_and_keeps_skips_in_document` cover
+  the implemented JSON command shapes and canonical aliases.
 - `reporting_is_deterministic_bounded_and_does_not_refresh_or_write` checks
   repeated human-readable output, bounded/redacted evidence, and unchanged
   derived/raw files.
@@ -59,7 +63,7 @@ kept explicit:
 
 The positive compatibility/privacy cases listed in each section are required
 executable tests in the feature issue that introduces that capability. Sections
-1 and 2 are implemented; the remaining sections retain their deferred
+1 through 3 are implemented; the remaining sections retain their deferred
 boundary until their feature issues land.
 
 ## 1. Compressed rollout readers
@@ -155,6 +159,9 @@ workflow that discovers or ingests raw inputs.
 
 ## 3. Machine-readable output
 
+This section is implemented for the supported reporting commands by issue
+#59. The default human-readable output remains unchanged.
+
 ### Scope
 
 Add an explicit `--format json` opt-in to the supported reporting commands.
@@ -187,7 +194,15 @@ The top-level JSON contract is versioned and uses stable snake-case fields:
   `{id, created_at, updated_at, cwd, project}`.
 - `optimize --diff` uses `{rendered, skipped}`, where `rendered` contains the
   typed proposal and unified `diff`, and `skipped` contains
-  `{target_path, reason}`.
+  `{target_path, reason, proposal}`. `proposal` is the typed proposal when a
+  rendered diff was omitted for machine-output safety, and is `null` when the
+  proposal was already skipped before diff rendering.
+
+Machine-readable diffs are redacted before output and are emitted only when
+the complete, unchanged diff is at most 16 KiB. A rendered proposal requiring
+redaction or exceeding the limit is moved to `skipped` with a bounded reason;
+its bounded typed proposal and evidence remain available there. JSON never
+emits a syntactically truncated or redaction-altered unified diff.
 
 All wrapper fields above are required. `string`, `integer`, and `boolean` use
 their JSON primitive types; nullable values are `string | null` or
@@ -249,8 +264,11 @@ cwd: string | null, project: string | null}`. A `RenderedDiff` is
 `source_path: string | null`, `expected_target_hash: string | null`,
 `expected_source_hash: string | null`, `target_rationale: string`,
 `limitations: string[]`, and `review_reminder: string`. A `SkippedProposal` is
-`{target_path: string, reason: string}`. `rendered` and `skipped` are arrays
-of those exact element types.
+`{target_path: string, reason: string, proposal: Proposal | null}`.
+`rendered` and `skipped` are arrays of those exact element types. When a
+rendered proposal is omitted for machine-output safety, `proposal` preserves
+its bounded scope and evidence references so the machine report remains
+comparable with the human proposal summary.
 
 For `optimize --diff`, `action` is `add | modify | remove | move_to_docs |
 split_scope`; all fields are required, including nullable fields, as defined
