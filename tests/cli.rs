@@ -1104,6 +1104,41 @@ fn readiness_document_tracks_phase5_completion_and_phase6_entry_condition() {
 }
 
 #[test]
+fn final_audit_records_release_evidence_and_boundaries() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme = fs::read_to_string(root.join("README.md")).unwrap();
+    let readiness = fs::read_to_string(root.join("docs/readiness/mvp.md")).unwrap();
+    let audit = fs::read_to_string(root.join("docs/readiness/final-audit.md")).unwrap();
+
+    assert!(readme.contains("docs/readiness/final-audit.md"));
+    assert!(readiness.contains("final-audit.md"));
+    for marker in [
+        "cargo fmt --all -- --check",
+        "cargo clippy --all-targets --all-features -- -D warnings",
+        "cargo build --all-features",
+        "cargo test --all-features",
+        "Rust 1.85.0",
+        "Rust 1.92.0",
+        "macos-latest",
+        "windows-latest",
+        "deterministic",
+        "bounded and redacted",
+        "source read-only",
+        "optimize --diff",
+        "optimize --apply",
+        "backup",
+        "recovery",
+        "tests/fixtures",
+        "No speculative feature work",
+    ] {
+        assert!(
+            audit.contains(marker),
+            "missing final-audit marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn readme_documents_current_cli_surface_and_mvp_boundaries() {
     let readme =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
@@ -1543,6 +1578,59 @@ fn reporting_is_deterministic_bounded_and_does_not_refresh_or_write() {
     assert_eq!(fs::read(&raw_source).unwrap(), raw_before);
 
     let _ = fs::remove_file(raw_source);
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn reporting_command_surface_stays_read_only_and_private() {
+    let (home, source) = refresh_home();
+    let store = temp_store_path("reporting-command-surface");
+    let refreshed = run_refresh(&home, &store);
+    assert!(
+        refreshed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&refreshed.stderr)
+    );
+
+    let store_before = fs::read(&store).unwrap();
+    let secret_marker = b"synthetic raw secret=must-not-report\n";
+    fs::write(&source, secret_marker).unwrap();
+    let source_before = fs::read(&source).unwrap();
+
+    for args in REPORTING_COMMANDS {
+        let output = run_args(args, &store);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output
+                .stdout
+                .windows(secret_marker.len())
+                .any(|window| window == secret_marker),
+            "{args:?} leaked the raw marker to stdout"
+        );
+        assert!(
+            !output
+                .stderr
+                .windows(secret_marker.len())
+                .any(|window| window == secret_marker),
+            "{args:?} leaked the raw marker to stderr"
+        );
+        assert_eq!(
+            fs::read(&store).unwrap(),
+            store_before,
+            "{args:?} changed store"
+        );
+        assert_eq!(
+            fs::read(&source).unwrap(),
+            source_before,
+            "{args:?} changed source"
+        );
+    }
+
+    let _ = fs::remove_dir_all(home);
     let _ = fs::remove_file(store);
 }
 

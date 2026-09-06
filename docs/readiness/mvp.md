@@ -25,6 +25,9 @@ repository fixtures and do not require a real Codex home. Windows hosted-runner
 build/test coverage is the verification boundary; no Windows runtime,
 packaging, or installer support is claimed.
 
+The final Phase 6 regression and safety evidence is recorded in
+[final-audit.md](final-audit.md).
+
 CLI integration coverage exercises every supported reporting command with
 synthetic stores, including empty and minimal stores, aliases, deterministic
 repeated runs, bounded errors, legacy-store migration, read-only `--diff`, and
