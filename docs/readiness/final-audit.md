@@ -19,7 +19,7 @@ The audit branch was verified locally on macOS arm64 with Rust 1.92.0:
 | `cargo test --all-features` | PASS — 168 tests, 5 suites |
 | `cargo test --all-features --test cli` | PASS — 40 tests |
 
-The [GitHub Actions run for this candidate](https://github.com/yuru-sha/codexlens/actions/runs/34051760663)
+The [latest GitHub Actions run for this branch](https://github.com/yuru-sha/codexlens/actions/workflows/ci.yml?query=branch%3Afeature%2Fphase-6-perform-final-regression-and-safety-audi)
 passed all four checks: Ubuntu Rust 1.85.0 and 1.92.0, `macos-latest`, and
 `windows-latest`.
 
