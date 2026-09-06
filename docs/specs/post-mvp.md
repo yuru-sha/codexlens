@@ -66,9 +66,9 @@ extensions are kept explicit:
   current deterministic human-readable, bounded-evidence, and read-only
   reporting behavior.
 
-The positive compatibility/privacy cases listed in each section are covered by
-executable tests for the implemented capabilities. Future extensions must add
-the corresponding tests. Sections 1 through 5 are implemented.
+The executable tests cover the primary compatibility and privacy boundaries
+described below. The remaining cases are contract requirements for future
+regression coverage. Sections 1 through 5 are implemented.
 
 ## 1. Compressed rollout readers
 

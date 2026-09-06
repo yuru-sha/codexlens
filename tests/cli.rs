@@ -1220,6 +1220,8 @@ fn post_mvp_contract_spec_tracks_each_implemented_phase5_boundary() {
         "Implementation status: implemented by Issue #60",
         "Implementation status: implemented by Issue #61",
         "Before a future feature issue extends",
+        "primary compatibility and privacy boundaries",
+        "The remaining cases are contract requirements",
     ] {
         assert!(
             spec.contains(marker),
