@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use codexlens::advisor::{
-    DoctorOptions, doctor, proposals_for_findings, render_diffs, render_doctor,
-    render_proposal_summary,
+    DiffBatch, DoctorOptions, doctor, proposals_for_findings, render_diffs, render_doctor,
+    render_json_diff, render_json_finding_report, render_json_sessions, render_proposal_summary,
 };
 use codexlens::analysis::{
     Finding, analyze_default, corrections, failures, instructions, knowledge, rework, verification,
@@ -98,6 +98,8 @@ struct StoreOptions {
         value_name = "PATH"
     )]
     store: PathBuf,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
     #[arg(
         long,
         help = "Read exactly this derived store without refreshing raw inputs"
@@ -120,6 +122,30 @@ struct RefreshOptions {
     include_archived: bool,
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    Human,
+    Json,
+}
+
+impl OutputFormat {
+    fn write_report(
+        self,
+        human: impl FnOnce() -> (String, String),
+        json: impl FnOnce() -> Result<String, serde_json::Error>,
+    ) -> Result<()> {
+        match self {
+            Self::Human => {
+                let (stdout, stderr) = human();
+                print!("{stdout}");
+                eprint!("{stderr}");
+            }
+            Self::Json => print!("{}", json()?),
+        }
+        Ok(())
+    }
 }
 
 struct TemporaryStoreCopy {
@@ -235,18 +261,20 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Refresh { refresh } => run_refresh(&refresh),
-        Command::Analyze { store } => run_finding_report(&store, analyze_default),
+        Command::Analyze { store } => run_finding_report(&store, analyze_default, "analyze"),
         Command::Sessions { store } => {
             let (data, freshness) = load_store(&store)?;
-            print!("{}", render_sessions(&data, &freshness));
-            Ok(())
+            store.format.write_report(
+                || (render_sessions(&data, &freshness), String::new()),
+                || render_json_sessions(&data, &freshness),
+            )
         }
-        Command::Failures { store } => run_finding_report(&store, failures),
-        Command::Corrections { store } => run_finding_report(&store, corrections),
-        Command::Rework { store } => run_finding_report(&store, rework),
-        Command::Verification { store } => run_finding_report(&store, verification),
-        Command::Knowledge { store } => run_finding_report(&store, knowledge),
-        Command::Instructions { store } => run_finding_report(&store, instructions),
+        Command::Failures { store } => run_finding_report(&store, failures, "failures"),
+        Command::Corrections { store } => run_finding_report(&store, corrections, "corrections"),
+        Command::Rework { store } => run_finding_report(&store, rework, "rework"),
+        Command::Verification { store } => run_finding_report(&store, verification, "verification"),
+        Command::Knowledge { store } => run_finding_report(&store, knowledge, "knowledge"),
+        Command::Instructions { store } => run_finding_report(&store, instructions, "instructions"),
         Command::Doctor { store, limit } => {
             let (data, findings, freshness) = load_analysis(&store)?;
             let report = doctor(
@@ -258,8 +286,10 @@ fn main() -> Result<()> {
                     ..DoctorOptions::default()
                 },
             );
-            print!("{}", render_doctor(&report));
-            Ok(())
+            store.format.write_report(
+                || (render_doctor(&report), String::new()),
+                || render_json_finding_report("doctor", &report),
+            )
         }
         Command::Optimize { store, diff } => {
             if !diff {
@@ -274,20 +304,10 @@ fn main() -> Result<()> {
                     .cmp(&right.target_path)
                     .then_with(|| left.reason.cmp(&right.reason))
             });
-            for rendered in &batch.rendered {
-                println!("{}", render_proposal_summary(rendered));
-            }
-            for skipped in &batch.skipped {
-                eprintln!(
-                    "Skipped {}: {}",
-                    skipped.target_path.display(),
-                    skipped.reason
-                );
-            }
-            if batch.rendered.is_empty() && batch.skipped.is_empty() {
-                println!("No applicable proposals.");
-            }
-            Ok(())
+            store.format.write_report(
+                || render_optimize_human(&batch),
+                || render_json_diff(&batch),
+            )
         }
     }
 }
@@ -606,11 +626,34 @@ fn load_store(options: &StoreOptions) -> Result<(CanonicalData, StoreFreshness)>
 fn run_finding_report(
     options: &StoreOptions,
     lens: fn(&CanonicalData) -> Vec<Finding>,
+    command: &str,
 ) -> Result<()> {
     let (data, freshness) = load_store(options)?;
     let report = doctor(&data, &lens(&data), freshness, &DoctorOptions::default());
-    print!("{}", render_doctor(&report));
-    Ok(())
+    options.format.write_report(
+        || (render_doctor(&report), String::new()),
+        || render_json_finding_report(command, &report),
+    )
+}
+
+fn render_optimize_human(batch: &DiffBatch) -> (String, String) {
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    for rendered in &batch.rendered {
+        stdout.push_str(&render_proposal_summary(rendered));
+        stdout.push('\n');
+    }
+    for skipped in &batch.skipped {
+        stderr.push_str(&format!(
+            "Skipped {}: {}\n",
+            skipped.target_path.display(),
+            skipped.reason
+        ));
+    }
+    if batch.rendered.is_empty() && batch.skipped.is_empty() {
+        stdout.push_str("No applicable proposals.\n");
+    }
+    (stdout, stderr)
 }
 
 fn render_sessions(data: &CanonicalData, freshness: &StoreFreshness) -> String {
@@ -646,7 +689,7 @@ fn render_sessions(data: &CanonicalData, freshness: &StoreFreshness) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use super::{Cli, Command, OutputFormat};
     use clap::Parser;
 
     #[test]
@@ -687,5 +730,14 @@ mod tests {
             Cli::try_parse_from(["codexlens", command, "--store", "fixture.sqlite"]).unwrap();
         }
         Cli::try_parse_from(["codexlens", "doctor", "--frozen"]).unwrap();
+    }
+
+    #[test]
+    fn reporting_commands_accept_json_format() {
+        let cli = Cli::try_parse_from(["codexlens", "analyze", "--format", "json"]).unwrap();
+        let Command::Analyze { store } = cli.command else {
+            panic!("expected analyze command");
+        };
+        assert_eq!(store.format, OutputFormat::Json);
     }
 }

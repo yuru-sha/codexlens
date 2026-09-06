@@ -202,8 +202,9 @@ snapshot is unavailable; it should say that comparison is inconclusive.
 The output is useful without a database query. It includes the analyzed
 period, session count, freshness, finding counts, and a bounded evidence
 sample. The `codexlens doctor` command accepts an optional `--limit COUNT` to
-cap findings per scope. Machine-readable output is a later CLI issue and must
-keep stdout free of progress text.
+cap findings per scope. All reporting commands also accept explicit
+`--format json` output; the versioned schema keeps stdout free of progress
+text and sends diagnostics and operational errors to stderr.
 
 The `analyze` command renders all lens findings. `failures`, `corrections`,
 `rework`, `verification`, `knowledge`, and `instructions` render one lens
