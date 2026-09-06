@@ -323,7 +323,7 @@ fn run_refresh(options: &RefreshOptions) -> Result<()> {
     let (capture, config) =
         InstructionCaptureOptions::from_codex_home(&codex_home, options.config.as_deref());
     let instruction_paths =
-        protected_instruction_paths(&codex_home, &all_raw_inputs, &capture, &config.path);
+        protected_instruction_paths(&codex_home, &discovery.inputs, &capture, &config.path);
     reject_protected_store_path(&options.store, &all_raw_inputs, &instruction_paths)?;
     let staged = AtomicRefreshStore::create(&options.store).with_context(|| {
         format!(
