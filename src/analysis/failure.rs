@@ -3,13 +3,16 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::model::{CanonicalData, OutcomeSource, SourceRef, ToolOutcome, ToolResult};
+use crate::model::{OutcomeSource, SourceRef, ToolOutcome, ToolResult};
+
+#[cfg(test)]
+use crate::model::CanonicalData;
 
 use super::{
-    Activity, ActivityKind, AnalysisOptions, DEFAULT_EXCERPT_BYTES, DEFAULT_MIN_OCCURRENCES,
-    DEFAULT_MIN_SESSIONS, EvidenceRole, Finding, FindingConfidence, FindingSeverity, FindingType,
-    annotate_snapshot_limitations, bounded_excerpt, command_tokens, distinct_sessions,
-    evidence_for, majority_scope, matching_call, normalize_fragment, position_for_source,
+    Activity, ActivityKind, AnalysisContext, AnalysisOptions, DEFAULT_EXCERPT_BYTES,
+    DEFAULT_MIN_OCCURRENCES, DEFAULT_MIN_SESSIONS, EvidenceRole, Finding, FindingConfidence,
+    FindingSeverity, FindingType, annotate_snapshot_limitations, bounded_excerpt, command_tokens,
+    distinct_sessions, evidence_for, majority_scope, normalize_fragment, position_for_source,
     push_evidence, redact_sensitive, sort_findings, strip_command_wrappers,
 };
 
@@ -83,7 +86,7 @@ fn normalize_tool(tool: &str) -> String {
     }
 }
 
-pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
+pub(super) fn analyze(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> Vec<Finding> {
     let mut grouped: BTreeMap<String, Vec<FailureEvent>> = BTreeMap::new();
     for event in failure_events(data) {
         grouped.entry(event.key.clone()).or_default().push(event);
@@ -162,7 +165,7 @@ pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Fi
     findings
 }
 
-pub(super) fn activities(data: &CanonicalData) -> Vec<Activity> {
+pub(super) fn activities(data: &AnalysisContext<'_>) -> Vec<Activity> {
     failure_events(data)
         .into_iter()
         .map(|event| Activity {
@@ -184,7 +187,7 @@ pub(super) fn is_failed(result: &ToolResult) -> bool {
     result.outcome == ToolOutcome::Failed || result.status.as_deref().is_some_and(status_is_failed)
 }
 
-fn failure_events(data: &CanonicalData) -> Vec<FailureEvent> {
+fn failure_events(data: &AnalysisContext<'_>) -> Vec<FailureEvent> {
     let mut events = Vec::new();
     for result in &data.tool_results {
         if result.is_duplicate || !is_failed(result) {
@@ -193,7 +196,7 @@ fn failure_events(data: &CanonicalData) -> Vec<FailureEvent> {
         let Some(session_id) = result.session_id.clone() else {
             continue;
         };
-        let call = matching_call(data, result);
+        let call = data.matching_call(result);
         let tool = call
             .and_then(|call| call.tool_name.as_deref())
             .map(normalize_tool)
@@ -351,7 +354,8 @@ mod tests {
             result.outcome = ToolOutcome::Failed;
             result.outcome_source = OutcomeSource::OutputText;
         }
-        let events = failure_events(&output_only)
+        let context = AnalysisContext::new(&output_only);
+        let events = failure_events(&context)
             .into_iter()
             .filter(|event| event.tool != "event")
             .collect::<Vec<_>>();
@@ -366,7 +370,7 @@ mod tests {
             result.outcome_source = OutcomeSource::Unknown;
         }
         assert!(
-            !failure_events(&status_only)
+            !failure_events(&AnalysisContext::new(&status_only))
                 .into_iter()
                 .filter(|event| event.tool != "event")
                 .collect::<Vec<_>>()

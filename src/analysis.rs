@@ -5,8 +5,9 @@
 //! adapter boundary and makes every lens deterministic for the same input.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
 use crate::model::{
     CanonicalData, InstructionJoin, InstructionSnapshot, SourceRef, ToolCall, ToolResult,
@@ -56,6 +57,116 @@ pub const DISCOVERY_MARKERS: &[&str] = &[
 const DEFAULT_MAX_EVIDENCE: usize = 12;
 const MAX_FACT_KEY_BYTES: usize = 128;
 const MISSING_SNAPSHOT_LIMITATION: &str = "An instruction snapshot was unavailable for at least one supporting session, so instruction comparison is inconclusive";
+
+type SourceKey<'a> = (&'a Path, Option<usize>);
+type CallContextKey<'a> = (Option<&'a str>, Option<&'a str>);
+
+struct AnalysisContext<'a> {
+    data: &'a CanonicalData,
+    record_positions: HashMap<SourceKey<'a>, (Option<i64>, usize)>,
+    calls_by_id: HashMap<&'a str, Vec<&'a ToolCall>>,
+    results_by_call_id: HashMap<&'a str, Vec<&'a ToolResult>>,
+    no_id_call_counts: HashMap<CallContextKey<'a>, usize>,
+    no_id_result_counts: HashMap<CallContextKey<'a>, usize>,
+}
+
+impl<'a> AnalysisContext<'a> {
+    fn new(data: &'a CanonicalData) -> Self {
+        let mut record_positions = HashMap::with_capacity(data.records.len());
+        for record in &data.records {
+            record_positions
+                .entry(source_key(&record.provenance))
+                .or_insert((
+                    record.timestamp.as_deref().and_then(parse_timestamp),
+                    record.sequence,
+                ));
+        }
+
+        let mut calls_by_id = HashMap::new();
+        let mut no_id_call_counts = HashMap::new();
+        for call in &data.tool_calls {
+            if let Some(call_id) = call.call_id.as_ref() {
+                calls_by_id
+                    .entry(call_id.as_str())
+                    .or_insert_with(Vec::new)
+                    .push(call);
+            } else {
+                *no_id_call_counts
+                    .entry((call.session_id.as_deref(), call.turn_id.as_deref()))
+                    .or_default() += 1;
+            }
+        }
+
+        let mut results_by_call_id = HashMap::new();
+        let mut no_id_result_counts = HashMap::new();
+        for result in &data.tool_results {
+            if let Some(call_id) = result.call_id.as_ref() {
+                results_by_call_id
+                    .entry(call_id.as_str())
+                    .or_insert_with(Vec::new)
+                    .push(result);
+            } else if !result.is_duplicate {
+                *no_id_result_counts
+                    .entry((result.session_id.as_deref(), result.turn_id.as_deref()))
+                    .or_default() += 1;
+            }
+        }
+
+        Self {
+            data,
+            record_positions,
+            calls_by_id,
+            results_by_call_id,
+            no_id_call_counts,
+            no_id_result_counts,
+        }
+    }
+
+    fn position_for_source(&self, source: &SourceRef, timestamp: Option<&str>) -> Position {
+        let record = self
+            .record_positions
+            .get(&(source.path.as_path(), source.line));
+        Position {
+            timestamp: timestamp
+                .and_then(parse_timestamp)
+                .or_else(|| record.and_then(|(timestamp, _)| *timestamp)),
+            sequence: record.map(|(_, sequence)| *sequence),
+            source: source.clone(),
+        }
+    }
+
+    pub(super) fn matching_call(&self, result: &ToolResult) -> Option<&'a ToolCall> {
+        let call_id = result.call_id.as_ref()?;
+        let candidates = self.calls_by_id.get(call_id.as_str())?;
+        let mut compatible_count = 0;
+        let mut sole_compatible = None;
+        for call in candidates.iter().copied().filter(|call| {
+            call_result_context_matches(call.session_id.as_deref(), result.session_id.as_deref())
+                && call_result_context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
+        }) {
+            compatible_count += 1;
+            sole_compatible = Some(call);
+            if context_matches(call.session_id.as_deref(), result.session_id.as_deref())
+                && context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
+            {
+                return Some(call);
+            }
+        }
+        (compatible_count == 1).then_some(sole_compatible).flatten()
+    }
+}
+
+impl Deref for AnalysisContext<'_> {
+    type Target = CanonicalData;
+
+    fn deref(&self) -> &Self::Target {
+        self.data
+    }
+}
+
+fn source_key(source: &SourceRef) -> SourceKey<'_> {
+    (source.path.as_path(), source.line)
+}
 
 /// Options shared by all lenses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,9 +349,11 @@ impl Finding {
 
 /// Run all Phase 3 lenses and return stable output.
 pub fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
-    let mut findings = recurring_findings(data, options);
-    let recurring = findings.clone();
-    findings.extend(analyze_instructions(data, &recurring, options));
+    let context = AnalysisContext::new(data);
+    let mut findings = recurring_findings(&context, options);
+    findings.extend(analyze_instructions_with_context(
+        &context, &findings, options,
+    ));
     sort_findings(&mut findings);
     findings
 }
@@ -293,17 +406,26 @@ pub fn analyze_instructions(
 
 pub fn instructions(data: &CanonicalData) -> Vec<Finding> {
     let options = AnalysisOptions::default();
-    let recurring = recurring_findings(data, &options);
-    analyze_instructions(data, &recurring, &options)
+    let context = AnalysisContext::new(data);
+    let recurring = recurring_findings(&context, &options);
+    analyze_instructions_with_context(&context, &recurring, &options)
 }
 
-fn recurring_findings(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
+fn analyze_instructions_with_context(
+    context: &AnalysisContext<'_>,
+    recurring_findings: &[Finding],
+    options: &AnalysisOptions,
+) -> Vec<Finding> {
+    instructions::analyze(context.data, recurring_findings, options)
+}
+
+fn recurring_findings(context: &AnalysisContext<'_>, options: &AnalysisOptions) -> Vec<Finding> {
     [
-        analyze_failures(data, options),
-        analyze_corrections(data, options),
-        analyze_rework(data, options),
-        analyze_verification(data, options),
-        analyze_knowledge(data, options),
+        failure::analyze(context, options),
+        corrections::analyze(context, options),
+        rework::analyze(context, options),
+        verification::analyze(context, options),
+        knowledge::analyze(context, options),
     ]
     .into_iter()
     .flatten()
@@ -361,53 +483,28 @@ struct EditEvent {
 }
 
 pub fn analyze_failures(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
-    failure::analyze(data, options)
+    let context = AnalysisContext::new(data);
+    failure::analyze(&context, options)
 }
 
 pub fn analyze_corrections(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
-    corrections::analyze(data, options)
+    let context = AnalysisContext::new(data);
+    corrections::analyze(&context, options)
 }
 
 pub fn analyze_rework(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
-    rework::analyze(data, options)
+    let context = AnalysisContext::new(data);
+    rework::analyze(&context, options)
 }
 
 pub fn analyze_verification(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
-    verification::analyze(data, options)
+    let context = AnalysisContext::new(data);
+    verification::analyze(&context, options)
 }
 
 pub fn analyze_knowledge(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
-    knowledge::analyze(data, options)
-}
-
-fn matching_call<'a>(data: &'a CanonicalData, result: &ToolResult) -> Option<&'a ToolCall> {
-    let candidates = data
-        .tool_calls
-        .iter()
-        .filter(|call| {
-            call.call_id == result.call_id
-                && call.call_id.is_some()
-                && call_result_context_matches(
-                    call.session_id.as_deref(),
-                    result.session_id.as_deref(),
-                )
-                && call_result_context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
-        })
-        .collect::<Vec<_>>();
-    let exact = candidates
-        .iter()
-        .copied()
-        .filter(|call| {
-            context_matches(call.session_id.as_deref(), result.session_id.as_deref())
-                && context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
-        })
-        .collect::<Vec<_>>();
-    if let Some(call) = exact.first().copied() {
-        return Some(call);
-    }
-    (candidates.len() == 1)
-        .then(|| candidates.into_iter().next())
-        .flatten()
+    let context = AnalysisContext::new(data);
+    knowledge::analyze(&context, options)
 }
 
 fn context_matches(left: Option<&str>, right: Option<&str>) -> bool {
@@ -470,7 +567,7 @@ fn bounded_fingerprint(value: &str) -> String {
     )
 }
 
-fn edit_events(data: &CanonicalData, options: &AnalysisOptions) -> Vec<EditEvent> {
+fn edit_events(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> Vec<EditEvent> {
     data.file_operations
         .iter()
         .filter_map(|operation| {
@@ -689,20 +786,11 @@ where
 }
 
 fn position_for_source(
-    data: &CanonicalData,
+    context: &AnalysisContext<'_>,
     source: &SourceRef,
     timestamp: Option<&str>,
 ) -> Position {
-    let record = data.records.iter().find(|record| {
-        record.provenance.path == source.path && record.provenance.line == source.line
-    });
-    Position {
-        timestamp: timestamp.and_then(parse_timestamp).or_else(|| {
-            record.and_then(|record| record.timestamp.as_deref().and_then(parse_timestamp))
-        }),
-        sequence: record.map(|record| record.sequence),
-        source: source.clone(),
-    }
+    context.position_for_source(source, timestamp)
 }
 
 fn compare_activity_positions(left: &Activity, right: &Activity) -> Ordering {
@@ -1323,7 +1411,7 @@ mod tests {
     use crate::model::{
         FileOperation, InstructionFile, InstructionFileKind, InstructionFileState,
         InstructionResolution, InstructionScope, OutcomeSource, ProjectRootStatus, Record,
-        RecordKind, ToolOutcome,
+        RecordKind, ToolCall, ToolOutcome, ToolResult,
     };
     use crate::normalize::normalize_rollout;
     use crate::rollout::{PlainJsonlReader, parse_rollout_reader};
@@ -1337,6 +1425,52 @@ mod tests {
             ))),
         );
         normalize_rollout(&parsed)
+    }
+
+    #[test]
+    fn mismatched_call_context_is_not_correlated() {
+        let call = ToolCall {
+            id: Some("call".to_owned()),
+            call_id: Some("call".to_owned()),
+            session_id: Some("session-a".to_owned()),
+            turn_id: None,
+            tool_name: Some("exec_command".to_owned()),
+            input_summary: None,
+            command: Some("cargo test".to_owned()),
+            cwd: None,
+            status: Some("completed".to_owned()),
+            provenance: SourceRef::rollout(PathBuf::from("call.jsonl"), 1),
+        };
+        let result = |session_id: &str, line| ToolResult {
+            id: None,
+            call_id: Some("call".to_owned()),
+            session_id: Some(session_id.to_owned()),
+            turn_id: None,
+            command: Some("cargo test".to_owned()),
+            cwd: None,
+            stdout: None,
+            stderr: Some("synthetic failure".to_owned()),
+            duration_ms: None,
+            exit_code: Some(1),
+            status: Some("failed".to_owned()),
+            outcome: ToolOutcome::Failed,
+            outcome_source: OutcomeSource::ExitCode,
+            matched_call: false,
+            deduplication_key: None,
+            equivalent_to: None,
+            is_duplicate: false,
+            provenance: SourceRef::rollout(PathBuf::from("results.jsonl"), line),
+        };
+        let data = CanonicalData {
+            tool_calls: vec![call],
+            tool_results: vec![result("session-b", 1), result("session-c", 2)],
+            ..CanonicalData::default()
+        };
+
+        let findings = analyze_failures(&data, &AnalysisOptions::default());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].key, "unknown_tool|cargo test|exit_code_1");
     }
 
     #[test]
