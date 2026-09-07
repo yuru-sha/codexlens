@@ -1260,6 +1260,13 @@ fn release_documents_track_current_version_and_source_release() {
             "release CLI example failed: {args:?}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        if args == ["--version"] {
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains(&format!("codexlens {version}")),
+                "CLI version output is inconsistent: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
     }
 
     for document in [&changelog, &release] {
