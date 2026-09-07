@@ -3,11 +3,14 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use crate::model::{CanonicalData, SourceRef, ToolCall};
+use crate::model::{SourceRef, ToolCall};
+
+#[cfg(test)]
+use crate::model::CanonicalData;
 
 use super::{
-    Activity, ActivityKind, AnalysisOptions, DEFAULT_EXCERPT_BYTES, EditEvent, EvidenceRole,
-    Finding, FindingConfidence, FindingSeverity, FindingType, VerificationStatus,
+    Activity, ActivityKind, AnalysisContext, AnalysisOptions, DEFAULT_EXCERPT_BYTES, EditEvent,
+    EvidenceRole, Finding, FindingConfidence, FindingSeverity, FindingType, VerificationStatus,
     annotate_snapshot_limitations, bounded_excerpt, command_tokens, compare_activity_positions,
     compare_positions, context_matches, edit_events, evidence_for, majority_scope, matching_call,
     path_scope, position_for_source, push_evidence, sort_findings, strip_command_wrappers,
@@ -102,40 +105,26 @@ fn same_call(left: &ToolCall, right: &ToolCall) -> bool {
         && left.provenance == right.provenance
 }
 
-fn call_has_observed_result(data: &CanonicalData, call: &ToolCall) -> bool {
+fn call_has_observed_result(data: &AnalysisContext<'_>, call: &ToolCall) -> bool {
     if let Some(call_id) = call.call_id.as_ref() {
-        return data.tool_results.iter().any(|result| {
-            !result.is_duplicate
-                && result.call_id.as_ref() == Some(call_id)
-                && matching_call(data, result).is_some_and(|candidate| same_call(candidate, call))
-        });
+        return data
+            .results_by_call_id
+            .get(call_id.as_str())
+            .into_iter()
+            .flatten()
+            .any(|result| {
+                !result.is_duplicate
+                    && matching_call(data, result)
+                        .is_some_and(|candidate| same_call(candidate, call))
+            });
     }
 
-    let no_id_calls = data
-        .tool_calls
-        .iter()
-        .filter(|candidate| {
-            candidate.call_id.is_none()
-                && context_matches(candidate.session_id.as_deref(), call.session_id.as_deref())
-                && context_matches(candidate.turn_id.as_deref(), call.turn_id.as_deref())
-        })
-        .count();
-    if no_id_calls != 1 {
-        return false;
-    }
-    data.tool_results
-        .iter()
-        .filter(|result| {
-            !result.is_duplicate
-                && result.call_id.is_none()
-                && context_matches(result.session_id.as_deref(), call.session_id.as_deref())
-                && context_matches(result.turn_id.as_deref(), call.turn_id.as_deref())
-        })
-        .count()
-        == 1
+    let context = (call.session_id.as_deref(), call.turn_id.as_deref());
+    data.no_id_call_counts.get(&context).copied().unwrap_or(0) == 1
+        && data.no_id_result_counts.get(&context).copied().unwrap_or(0) == 1
 }
 
-fn turn_is_complete(data: &CanonicalData, session_id: &str, turn_id: Option<&str>) -> bool {
+fn turn_is_complete(data: &AnalysisContext<'_>, session_id: &str, turn_id: Option<&str>) -> bool {
     if let Some(turn_id) = turn_id {
         if data.turns.iter().any(|turn| {
             turn.session_id.as_deref() == Some(session_id)
@@ -152,7 +141,7 @@ fn turn_is_complete(data: &CanonicalData, session_id: &str, turn_id: Option<&str
     })
 }
 
-pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
+pub(super) fn analyze(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> Vec<Finding> {
     let edits = edit_events(data, options);
     let verifications = verification_events(data);
     let unobserved_verifications = unobserved_verification_events(data);
@@ -346,7 +335,7 @@ pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Fi
     findings
 }
 
-fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
+fn verification_events(data: &AnalysisContext<'_>) -> Vec<VerificationEvent> {
     let mut events = Vec::new();
     let mut call_ids = HashSet::new();
     for call in &data.tool_calls {
@@ -371,11 +360,11 @@ fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
         };
         if result.call_id.is_some() && {
             matching_call(data, result).is_some_and(|call| {
-                call_ids.iter().any(|(call_session, call_turn, call_id)| {
-                    call.session_id.as_ref() == Some(call_session)
-                        && call.turn_id.as_ref() == call_turn.as_ref()
-                        && call.call_id.as_ref() == Some(call_id)
-                })
+                call_ids.contains(&(
+                    call.session_id.clone().unwrap_or_default(),
+                    call.turn_id.clone(),
+                    call.call_id.clone().unwrap_or_default(),
+                ))
             })
         } {
             continue;
@@ -396,7 +385,7 @@ fn verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
     events
 }
 
-fn unobserved_verification_events(data: &CanonicalData) -> Vec<VerificationEvent> {
+fn unobserved_verification_events(data: &AnalysisContext<'_>) -> Vec<VerificationEvent> {
     data.tool_calls
         .iter()
         .filter(|call| !call_has_observed_result(data, call))
@@ -404,7 +393,10 @@ fn unobserved_verification_events(data: &CanonicalData) -> Vec<VerificationEvent
         .collect()
 }
 
-fn verification_event_for_call(data: &CanonicalData, call: &ToolCall) -> Option<VerificationEvent> {
+fn verification_event_for_call(
+    data: &AnalysisContext<'_>,
+    call: &ToolCall,
+) -> Option<VerificationEvent> {
     let session_id = call.session_id.clone()?;
     let command = call
         .command
@@ -466,6 +458,6 @@ mod tests {
             }],
             ..CanonicalData::default()
         };
-        assert_eq!(verification_events(&data).len(), 1);
+        assert_eq!(verification_events(&AnalysisContext::new(&data)).len(), 1);
     }
 }
