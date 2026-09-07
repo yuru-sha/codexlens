@@ -56,9 +56,10 @@ for that candidate passed all four checks: Ubuntu Rust 1.85.0 and 1.92.0,
 - Compressed ingestion preserves both compressed source files and isolates a
   corrupt sibling: `compressed_rollout_input_is_ingested_incrementally_and_read_only`
   and `corrupt_compressed_rollout_does_not_block_valid_sibling`.
-- Refresh and frozen reporting preserve raw sources and the derived store:
-  `refresh_and_frozen_reporting_are_explicit_and_read_only` and
-  `failed_refresh_keeps_the_previous_derived_store`.
+- Refresh preserves raw sources while updating the derived store; frozen
+  reporting preserves the supplied store. These boundaries are covered by
+  `refresh_and_frozen_reporting_are_explicit_and_read_only`.
+  `failed_refresh_keeps_the_previous_derived_store` covers failed refresh recovery.
 - Monitoring preserves its observed source and handles partial, rotated,
   truncated, duplicate, and restarted input in `tests/monitor.rs`.
 - `optimize --diff` is read-only:
