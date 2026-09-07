@@ -12,6 +12,17 @@ project documentation.
 - `cclens` and `codex-session-insights` are design and format references only.
   Do not copy their code.
 
+## Artifact language
+
+- Keep repository and GitHub artifacts in English by default: README and other
+  docs, CHANGELOG, code comments, CLI messages, issues, pull requests, review
+  comments, and releases.
+- Keep the conversation with the user in the user's preferred language; this
+  does not change the language of public project artifacts.
+- Use another language in an artifact only when the user explicitly requests
+  it or when quoting user-provided text. Before publishing, check that newly
+  generated text matches the surrounding artifact language.
+
 ## Before changing code
 
 1. Read the relevant specification under `docs/specs/`.
