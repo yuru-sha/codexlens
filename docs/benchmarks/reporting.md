@@ -23,7 +23,7 @@ the benchmark short enough to run during development.
 | Run | Store | Result |
 | --- | --- | --- |
 | Baseline from issue #76 (`main` at `1e031df`) | 486 sessions, 186,430 records, about 399 MiB | `doctor --format json` exceeded 10 minutes without producing JSON and was stopped |
-| Post-change, macOS arm64 26.5.1 | 500 sessions, 200,000 records, 50,000 call/result pairs | 2,791 ms; valid JSON, 4,343 bytes |
+| Post-change, macOS arm64 26.5.1 | 500 sessions, 200,000 records, 50,000 call/result pairs | 2,735 ms; valid JSON, 4,343 bytes |
 
 The synthetic source paths and failure text are bounded placeholders. No real
 rollout, prompt, command output, credential, or private path is used.

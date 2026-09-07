@@ -138,13 +138,21 @@ impl<'a> AnalysisContext<'a> {
     pub(super) fn matching_call(&self, result: &ToolResult) -> Option<&'a ToolCall> {
         let call_id = result.call_id.as_ref()?;
         let candidates = self.calls_by_id.get(call_id.as_str())?;
-        let exact = candidates.iter().copied().find(|call| {
+        let mut compatible_count = 0;
+        let mut sole_compatible = None;
+        for call in candidates.iter().copied().filter(|call| {
             call_result_context_matches(call.session_id.as_deref(), result.session_id.as_deref())
                 && call_result_context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
-                && context_matches(call.session_id.as_deref(), result.session_id.as_deref())
+        }) {
+            compatible_count += 1;
+            sole_compatible = Some(call);
+            if context_matches(call.session_id.as_deref(), result.session_id.as_deref())
                 && context_matches(call.turn_id.as_deref(), result.turn_id.as_deref())
-        });
-        exact.or_else(|| (candidates.len() == 1).then(|| candidates[0]))
+            {
+                return Some(call);
+            }
+        }
+        (compatible_count == 1).then_some(sole_compatible).flatten()
     }
 }
 
@@ -1404,7 +1412,7 @@ mod tests {
     use crate::model::{
         FileOperation, InstructionFile, InstructionFileKind, InstructionFileState,
         InstructionResolution, InstructionScope, OutcomeSource, ProjectRootStatus, Record,
-        RecordKind, ToolOutcome,
+        RecordKind, ToolCall, ToolOutcome, ToolResult,
     };
     use crate::normalize::normalize_rollout;
     use crate::rollout::{PlainJsonlReader, parse_rollout_reader};
@@ -1418,6 +1426,52 @@ mod tests {
             ))),
         );
         normalize_rollout(&parsed)
+    }
+
+    #[test]
+    fn mismatched_call_context_is_not_correlated() {
+        let call = ToolCall {
+            id: Some("call".to_owned()),
+            call_id: Some("call".to_owned()),
+            session_id: Some("session-a".to_owned()),
+            turn_id: None,
+            tool_name: Some("exec_command".to_owned()),
+            input_summary: None,
+            command: Some("cargo test".to_owned()),
+            cwd: None,
+            status: Some("completed".to_owned()),
+            provenance: SourceRef::rollout(PathBuf::from("call.jsonl"), 1),
+        };
+        let result = |session_id: &str, line| ToolResult {
+            id: None,
+            call_id: Some("call".to_owned()),
+            session_id: Some(session_id.to_owned()),
+            turn_id: None,
+            command: Some("cargo test".to_owned()),
+            cwd: None,
+            stdout: None,
+            stderr: Some("synthetic failure".to_owned()),
+            duration_ms: None,
+            exit_code: Some(1),
+            status: Some("failed".to_owned()),
+            outcome: ToolOutcome::Failed,
+            outcome_source: OutcomeSource::ExitCode,
+            matched_call: false,
+            deduplication_key: None,
+            equivalent_to: None,
+            is_duplicate: false,
+            provenance: SourceRef::rollout(PathBuf::from("results.jsonl"), line),
+        };
+        let data = CanonicalData {
+            tool_calls: vec![call],
+            tool_results: vec![result("session-b", 1), result("session-c", 2)],
+            ..CanonicalData::default()
+        };
+
+        let findings = analyze_failures(&data, &AnalysisOptions::default());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].key, "unknown_tool|cargo test|exit_code_1");
     }
 
     #[test]
