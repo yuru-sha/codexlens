@@ -135,7 +135,7 @@ impl<'a> AnalysisContext<'a> {
         }
     }
 
-    fn matching_call(&self, result: &ToolResult) -> Option<&'a ToolCall> {
+    pub(super) fn matching_call(&self, result: &ToolResult) -> Option<&'a ToolCall> {
         let call_id = result.call_id.as_ref()?;
         let candidates = self.calls_by_id.get(call_id.as_str())?;
         let exact = candidates.iter().copied().find(|call| {
@@ -498,10 +498,6 @@ pub fn analyze_verification(data: &CanonicalData, options: &AnalysisOptions) -> 
 pub fn analyze_knowledge(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
     let context = AnalysisContext::new(data);
     knowledge::analyze(&context, options)
-}
-
-fn matching_call<'a>(context: &AnalysisContext<'a>, result: &ToolResult) -> Option<&'a ToolCall> {
-    context.matching_call(result)
 }
 
 fn context_matches(left: Option<&str>, right: Option<&str>) -> bool {

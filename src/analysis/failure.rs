@@ -12,8 +12,8 @@ use super::{
     Activity, ActivityKind, AnalysisContext, AnalysisOptions, DEFAULT_EXCERPT_BYTES,
     DEFAULT_MIN_OCCURRENCES, DEFAULT_MIN_SESSIONS, EvidenceRole, Finding, FindingConfidence,
     FindingSeverity, FindingType, annotate_snapshot_limitations, bounded_excerpt, command_tokens,
-    distinct_sessions, evidence_for, majority_scope, matching_call, normalize_fragment,
-    position_for_source, push_evidence, redact_sensitive, sort_findings, strip_command_wrappers,
+    distinct_sessions, evidence_for, majority_scope, normalize_fragment, position_for_source,
+    push_evidence, redact_sensitive, sort_findings, strip_command_wrappers,
 };
 
 #[derive(Debug, Clone)]
@@ -196,7 +196,7 @@ fn failure_events(data: &AnalysisContext<'_>) -> Vec<FailureEvent> {
         let Some(session_id) = result.session_id.clone() else {
             continue;
         };
-        let call = matching_call(data, result);
+        let call = data.matching_call(result);
         let tool = call
             .and_then(|call| call.tool_name.as_deref())
             .map(normalize_tool)

@@ -12,8 +12,8 @@ use super::{
     Activity, ActivityKind, AnalysisContext, AnalysisOptions, DEFAULT_EXCERPT_BYTES, EditEvent,
     EvidenceRole, Finding, FindingConfidence, FindingSeverity, FindingType, VerificationStatus,
     annotate_snapshot_limitations, bounded_excerpt, command_tokens, compare_activity_positions,
-    compare_positions, context_matches, edit_events, evidence_for, majority_scope, matching_call,
-    path_scope, position_for_source, push_evidence, sort_findings, strip_command_wrappers,
+    compare_positions, context_matches, edit_events, evidence_for, majority_scope, path_scope,
+    position_for_source, push_evidence, sort_findings, strip_command_wrappers,
 };
 
 #[derive(Debug, Clone)]
@@ -114,7 +114,8 @@ fn call_has_observed_result(data: &AnalysisContext<'_>, call: &ToolCall) -> bool
             .flatten()
             .any(|result| {
                 !result.is_duplicate
-                    && matching_call(data, result)
+                    && data
+                        .matching_call(result)
                         .is_some_and(|candidate| same_call(candidate, call))
             });
     }
@@ -359,7 +360,7 @@ fn verification_events(data: &AnalysisContext<'_>) -> Vec<VerificationEvent> {
             continue;
         };
         if result.call_id.is_some() && {
-            matching_call(data, result).is_some_and(|call| {
+            data.matching_call(result).is_some_and(|call| {
                 call_ids.contains(&(
                     call.session_id.clone().unwrap_or_default(),
                     call.turn_id.clone(),

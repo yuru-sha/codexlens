@@ -1,8 +1,8 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
-use codexlens::advisor::{DoctorOptions, doctor, render_json_finding_report};
-use codexlens::analysis::analyze_default;
 use codexlens::model::{
     CanonicalData, OutcomeSource, Record, RecordKind, Session, SourceRef, ToolCall, ToolOutcome,
     ToolResult,
@@ -13,6 +13,19 @@ use rusqlite::params;
 const SESSION_COUNT: usize = 500;
 const RECORD_COUNT: usize = 200_000;
 const CALL_COUNT: usize = 50_000;
+const TARGET_MS: u128 = 5_000;
+const MAX_DOCTOR_JSON_BYTES: usize = 64 * 1024;
+const REPORTING_COMMANDS: &[&str] = &[
+    "analyze",
+    "sessions",
+    "failures",
+    "corrections",
+    "rework",
+    "verification",
+    "knowledge",
+    "instructions",
+    "doctor",
+];
 
 fn source(session: usize, line: usize) -> SourceRef {
     SourceRef::rollout(
@@ -114,8 +127,8 @@ fn synthetic_data() -> CanonicalData {
     data
 }
 
-fn synthetic_store(data: &CanonicalData) -> Store {
-    let store = Store::in_memory().expect("synthetic store opens");
+fn synthetic_store(data: &CanonicalData, path: &Path) -> Store {
+    let store = Store::open(path).expect("synthetic store opens");
     let transaction = store
         .connection()
         .unchecked_transaction()
@@ -214,25 +227,66 @@ fn synthetic_store(data: &CanonicalData) -> Store {
 
 fn main() {
     let data = synthetic_data();
-    let store = synthetic_store(&data);
+    let store_path = std::env::temp_dir().join(format!(
+        "codexlens-reporting-benchmark-{}.sqlite",
+        std::process::id()
+    ));
+    let store = synthetic_store(&data, &store_path);
+    drop(store);
+    let binary = std::env::current_exe()
+        .expect("benchmark executable path resolves")
+        .parent()
+        .and_then(|path| path.parent())
+        .map(|path| path.join(format!("codexlens{}", std::env::consts::EXE_SUFFIX)))
+        .expect("codexlens binary path resolves");
     let started = Instant::now();
-    let data = store.load_canonical().expect("synthetic store loads");
-    let findings = analyze_default(&data);
-    let report = doctor(
-        &data,
-        &findings,
-        store.freshness().expect("synthetic freshness loads"),
-        &DoctorOptions::default(),
+    let output = Command::new(&binary)
+        .args([
+            "doctor",
+            "--format",
+            "json",
+            "--store",
+            store_path.to_str().expect("synthetic store path is UTF-8"),
+        ])
+        .output()
+        .expect("doctor binary runs");
+    let elapsed_ms = started.elapsed().as_millis();
+    assert!(
+        output.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let json = render_json_finding_report("doctor", &report).expect("synthetic JSON renders");
+    let json = String::from_utf8(output.stdout).expect("doctor emits UTF-8 JSON");
     let document: serde_json::Value = serde_json::from_str(&json).expect("synthetic JSON parses");
     assert_eq!(document["schema_version"], 1);
-    assert_eq!(report.session_count, SESSION_COUNT);
-    assert_eq!(data.records.len(), RECORD_COUNT);
+    assert_eq!(document["data"]["session_count"], SESSION_COUNT);
+    assert!(json.len() <= MAX_DOCTOR_JSON_BYTES);
     assert!(json.ends_with('\n'));
+    assert!(elapsed_ms <= TARGET_MS, "doctor took {elapsed_ms} ms");
+
+    for command in REPORTING_COMMANDS {
+        let output = Command::new(&binary)
+            .args([
+                *command,
+                "--format",
+                "json",
+                "--store",
+                store_path.to_str().expect("synthetic store path is UTF-8"),
+            ])
+            .output()
+            .expect("reporting binary runs");
+        assert!(
+            output.status.success(),
+            "{command} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("reporting command emits JSON");
+        assert_eq!(document["schema_version"], 1);
+    }
+    fs::remove_file(&store_path).expect("synthetic store is removable");
     println!(
-        "sessions={SESSION_COUNT} records={RECORD_COUNT} tool_calls={CALL_COUNT} elapsed_ms={} json_bytes={}",
-        started.elapsed().as_millis(),
+        "sessions={SESSION_COUNT} records={RECORD_COUNT} tool_calls={CALL_COUNT} elapsed_ms={elapsed_ms} json_bytes={}",
         json.len()
     );
 }
