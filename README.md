@@ -164,6 +164,12 @@ release procedure are recorded in [docs/release.md](docs/release.md).
 
 Requirements: Rust 1.85 or newer.
 
+Local development is pinned by `rust-toolchain.toml`. Run the shared local/CI
+gate with `sh scripts/verify.sh`; it also checks privacy and staged content.
+See [environment setup](docs/agents/environment.md) and the
+[delivery workflow](docs/agents/workflow.md) for permissions, review, and
+completion criteria. The underlying Rust checks are:
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings

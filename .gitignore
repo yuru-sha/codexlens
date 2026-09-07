@@ -2,3 +2,9 @@
 *.db
 *.db-*
 .codexlens/
+.codexlens.sqlite
+.codexlens.sqlite-*
+.env
+.env.*
+!.env.example
+__pycache__/
