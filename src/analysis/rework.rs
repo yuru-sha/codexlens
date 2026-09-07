@@ -2,13 +2,14 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+#[cfg(test)]
 use crate::model::CanonicalData;
 
 use super::{
-    Activity, ActivityKind, AnalysisOptions, EditEvent, EvidenceRole, Finding, FindingConfidence,
-    FindingSeverity, FindingType, Position, annotate_snapshot_limitations, bounded_excerpt,
-    compare_activity_positions, compare_positions, edit_events, evidence_for, failure, path_scope,
-    push_evidence, sort_findings,
+    Activity, ActivityKind, AnalysisContext, AnalysisOptions, EditEvent, EvidenceRole, Finding,
+    FindingConfidence, FindingSeverity, FindingType, Position, annotate_snapshot_limitations,
+    bounded_excerpt, compare_activity_positions, compare_positions, edit_events, evidence_for,
+    failure, path_scope, push_evidence, sort_findings,
 };
 
 fn limit_evidence(mut evidence: Vec<super::EvidenceRef>) -> Vec<super::EvidenceRef> {
@@ -16,7 +17,7 @@ fn limit_evidence(mut evidence: Vec<super::EvidenceRef>) -> Vec<super::EvidenceR
     evidence
 }
 
-pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
+pub(super) fn analyze(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> Vec<Finding> {
     let edits = edit_events(data, options);
     let failures = failure::activities(data);
     let mut grouped: BTreeMap<(String, String), Vec<EditEvent>> = BTreeMap::new();

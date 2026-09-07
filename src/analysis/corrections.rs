@@ -3,14 +3,17 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use crate::model::{CanonicalData, Message, MessageRole, SourceRef};
+use crate::model::{Message, MessageRole, SourceRef};
+
+#[cfg(test)]
+use crate::model::CanonicalData;
 
 use super::{
-    Activity, ActivityKind, AnalysisOptions, CORRECTION_MARKERS, DEFAULT_MIN_OCCURRENCES,
-    DEFAULT_MIN_SESSIONS, EvidenceRole, Finding, FindingConfidence, FindingSeverity, FindingType,
-    annotate_snapshot_limitations, bounded_excerpt, bounded_fingerprint, compare_positions,
-    distinct_sessions, evidence_for, majority_scope, normalize_fact, position_for_source,
-    push_evidence, redact_sensitive, sort_findings,
+    Activity, ActivityKind, AnalysisContext, AnalysisOptions, CORRECTION_MARKERS,
+    DEFAULT_MIN_OCCURRENCES, DEFAULT_MIN_SESSIONS, EvidenceRole, Finding, FindingConfidence,
+    FindingSeverity, FindingType, annotate_snapshot_limitations, bounded_excerpt,
+    bounded_fingerprint, compare_positions, distinct_sessions, evidence_for, majority_scope,
+    normalize_fact, position_for_source, push_evidence, redact_sensitive, sort_findings,
 };
 
 #[derive(Debug, Clone)]
@@ -31,11 +34,11 @@ pub(super) struct CorrectionFact {
     pub(super) excerpt: String,
 }
 
-fn position_for_message(data: &CanonicalData, message: &Message) -> super::Position {
+fn position_for_message(data: &AnalysisContext<'_>, message: &Message) -> super::Position {
     position_for_source(data, &message.provenance, message.timestamp.as_deref())
 }
 
-pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
+pub(super) fn analyze(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> Vec<Finding> {
     let mut grouped: BTreeMap<String, Vec<CorrectionEvent>> = BTreeMap::new();
     for event in correction_events(data) {
         grouped.entry(event.key.clone()).or_default().push(event);
@@ -123,7 +126,7 @@ pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Fi
     findings
 }
 
-pub(super) fn facts(data: &CanonicalData, options: &AnalysisOptions) -> Vec<CorrectionFact> {
+pub(super) fn facts(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> Vec<CorrectionFact> {
     correction_events(data)
         .into_iter()
         .map(|event| CorrectionFact {
@@ -139,7 +142,7 @@ pub(super) fn facts(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Corr
         .collect()
 }
 
-fn correction_events(data: &CanonicalData) -> Vec<CorrectionEvent> {
+fn correction_events(data: &AnalysisContext<'_>) -> Vec<CorrectionEvent> {
     let mut actions = Vec::new();
     for message in &data.messages {
         if message.role == Some(MessageRole::Assistant)
@@ -199,6 +202,13 @@ fn correction_events(data: &CanonicalData) -> Vec<CorrectionEvent> {
         })
     }));
     actions.sort_by(super::compare_activity_positions);
+    let mut actions_by_session = BTreeMap::<String, Vec<Activity>>::new();
+    for action in actions {
+        actions_by_session
+            .entry(action.session_id.clone())
+            .or_default()
+            .push(action);
+    }
 
     let mut events = Vec::new();
     for message in data.messages.iter().filter(|message| {
@@ -218,14 +228,15 @@ fn correction_events(data: &CanonicalData) -> Vec<CorrectionEvent> {
             continue;
         };
         let message_position = position_for_message(data, message);
-        let preceding = actions
-            .iter()
-            .filter(|action| {
-                action.session_id == session_id
-                    && compare_positions(&action.position, &message_position) == Ordering::Less
-            })
-            .max_by(|left, right| compare_positions(&left.position, &right.position))
-            .cloned();
+        let preceding = actions_by_session.get(&session_id).and_then(|actions| {
+            let index = actions.partition_point(|action| {
+                compare_positions(&action.position, &message_position) == Ordering::Less
+            });
+            index
+                .checked_sub(1)
+                .and_then(|index| actions.get(index))
+                .cloned()
+        });
         let Some(preceding) = preceding else {
             continue;
         };
@@ -307,7 +318,8 @@ mod tests {
             correction_fact("Use src/b.rs.")
         );
         let data = fixture_data();
-        let findings = analyze(&data, &AnalysisOptions::default());
+        let context = AnalysisContext::new(&data);
+        let findings = analyze(&context, &AnalysisOptions::default());
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingType::Correction);
         assert_eq!(
@@ -333,7 +345,8 @@ mod tests {
         one_session
             .messages
             .retain(|message| message.session_id.as_deref() == Some("fixture-analysis-session-a"));
-        assert!(analyze(&one_session, &AnalysisOptions::default()).is_empty());
+        let context = AnalysisContext::new(&one_session);
+        assert!(analyze(&context, &AnalysisOptions::default()).is_empty());
     }
 
     #[test]

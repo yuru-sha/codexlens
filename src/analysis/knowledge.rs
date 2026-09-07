@@ -6,11 +6,11 @@ use std::collections::{BTreeMap, HashSet};
 use crate::model::{CanonicalData, SourceRef};
 
 use super::{
-    AnalysisOptions, DISCOVERY_MARKERS, EvidenceRole, Finding, FindingConfidence, FindingSeverity,
-    FindingType, MISSING_SNAPSHOT_LIMITATION, annotate_snapshot_limitations, bounded_excerpt,
-    bounded_fingerprint, corrections, distinct_sessions, evidence_for, majority_path,
-    majority_project, majority_scope, normalize_fact, push_evidence, snapshot_is_usable,
-    sort_findings,
+    AnalysisContext, AnalysisOptions, DISCOVERY_MARKERS, EvidenceRole, Finding, FindingConfidence,
+    FindingSeverity, FindingType, MISSING_SNAPSHOT_LIMITATION, annotate_snapshot_limitations,
+    bounded_excerpt, bounded_fingerprint, corrections, distinct_sessions, evidence_for,
+    majority_path, majority_project, majority_scope, normalize_fact, push_evidence,
+    snapshot_is_usable, sort_findings,
 };
 
 const LONG_FACT_BYTES: usize = 240;
@@ -31,7 +31,7 @@ fn compare_sources(left: &SourceRef, right: &SourceRef) -> Ordering {
         .then_with(|| left.line.cmp(&right.line))
 }
 
-pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Finding> {
+pub(super) fn analyze(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> Vec<Finding> {
     let mut facts = correction_facts(data, options);
     let correction_sources = facts
         .iter()
@@ -121,7 +121,7 @@ pub(super) fn analyze(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Fi
     findings
 }
 
-fn correction_facts(data: &CanonicalData, options: &AnalysisOptions) -> Vec<FactEvent> {
+fn correction_facts(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> Vec<FactEvent> {
     corrections::facts(data, options)
         .into_iter()
         .map(|event| FactEvent {
@@ -135,7 +135,7 @@ fn correction_facts(data: &CanonicalData, options: &AnalysisOptions) -> Vec<Fact
         .collect()
 }
 
-fn discovery_facts(data: &CanonicalData, options: &AnalysisOptions) -> Vec<FactEvent> {
+fn discovery_facts(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> Vec<FactEvent> {
     let mut facts = Vec::new();
     for message in &data.messages {
         let Some(session_id) = message.session_id.clone() else {
@@ -213,7 +213,8 @@ mod tests {
     #[test]
     fn knowledge_requires_recurrence_across_sessions() {
         let data = fixture_data();
-        let findings = analyze(&data, &AnalysisOptions::default());
+        let context = AnalysisContext::new(&data);
+        let findings = analyze(&context, &AnalysisOptions::default());
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingType::Knowledge);
         assert_eq!(findings[0].distinct_sessions, 2);
@@ -222,6 +223,7 @@ mod tests {
         one_session
             .messages
             .retain(|message| message.session_id.as_deref() == Some("fixture-analysis-session-a"));
-        assert!(analyze(&one_session, &AnalysisOptions::default()).is_empty());
+        let context = AnalysisContext::new(&one_session);
+        assert!(analyze(&context, &AnalysisOptions::default()).is_empty());
     }
 }
