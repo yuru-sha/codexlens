@@ -164,7 +164,7 @@ impl Deref for AnalysisContext<'_> {
     }
 }
 
-fn source_key<'a>(source: &'a SourceRef) -> SourceKey<'a> {
+fn source_key(source: &SourceRef) -> SourceKey<'_> {
     (source.path.as_path(), source.line)
 }
 
