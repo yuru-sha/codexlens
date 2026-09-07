@@ -401,8 +401,7 @@ pub fn analyze_instructions(
     recurring_findings: &[Finding],
     options: &AnalysisOptions,
 ) -> Vec<Finding> {
-    let context = AnalysisContext::new(data);
-    analyze_instructions_with_context(&context, recurring_findings, options)
+    instructions::analyze(data, recurring_findings, options)
 }
 
 pub fn instructions(data: &CanonicalData) -> Vec<Finding> {
