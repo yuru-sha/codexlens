@@ -1,10 +1,18 @@
 # Issue tracker: GitHub
 
-Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+GitHub issues define requested changes and acceptance criteria. Maintained
+contracts live in `docs/specs/`; the README describes the supported CLI.
+When a request changes a contract, update the relevant specification in the
+same change. If sources conflict without a clear superseding decision, identify
+the conflict before implementing the affected behavior.
+
+Use the `gh` CLI for tracker operations. Reading an issue does not authorize
+posting, assigning, closing, or changing labels. Execute writes only within the
+user's authorized workflow; retain existing authorization across fix iterations.
 
 ## Conventions
 
-- **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
+- **Create an issue**: `gh issue create --title "..." --body-file <reviewed-file>`. Use a UTF-8 file for multi-line bodies.
 - **Read an issue**: `gh issue view <number> --comments`, filtering comments by `jq` and also fetching labels.
 - **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
 - **Comment on an issue**: `gh issue comment <number> --body "..."`
