@@ -1190,6 +1190,93 @@ fn final_audit_records_release_evidence_and_boundaries() {
 }
 
 #[test]
+fn release_documents_track_current_version_and_source_release() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme = fs::read_to_string(root.join("README.md")).unwrap();
+    let changelog = fs::read_to_string(root.join("CHANGELOG.md")).unwrap();
+    let release = fs::read_to_string(root.join("docs/release.md")).unwrap();
+    let license = fs::read_to_string(root.join("LICENSE")).unwrap();
+    let version = env!("CARGO_PKG_VERSION");
+
+    assert!(readme.contains("CHANGELOG.md"));
+    assert!(readme.contains("docs/release.md"));
+    assert!(readme.contains("## Inspiration"));
+    assert!(readme.contains("cclens"));
+    assert!(readme.contains("codex-session-insights"));
+    assert!(readme.contains("independent implementation"));
+    assert!(license.starts_with("MIT License"));
+    assert!(changelog.contains(&format!("## [{version}]")));
+    assert!(release.contains(&format!("`{version}`")));
+    assert!(release.contains(&format!("v{version}")));
+    let changelog_lower = changelog.to_ascii_lowercase();
+
+    for marker in [
+        "compressed rollout",
+        "refresh",
+        "frozen",
+        "versioned",
+        "monitor",
+        "optimize --apply",
+    ] {
+        assert!(
+            changelog_lower.contains(marker),
+            "missing changelog marker: {marker}"
+        );
+    }
+
+    for marker in [
+        "Supported platforms",
+        "macOS",
+        "Ubuntu",
+        "Windows",
+        "Rust 1.85.0",
+        "Rust 1.92.0",
+        "cargo fmt --all -- --check",
+        "cargo clippy --all-targets --all-features -- -D warnings",
+        "cargo build --all-features",
+        "cargo test --all-features",
+        "privacy",
+        "read-only",
+        "recovery",
+        "MIT",
+        "Inspiration",
+        "source archive",
+        "git tag",
+        "package-manager publishing",
+        "final-audit.md",
+        "optimize --apply",
+        "--format json",
+    ] {
+        assert!(release.contains(marker), "missing release marker: {marker}");
+    }
+
+    for args in [&["--version"][..], &["--help"][..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "release CLI example failed: {args:?}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if args == ["--version"] {
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains(&format!("codexlens {version}")),
+                "CLI version output is inconsistent: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+
+    for document in [&changelog, &release] {
+        assert!(!document.contains("/Users/"));
+        assert!(!document.contains("/home/"));
+        assert!(!document.contains("BEGIN PRIVATE KEY"));
+    }
+}
+
+#[test]
 fn readme_documents_current_cli_surface_and_mvp_boundaries() {
     let readme =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();

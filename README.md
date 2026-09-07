@@ -108,7 +108,10 @@ a clean stop for reuse on the next invocation. Use `--kind rollout|state`;
 The final MVP readiness review and next-phase entry condition are recorded in
 [docs/readiness/mvp.md](docs/readiness/mvp.md). The Phase 6 regression and
 safety evidence is recorded in
-[docs/readiness/final-audit.md](docs/readiness/final-audit.md).
+[docs/readiness/final-audit.md](docs/readiness/final-audit.md). Release notes,
+the release checklist, and the minimal source-release procedure are in
+[docs/release.md](docs/release.md); the current version history is in
+[CHANGELOG.md](CHANGELOG.md).
 
 The command examples below use an existing derived store at the default path:
 
@@ -143,8 +146,8 @@ refresh/frozen reporting (#58), versioned JSON reporting (#59), bounded local
 live monitoring (#60), and safe optimize apply (#61) are implemented. Future
 changes must preserve the explicit boundaries documented above.
 
-Phase 6 is the release-preparation phase; its documentation synchronization
-starts with [#70](https://github.com/yuru-sha/codexlens/issues/70).
+Phase 6 is the release-preparation phase. Its release checklist and source
+release procedure are recorded in [docs/release.md](docs/release.md).
 
 - Phase 0 Foundation: [#1](https://github.com/yuru-sha/codexlens/issues/1)–[#4](https://github.com/yuru-sha/codexlens/issues/4)
 - Phase 1 Codex ingestion: [#5](https://github.com/yuru-sha/codexlens/issues/5)–[#10](https://github.com/yuru-sha/codexlens/issues/10)
