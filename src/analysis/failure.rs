@@ -3,32 +3,19 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::model::{OutcomeSource, SourceRef, ToolOutcome, ToolResult};
+use crate::model::{OutcomeSource, ToolOutcome, ToolResult};
 
 #[cfg(test)]
 use crate::model::CanonicalData;
 
 use super::{
     Activity, ActivityKind, AnalysisContext, AnalysisOptions, DEFAULT_EXCERPT_BYTES,
-    DEFAULT_MIN_OCCURRENCES, DEFAULT_MIN_SESSIONS, EvidenceRole, Finding, FindingConfidence,
-    FindingSeverity, FindingType, annotate_snapshot_limitations, bounded_excerpt, command_tokens,
-    distinct_sessions, evidence_for, majority_scope, normalize_fragment, position_for_source,
-    push_evidence, redact_sensitive, sort_findings, strip_command_wrappers,
+    DEFAULT_MIN_OCCURRENCES, DEFAULT_MIN_SESSIONS, EvidenceRole, FailureEvent, Finding,
+    FindingConfidence, FindingSeverity, FindingType, annotate_snapshot_limitations,
+    bounded_excerpt, command_tokens, distinct_sessions, evidence_for, majority_scope,
+    normalize_fragment, position_for_source, push_evidence, redact_sensitive, sort_findings,
+    strip_command_wrappers,
 };
-
-#[derive(Debug, Clone)]
-struct FailureEvent {
-    session_id: String,
-    turn_id: Option<String>,
-    key: String,
-    tool: String,
-    family: String,
-    category: String,
-    structured: bool,
-    description: String,
-    position: super::Position,
-    source: SourceRef,
-}
 
 fn command_family(command: &str) -> String {
     let mut tokens = command_tokens(&redact_sensitive(command));
@@ -87,8 +74,8 @@ fn normalize_tool(tool: &str) -> String {
 }
 
 pub(super) fn analyze(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> Vec<Finding> {
-    let mut grouped: BTreeMap<String, Vec<FailureEvent>> = BTreeMap::new();
-    for event in failure_events(data) {
+    let mut grouped: BTreeMap<String, Vec<&FailureEvent>> = BTreeMap::new();
+    for event in data.failure_events() {
         grouped.entry(event.key.clone()).or_default().push(event);
     }
 
@@ -166,14 +153,14 @@ pub(super) fn analyze(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> 
 }
 
 pub(super) fn activities(data: &AnalysisContext<'_>) -> Vec<Activity> {
-    failure_events(data)
-        .into_iter()
+    data.failure_events()
+        .iter()
         .map(|event| Activity {
-            session_id: event.session_id,
-            turn_id: event.turn_id,
-            position: event.position,
-            description: event.description,
-            source: event.source,
+            session_id: event.session_id.clone(),
+            turn_id: event.turn_id.clone(),
+            position: event.position.clone(),
+            description: event.description.clone(),
+            source: event.source.clone(),
             path: None,
             kind: ActivityKind::Failure,
         })
@@ -187,7 +174,7 @@ pub(super) fn is_failed(result: &ToolResult) -> bool {
     result.outcome == ToolOutcome::Failed || result.status.as_deref().is_some_and(status_is_failed)
 }
 
-fn failure_events(data: &AnalysisContext<'_>) -> Vec<FailureEvent> {
+pub(super) fn build_events(data: &AnalysisContext<'_>) -> Vec<FailureEvent> {
     let mut events = Vec::new();
     for result in &data.tool_results {
         if result.is_duplicate || !is_failed(result) {
@@ -207,10 +194,11 @@ fn failure_events(data: &AnalysisContext<'_>) -> Vec<FailureEvent> {
             .or_else(|| call.and_then(|call| call.command.as_deref()))
             .or_else(|| call.and_then(|call| call.input_summary.as_deref()))
             .unwrap_or_default();
+        let output = combined_result_output(result);
         let family = command_family(command);
-        let category = failure_category(result);
+        let category = failure_category(result, &output);
         let key = format!("{tool}|{family}|{category}");
-        let description = failure_description(&tool, &family, &category, result);
+        let description = failure_description(&tool, &family, &category, &output);
         events.push(FailureEvent {
             session_id,
             turn_id: result.turn_id.clone(),
@@ -264,7 +252,7 @@ fn status_is_failed(status: &str) -> bool {
     ToolOutcome::from_status(status) == Some(ToolOutcome::Failed)
 }
 
-fn failure_category(result: &ToolResult) -> String {
+fn failure_category(result: &ToolResult, output: &str) -> String {
     if let Some(code) = result.exit_code.filter(|code| *code != 0) {
         return match code {
             126 => "permission_denied".to_owned(),
@@ -284,8 +272,7 @@ fn failure_category(result: &ToolResult) -> String {
             _ => "failed_status".to_owned(),
         };
     }
-    let output = combined_result_output(result);
-    let normalized = normalize_fragment(&output);
+    let normalized = normalize_fragment(output);
     for (marker, category) in [
         ("permission denied", "permission_denied"),
         ("command not found", "command_not_found"),
@@ -302,8 +289,7 @@ fn failure_category(result: &ToolResult) -> String {
     "output_error".to_owned()
 }
 
-fn failure_description(tool: &str, family: &str, category: &str, result: &ToolResult) -> String {
-    let output = combined_result_output(result);
+fn failure_description(tool: &str, family: &str, category: &str, output: &str) -> String {
     let description = if output.is_empty() {
         format!("{tool} {family} -> {category}")
     } else {
@@ -355,8 +341,9 @@ mod tests {
             result.outcome_source = OutcomeSource::OutputText;
         }
         let context = AnalysisContext::new(&output_only);
-        let events = failure_events(&context)
-            .into_iter()
+        let events = context
+            .failure_events()
+            .iter()
             .filter(|event| event.tool != "event")
             .collect::<Vec<_>>();
         assert!(!events.is_empty());
@@ -370,8 +357,9 @@ mod tests {
             result.outcome_source = OutcomeSource::Unknown;
         }
         assert!(
-            !failure_events(&AnalysisContext::new(&status_only))
-                .into_iter()
+            !AnalysisContext::new(&status_only)
+                .failure_events()
+                .iter()
                 .filter(|event| event.tool != "event")
                 .collect::<Vec<_>>()
                 .is_empty()

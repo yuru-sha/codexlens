@@ -9,15 +9,15 @@ use crate::model::{
 };
 
 use super::{
-    AnalysisOptions, CORRECTION_MARKERS, DEFAULT_MAX_EVIDENCE, DISCOVERY_MARKERS, EvidenceRole,
-    Finding, FindingConfidence, FindingScope, FindingSeverity, FindingType, VerificationStatus,
-    bounded_excerpt, bounded_fingerprint, evidence_for, evidence_sessions, majority_path,
-    majority_scope, normalize_fact, path_scope, push_evidence, resolve_instruction_path,
-    snapshot_for_evidence, sort_findings,
+    AnalysisContext, AnalysisOptions, CORRECTION_MARKERS, DEFAULT_MAX_EVIDENCE, DISCOVERY_MARKERS,
+    EvidenceRole, Finding, FindingConfidence, FindingScope, FindingSeverity, FindingType,
+    VerificationStatus, bounded_excerpt, bounded_fingerprint, evidence_for, evidence_sessions,
+    majority_path, majority_scope, normalize_fact, path_scope, push_evidence,
+    resolve_instruction_path, snapshot_for_evidence, sort_findings,
 };
 
 pub(super) fn analyze(
-    data: &crate::model::CanonicalData,
+    data: &AnalysisContext<'_>,
     recurring_findings: &[Finding],
     options: &AnalysisOptions,
 ) -> Vec<Finding> {
@@ -32,7 +32,7 @@ pub(super) fn analyze(
 type InstructionSnapshotEvidence<'a> = (SourceRef, &'a InstructionSnapshot);
 
 fn instruction_scope(
-    data: &crate::model::CanonicalData,
+    data: &AnalysisContext<'_>,
     finding: &Finding,
     sessions: &[String],
 ) -> FindingScope {
@@ -65,7 +65,7 @@ fn reserve_evidence_slots(
 }
 
 fn snapshots_for_finding<'a>(
-    data: &'a crate::model::CanonicalData,
+    data: &'a AnalysisContext<'a>,
     finding: &Finding,
 ) -> (
     BTreeMap<String, Vec<InstructionSnapshotEvidence<'a>>>,
@@ -100,7 +100,7 @@ fn snapshots_for_finding<'a>(
 }
 
 fn instruction_join_findings(
-    data: &crate::model::CanonicalData,
+    data: &AnalysisContext<'_>,
     recurring: &[Finding],
     options: &AnalysisOptions,
 ) -> Vec<Finding> {
@@ -284,7 +284,7 @@ fn instruction_join_findings(
 }
 
 fn instruction_truncation_findings(
-    data: &crate::model::CanonicalData,
+    data: &AnalysisContext<'_>,
     options: &AnalysisOptions,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -368,7 +368,7 @@ fn instruction_truncation_findings(
 }
 
 fn instruction_duplicate_findings(
-    data: &crate::model::CanonicalData,
+    data: &AnalysisContext<'_>,
     options: &AnalysisOptions,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();

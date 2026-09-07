@@ -5,9 +5,10 @@
 //! adapter boundary and makes every lens deterministic for the same input.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::model::{
     CanonicalData, InstructionJoin, InstructionSnapshot, SourceRef, ToolCall, ToolResult,
@@ -59,20 +60,28 @@ const MAX_FACT_KEY_BYTES: usize = 128;
 const MISSING_SNAPSHOT_LIMITATION: &str = "An instruction snapshot was unavailable for at least one supporting session, so instruction comparison is inconclusive";
 
 type SourceKey<'a> = (&'a Path, Option<usize>);
+type SnapshotSourceKey<'a> = (&'a str, &'a Path, Option<usize>);
+type SnapshotTurnKey<'a> = (&'a str, &'a str);
 type CallContextKey<'a> = (Option<&'a str>, Option<&'a str>);
 
 struct AnalysisContext<'a> {
     data: &'a CanonicalData,
     record_positions: HashMap<SourceKey<'a>, (Option<i64>, usize)>,
+    turn_ids_by_session_source: HashMap<SnapshotSourceKey<'a>, &'a str>,
+    snapshots_by_source: HashMap<SnapshotSourceKey<'a>, &'a InstructionSnapshot>,
+    snapshots_by_turn: HashMap<SnapshotTurnKey<'a>, &'a InstructionSnapshot>,
+    usable_snapshot_sessions: HashSet<&'a str>,
     calls_by_id: HashMap<&'a str, Vec<&'a ToolCall>>,
     results_by_call_id: HashMap<&'a str, Vec<&'a ToolResult>>,
     no_id_call_counts: HashMap<CallContextKey<'a>, usize>,
     no_id_result_counts: HashMap<CallContextKey<'a>, usize>,
+    failure_events: OnceLock<Vec<FailureEvent>>,
 }
 
 impl<'a> AnalysisContext<'a> {
     fn new(data: &'a CanonicalData) -> Self {
         let mut record_positions = HashMap::with_capacity(data.records.len());
+        let mut turn_ids_by_session_source = HashMap::new();
         for record in &data.records {
             record_positions
                 .entry(source_key(&record.provenance))
@@ -80,6 +89,42 @@ impl<'a> AnalysisContext<'a> {
                     record.timestamp.as_deref().and_then(parse_timestamp),
                     record.sequence,
                 ));
+            if let (Some(session_id), Some(turn_id)) =
+                (record.session_id.as_deref(), record.turn_id.as_deref())
+            {
+                turn_ids_by_session_source
+                    .entry((
+                        session_id,
+                        record.provenance.path.as_path(),
+                        record.provenance.line,
+                    ))
+                    .or_insert(turn_id);
+            }
+        }
+
+        let mut snapshots_by_source = HashMap::with_capacity(data.instruction_snapshots.len());
+        let mut snapshots_by_turn = HashMap::with_capacity(data.instruction_snapshots.len());
+        let mut usable_snapshot_sessions = HashSet::new();
+        for snapshot in &data.instruction_snapshots {
+            if !snapshot_is_usable(snapshot) {
+                continue;
+            }
+            let Some(session_id) = snapshot.session_id.as_deref() else {
+                continue;
+            };
+            usable_snapshot_sessions.insert(session_id);
+            insert_snapshot(
+                &mut snapshots_by_source,
+                (
+                    session_id,
+                    snapshot.provenance.path.as_path(),
+                    snapshot.provenance.line,
+                ),
+                snapshot,
+            );
+            if let Some(turn_id) = snapshot.turn_id.as_deref() {
+                insert_snapshot(&mut snapshots_by_turn, (session_id, turn_id), snapshot);
+            }
         }
 
         let mut calls_by_id = HashMap::new();
@@ -115,11 +160,25 @@ impl<'a> AnalysisContext<'a> {
         Self {
             data,
             record_positions,
+            turn_ids_by_session_source,
+            snapshots_by_source,
+            snapshots_by_turn,
+            usable_snapshot_sessions,
             calls_by_id,
             results_by_call_id,
             no_id_call_counts,
             no_id_result_counts,
+            failure_events: OnceLock::new(),
         }
+    }
+
+    fn failure_events(&self) -> &[FailureEvent] {
+        self.failure_events
+            .get_or_init(|| failure::build_events(self))
+    }
+
+    pub(super) fn has_usable_snapshot(&self, session_id: &str) -> bool {
+        self.usable_snapshot_sessions.contains(session_id)
     }
 
     fn position_for_source(&self, source: &SourceRef, timestamp: Option<&str>) -> Position {
@@ -166,6 +225,37 @@ impl Deref for AnalysisContext<'_> {
 
 fn source_key(source: &SourceRef) -> SourceKey<'_> {
     (source.path.as_path(), source.line)
+}
+
+fn snapshot_order_key(
+    snapshot: &InstructionSnapshot,
+) -> (
+    &Path,
+    Option<usize>,
+    Option<&str>,
+    Option<&str>,
+    Option<&str>,
+) {
+    (
+        snapshot.provenance.path.as_path(),
+        snapshot.provenance.line,
+        snapshot.turn_id.as_deref(),
+        snapshot.content_hash.as_deref(),
+        snapshot.content.as_deref(),
+    )
+}
+
+fn insert_snapshot<'a, K: Eq + std::hash::Hash>(
+    index: &mut HashMap<K, &'a InstructionSnapshot>,
+    key: K,
+    snapshot: &'a InstructionSnapshot,
+) {
+    if index
+        .get(&key)
+        .is_none_or(|current| snapshot_order_key(snapshot) < snapshot_order_key(current))
+    {
+        index.insert(key, snapshot);
+    }
 }
 
 /// Options shared by all lenses.
@@ -401,7 +491,8 @@ pub fn analyze_instructions(
     recurring_findings: &[Finding],
     options: &AnalysisOptions,
 ) -> Vec<Finding> {
-    instructions::analyze(data, recurring_findings, options)
+    let context = AnalysisContext::new(data);
+    instructions::analyze(&context, recurring_findings, options)
 }
 
 pub fn instructions(data: &CanonicalData) -> Vec<Finding> {
@@ -416,7 +507,7 @@ fn analyze_instructions_with_context(
     recurring_findings: &[Finding],
     options: &AnalysisOptions,
 ) -> Vec<Finding> {
-    instructions::analyze(context.data, recurring_findings, options)
+    instructions::analyze(context, recurring_findings, options)
 }
 
 fn recurring_findings(context: &AnalysisContext<'_>, options: &AnalysisOptions) -> Vec<Finding> {
@@ -478,6 +569,20 @@ struct EditEvent {
     turn_id: Option<String>,
     path: String,
     operation: String,
+    position: Position,
+    source: SourceRef,
+}
+
+#[derive(Debug, Clone)]
+struct FailureEvent {
+    session_id: String,
+    turn_id: Option<String>,
+    key: String,
+    tool: String,
+    family: String,
+    category: String,
+    structured: bool,
+    description: String,
     position: Position,
     source: SourceRef,
 }
@@ -620,27 +725,29 @@ pub fn classify_verification_command(command: &str) -> Option<String> {
 }
 
 fn snapshot_for_evidence<'a>(
-    data: &'a CanonicalData,
+    context: &AnalysisContext<'a>,
     evidence: &EvidenceRef,
 ) -> Option<&'a InstructionSnapshot> {
     let session_id = evidence.session_id.as_deref()?;
-    let mut snapshots = data.instruction_snapshots.iter().filter(|snapshot| {
-        snapshot.session_id.as_deref() == Some(session_id) && snapshot_is_usable(snapshot)
-    });
-    let exact = snapshots.clone().find(|snapshot| {
-        snapshot.provenance.path == evidence.source.path
-            && snapshot.provenance.line == evidence.source.line
-    });
-    if exact.is_some() {
-        return exact;
-    }
-    let turn_id = data.records.iter().find_map(|record| {
-        (record.provenance.path == evidence.source.path
-            && record.provenance.line == evidence.source.line)
-            .then_some(record.turn_id.as_deref())
-            .flatten()
-    })?;
-    snapshots.find(|snapshot| snapshot.turn_id.as_deref() == Some(turn_id))
+    context
+        .snapshots_by_source
+        .get(&(
+            session_id,
+            evidence.source.path.as_path(),
+            evidence.source.line,
+        ))
+        .copied()
+        .or_else(|| {
+            let turn_id = context.turn_ids_by_session_source.get(&(
+                session_id,
+                evidence.source.path.as_path(),
+                evidence.source.line,
+            ))?;
+            context
+                .snapshots_by_turn
+                .get(&(session_id, *turn_id))
+                .copied()
+        })
 }
 
 fn snapshot_is_unavailable(snapshot: &InstructionSnapshot) -> bool {
@@ -663,12 +770,12 @@ fn resolve_instruction_path(join: &InstructionJoin, path: &str) -> Option<PathBu
     )))
 }
 
-fn annotate_snapshot_limitations(data: &CanonicalData, findings: &mut [Finding]) {
+fn annotate_snapshot_limitations(context: &AnalysisContext<'_>, findings: &mut [Finding]) {
     for finding in findings {
         let sessions = evidence_sessions(finding);
         let incomplete_evidence = sessions.len() < finding.distinct_sessions;
         let missing_snapshot = finding.evidence.iter().any(|evidence| {
-            evidence.session_id.is_some() && snapshot_for_evidence(data, evidence).is_none()
+            evidence.session_id.is_some() && snapshot_for_evidence(context, evidence).is_none()
         });
         if (incomplete_evidence || missing_snapshot)
             && !finding
@@ -2011,8 +2118,9 @@ mod tests {
             limitations: Vec::new(),
             verification_status: None,
         };
-        assert!(snapshot_for_evidence(&data, &base.evidence[0]).is_some());
-        assert!(snapshot_for_evidence(&data, &base.evidence[1]).is_some());
+        let context = AnalysisContext::new(&data);
+        assert!(snapshot_for_evidence(&context, &base.evidence[0]).is_some());
+        assert!(snapshot_for_evidence(&context, &base.evidence[1]).is_some());
 
         let mut matching = data.instruction_snapshots[0].clone();
         matching.turn_id = Some("fixture-analysis-turn-a-2".to_owned());
