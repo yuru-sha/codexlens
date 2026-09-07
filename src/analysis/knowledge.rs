@@ -9,8 +9,7 @@ use super::{
     AnalysisContext, AnalysisOptions, DISCOVERY_MARKERS, EvidenceRole, Finding, FindingConfidence,
     FindingSeverity, FindingType, MISSING_SNAPSHOT_LIMITATION, annotate_snapshot_limitations,
     bounded_excerpt, bounded_fingerprint, corrections, distinct_sessions, evidence_for,
-    majority_path, majority_project, majority_scope, normalize_fact, push_evidence,
-    snapshot_is_usable, sort_findings,
+    majority_path, majority_project, majority_scope, normalize_fact, push_evidence, sort_findings,
 };
 
 const LONG_FACT_BYTES: usize = 240;
@@ -71,11 +70,9 @@ pub(super) fn analyze(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> 
                     ),
                 );
             }
-            let missing_snapshot = sessions.iter().any(|session| {
-                !data.instruction_snapshots.iter().any(|snapshot| {
-                    snapshot.session_id.as_deref() == Some(session) && snapshot_is_usable(snapshot)
-                })
-            });
+            let missing_snapshot = sessions
+                .iter()
+                .any(|session| !data.has_usable_snapshot(session));
             let mut limitations = vec![
                 "This candidate uses repeated bounded lexical facts; it does not perform semantic summarization".to_owned(),
             ];
