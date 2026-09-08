@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::analysis::{
     EvidenceRef, EvidenceRole, Finding, FindingScope, VerificationStatus, bounded_excerpt,
-    sort_findings,
+    parse_timestamp, sort_findings,
 };
 use crate::model::{CanonicalData, SourceKind, SourceRef};
 use crate::store::{FreshnessState, StoreFreshness};
@@ -57,11 +57,49 @@ pub struct DoctorReport {
     pub groups: Vec<DoctorGroup>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportCoverage {
+    pub scope: String,
+    pub status: String,
+    pub activity_start: Option<String>,
+    pub activity_end: Option<String>,
+    pub valid_activity_timestamps: usize,
+    pub missing_activity_timestamps: usize,
+    pub invalid_activity_timestamps: usize,
+    pub session_count: usize,
+    pub record_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub id: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub cwd: Option<String>,
+    pub project: Option<String>,
+}
+
 const JSON_SCHEMA_VERSION: u32 = 1;
 
 pub fn render_json_finding_report(
     command: &str,
     report: &DoctorReport,
+) -> Result<String, serde_json::Error> {
+    render_json_finding_report_inner(command, report, None)
+}
+
+pub fn render_json_finding_report_with_coverage(
+    command: &str,
+    report: &DoctorReport,
+    coverage: &ReportCoverage,
+) -> Result<String, serde_json::Error> {
+    render_json_finding_report_inner(command, report, Some(coverage))
+}
+
+fn render_json_finding_report_inner(
+    command: &str,
+    report: &DoctorReport,
+    coverage: Option<&ReportCoverage>,
 ) -> Result<String, serde_json::Error> {
     let groups = report
         .groups
@@ -77,31 +115,31 @@ pub fn render_json_finding_report(
             })
         })
         .collect::<Vec<_>>();
-    json_document(
-        command,
-        serde_json::json!({
-            "period_start": report.period_start,
-            "period_end": report.period_end,
-            "session_count": report.session_count,
-            "freshness": freshness_json(&report.freshness),
-            "finding_counts": report.finding_counts,
-            "groups": groups,
-        }),
-    )
+    let mut data = serde_json::json!({
+        "period_start": report.period_start,
+        "period_end": report.period_end,
+        "session_count": report.session_count,
+        "freshness": freshness_json(&report.freshness),
+        "finding_counts": report.finding_counts,
+        "groups": groups,
+    });
+    if let Some(coverage) = coverage {
+        data["coverage"] = coverage_json(coverage);
+    }
+    json_document(command, data)
 }
 
 pub fn render_json_sessions(
     data: &CanonicalData,
     freshness: &StoreFreshness,
 ) -> Result<String, serde_json::Error> {
-    let mut sessions = data.sessions.iter().collect::<Vec<_>>();
-    sessions.sort_by(|left, right| left.id.cmp(&right.id));
-    sessions.dedup_by(|left, right| left.id == right.id);
+    let coverage = report_coverage(data);
     json_document(
         "sessions",
         serde_json::json!({
             "freshness": freshness_json(freshness),
-            "sessions": sessions.into_iter().map(|session| {
+            "coverage": coverage_json(&coverage),
+            "sessions": report_sessions(data).into_iter().map(|session| {
                 serde_json::json!({
                     "id": session.id,
                     "created_at": session.created_at,
@@ -203,6 +241,20 @@ fn freshness_json(freshness: &StoreFreshness) -> serde_json::Value {
         },
         "source_count": freshness.source_count,
         "latest_ingested_at": freshness.latest_ingested_at,
+    })
+}
+
+fn coverage_json(coverage: &ReportCoverage) -> serde_json::Value {
+    serde_json::json!({
+        "scope": coverage.scope,
+        "status": coverage.status,
+        "activity_start": coverage.activity_start,
+        "activity_end": coverage.activity_end,
+        "valid_activity_timestamps": coverage.valid_activity_timestamps,
+        "missing_activity_timestamps": coverage.missing_activity_timestamps,
+        "invalid_activity_timestamps": coverage.invalid_activity_timestamps,
+        "session_count": coverage.session_count,
+        "record_count": coverage.record_count,
     })
 }
 
@@ -377,7 +429,153 @@ pub fn doctor(
     }
 }
 
+pub fn report_sessions(data: &CanonicalData) -> Vec<SessionSummary> {
+    let mut summaries = BTreeMap::<String, SessionSummary>::new();
+    for session in &data.sessions {
+        summaries
+            .entry(session.id.clone())
+            .or_insert_with(|| SessionSummary {
+                id: session.id.clone(),
+                created_at: session.created_at.clone(),
+                updated_at: session.updated_at.clone(),
+                cwd: session.cwd.clone(),
+                project: session.project.clone(),
+            });
+    }
+    for session_id in session_ids(data) {
+        summaries
+            .entry(session_id.clone())
+            .or_insert_with(|| SessionSummary {
+                id: session_id,
+                created_at: None,
+                updated_at: None,
+                cwd: None,
+                project: None,
+            });
+    }
+    summaries.into_values().collect()
+}
+
+pub fn report_coverage(data: &CanonicalData) -> ReportCoverage {
+    let mut timestamps = Vec::<(i64, String)>::new();
+    let mut missing_activity_timestamps = 0;
+    let mut invalid_activity_timestamps = 0;
+
+    for session in &data.sessions {
+        for timestamp in [session.created_at.as_deref(), session.updated_at.as_deref()] {
+            observe_timestamp(
+                timestamp,
+                &mut timestamps,
+                &mut missing_activity_timestamps,
+                &mut invalid_activity_timestamps,
+            );
+        }
+    }
+    for turn in &data.turns {
+        for timestamp in [turn.started_at.as_deref(), turn.completed_at.as_deref()] {
+            observe_timestamp(
+                timestamp,
+                &mut timestamps,
+                &mut missing_activity_timestamps,
+                &mut invalid_activity_timestamps,
+            );
+        }
+        for event in &turn.lifecycle {
+            observe_timestamp(
+                event.timestamp.as_deref(),
+                &mut timestamps,
+                &mut missing_activity_timestamps,
+                &mut invalid_activity_timestamps,
+            );
+        }
+    }
+    for timestamp in data
+        .records
+        .iter()
+        .map(|record| record.timestamp.as_deref())
+        .chain(
+            data.messages
+                .iter()
+                .map(|message| message.timestamp.as_deref()),
+        )
+        .chain(
+            data.file_operations
+                .iter()
+                .map(|operation| operation.timestamp.as_deref()),
+        )
+        .chain(
+            data.token_usage
+                .iter()
+                .map(|usage| usage.timestamp.as_deref()),
+        )
+    {
+        observe_timestamp(
+            timestamp,
+            &mut timestamps,
+            &mut missing_activity_timestamps,
+            &mut invalid_activity_timestamps,
+        );
+    }
+
+    timestamps.sort();
+    let (activity_start, activity_end) = match (timestamps.first(), timestamps.last()) {
+        (Some(start), Some(end)) => (Some(start.1.clone()), Some(end.1.clone())),
+        _ => (None, None),
+    };
+    let valid_activity_timestamps = timestamps.len();
+    let session_count = session_count(data);
+    let record_count = data.records.len();
+    let status = if session_count == 0
+        && record_count == 0
+        && valid_activity_timestamps == 0
+        && missing_activity_timestamps == 0
+        && invalid_activity_timestamps == 0
+    {
+        "empty"
+    } else if valid_activity_timestamps == 0
+        || missing_activity_timestamps > 0
+        || invalid_activity_timestamps > 0
+    {
+        "partial"
+    } else {
+        "observed"
+    };
+
+    ReportCoverage {
+        scope: "selected_store".to_owned(),
+        status: status.to_owned(),
+        activity_start,
+        activity_end,
+        valid_activity_timestamps,
+        missing_activity_timestamps,
+        invalid_activity_timestamps,
+        session_count,
+        record_count,
+    }
+}
+
+fn observe_timestamp(
+    timestamp: Option<&str>,
+    valid: &mut Vec<(i64, String)>,
+    missing: &mut usize,
+    invalid: &mut usize,
+) {
+    let Some(timestamp) = timestamp else {
+        *missing += 1;
+        return;
+    };
+    let Some(parsed) = parse_timestamp(timestamp) else {
+        *invalid += 1;
+        return;
+    };
+    valid.push((parsed, timestamp.trim().to_owned()));
+}
+
 fn session_count(data: &CanonicalData) -> usize {
+    session_ids(data).len()
+}
+
+fn session_ids(data: &CanonicalData) -> BTreeSet<String> {
     let mut sessions = BTreeSet::new();
     sessions.extend(data.sessions.iter().map(|session| session.id.clone()));
     sessions.extend(data.turns.iter().filter_map(|turn| turn.session_id.clone()));
@@ -421,7 +619,34 @@ fn session_count(data: &CanonicalData) -> usize {
             .iter()
             .map(|join| join.session_id.clone()),
     );
-    sessions.len()
+    sessions
+}
+
+fn period(data: &CanonicalData) -> (Option<String>, Option<String>) {
+    let mut values = Vec::new();
+    values.extend(data.sessions.iter().flat_map(|session| {
+        [session.created_at.as_ref(), session.updated_at.as_ref()]
+            .into_iter()
+            .flatten()
+            .cloned()
+    }));
+    values.extend(
+        data.records
+            .iter()
+            .filter_map(|record| record.timestamp.clone()),
+    );
+    values.extend(
+        data.messages
+            .iter()
+            .filter_map(|message| message.timestamp.clone()),
+    );
+    values.extend(
+        data.file_operations
+            .iter()
+            .filter_map(|operation| operation.timestamp.clone()),
+    );
+    values.sort();
+    (values.first().cloned(), values.last().cloned())
 }
 
 fn scope_rank(scope: &FindingScope) -> u8 {
@@ -456,34 +681,15 @@ fn sanitize_finding(mut finding: Finding, excerpt_max_bytes: usize) -> Finding {
     finding
 }
 
-fn period(data: &CanonicalData) -> (Option<String>, Option<String>) {
-    let mut values = Vec::new();
-    values.extend(data.sessions.iter().flat_map(|session| {
-        [session.created_at.as_ref(), session.updated_at.as_ref()]
-            .into_iter()
-            .flatten()
-            .cloned()
-    }));
-    values.extend(
-        data.records
-            .iter()
-            .filter_map(|record| record.timestamp.clone()),
-    );
-    values.extend(
-        data.messages
-            .iter()
-            .filter_map(|message| message.timestamp.clone()),
-    );
-    values.extend(
-        data.file_operations
-            .iter()
-            .filter_map(|operation| operation.timestamp.clone()),
-    );
-    values.sort();
-    (values.first().cloned(), values.last().cloned())
+pub fn render_doctor(report: &DoctorReport) -> String {
+    render_doctor_inner(report, None)
 }
 
-pub fn render_doctor(report: &DoctorReport) -> String {
+pub fn render_doctor_with_coverage(report: &DoctorReport, coverage: &ReportCoverage) -> String {
+    render_doctor_inner(report, Some(coverage))
+}
+
+fn render_doctor_inner(report: &DoctorReport, coverage: Option<&ReportCoverage>) -> String {
     let mut output = String::new();
     output.push_str("Analyzed period: ");
     match (&report.period_start, &report.period_end) {
@@ -496,11 +702,15 @@ pub fn render_doctor(report: &DoctorReport) -> String {
         _ => output.push_str("unknown"),
     }
     output.push('\n');
-    output.push_str(&format!("Sessions: {}\n", report.session_count));
-    output.push_str(&format!(
-        "Store freshness: {} ({} source files)\n",
-        report.freshness, report.freshness.source_count
-    ));
+    if let Some(coverage) = coverage {
+        output.push_str(&render_report_metadata(coverage, &report.freshness));
+    } else {
+        output.push_str(&format!("Sessions: {}\n", report.session_count));
+        output.push_str(&format!(
+            "Store freshness: {} ({} source files)\n",
+            report.freshness, report.freshness.source_count
+        ));
+    }
     output.push_str("Finding counts:");
     if report.finding_counts.is_empty() {
         output.push_str(" none\n");
@@ -554,6 +764,28 @@ pub fn render_doctor(report: &DoctorReport) -> String {
     output
 }
 
+pub fn render_report_metadata(coverage: &ReportCoverage, freshness: &StoreFreshness) -> String {
+    let period = match (&coverage.activity_start, &coverage.activity_end) {
+        (Some(start), Some(end)) if start == end => start.clone(),
+        (Some(start), Some(end)) => format!("{start} .. {end}"),
+        _ => "unknown".to_owned(),
+    };
+    let scope = coverage.scope.replace('_', " ");
+    format!(
+        "Coverage: {} ({}; not necessarily all historical activity or current raw inputs; refresh explicitly, archives via --include-archived)\nActivity: {period}\nActivity timestamps: {} valid, {} missing, {} invalid\nSessions: {}\nRecords: {}\nLatest ingestion: {}\nStore freshness: {} ({} source files)\n",
+        scope,
+        coverage.status,
+        coverage.valid_activity_timestamps,
+        coverage.missing_activity_timestamps,
+        coverage.invalid_activity_timestamps,
+        coverage.session_count,
+        coverage.record_count,
+        freshness.latest_ingested_at.as_deref().unwrap_or("unknown"),
+        freshness,
+        freshness.source_count,
+    )
+}
+
 fn source_label(source: &SourceRef) -> String {
     match source.line {
         Some(line) => format!("{}:{line}", source.path.display()),
@@ -600,6 +832,7 @@ mod tests {
     use crate::advisor::test_support::{finding, proposal};
     use crate::advisor::{ProposalAction, RenderedDiff};
     use crate::analysis::{FindingScope, FindingType, VerificationStatus};
+    use crate::model::{Record, RecordKind, Session};
     use crate::store::StoreFreshness;
     use std::path::PathBuf;
 
@@ -635,6 +868,149 @@ mod tests {
         );
         assert!(render_doctor(&report).contains("heuristic: repeated failed tool outcome"));
         assert_eq!(report.freshness.source_count, 2);
+    }
+
+    #[test]
+    fn coverage_counts_valid_missing_and_invalid_activity_without_ingestion_fallback() {
+        let session = |id: &str, created_at: Option<&str>, updated_at: Option<&str>| Session {
+            id: id.to_owned(),
+            created_at: created_at.map(str::to_owned),
+            updated_at: updated_at.map(str::to_owned),
+            cwd: None,
+            project: None,
+            model: None,
+            provider: None,
+            source: None,
+            thread_source: None,
+            rollout_path: None,
+            archive_state: None,
+            title: None,
+            preview: None,
+            parent_id: None,
+            cli_version: None,
+            originator: None,
+            history_mode: None,
+            reasoning_effort: None,
+            provenance: crate::advisor::test_support::source(1),
+        };
+        let record = |timestamp: Option<&str>| Record {
+            session_id: Some("session-a".to_owned()),
+            turn_id: None,
+            timestamp: timestamp.map(str::to_owned),
+            sequence: 0,
+            original_record_type: None,
+            original_nested_type: None,
+            error_category: None,
+            is_error: false,
+            is_terminal: false,
+            kind: RecordKind::ResponseItem,
+            provenance: crate::advisor::test_support::source(1),
+        };
+        let data = CanonicalData {
+            sessions: vec![
+                session("session-a", Some("2026-01-02T00:00:00Z"), None),
+                session(
+                    "session-b",
+                    Some("not-a-timestamp"),
+                    Some("2026-01-04T00:00:00+09:00"),
+                ),
+            ],
+            records: vec![
+                record(Some("2026-01-01T00:00:00Z")),
+                record(None),
+                record(Some("also-not-a-timestamp")),
+            ],
+            ..CanonicalData::default()
+        };
+
+        let coverage = report_coverage(&data);
+
+        assert_eq!(coverage.status, "partial");
+        assert_eq!(
+            coverage.activity_start.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            coverage.activity_end.as_deref(),
+            Some("2026-01-04T00:00:00+09:00")
+        );
+        assert_eq!(coverage.valid_activity_timestamps, 3);
+        assert_eq!(coverage.missing_activity_timestamps, 2);
+        assert_eq!(coverage.invalid_activity_timestamps, 2);
+        assert_eq!(coverage.session_count, 2);
+        assert_eq!(coverage.record_count, 3);
+
+        let record_only = CanonicalData {
+            records: vec![record(Some("2026-01-01T00:00:00Z"))],
+            ..CanonicalData::default()
+        };
+        let summaries = report_sessions(&record_only);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "session-a");
+        assert!(summaries[0].created_at.is_none());
+    }
+
+    #[test]
+    fn legacy_period_fields_remain_separate_from_valid_activity_coverage() {
+        let data = CanonicalData {
+            sessions: vec![Session {
+                id: "session".to_owned(),
+                created_at: Some("2026-01-01T00:00:00+09:00".to_owned()),
+                updated_at: None,
+                cwd: None,
+                project: None,
+                model: None,
+                provider: None,
+                source: None,
+                thread_source: None,
+                rollout_path: None,
+                archive_state: None,
+                title: None,
+                preview: None,
+                parent_id: None,
+                cli_version: None,
+                originator: None,
+                history_mode: None,
+                reasoning_effort: None,
+                provenance: crate::advisor::test_support::source(1),
+            }],
+            records: vec![Record {
+                session_id: Some("session".to_owned()),
+                turn_id: None,
+                timestamp: Some("2025-12-31T20:00:00Z".to_owned()),
+                sequence: 0,
+                original_record_type: None,
+                original_nested_type: None,
+                error_category: None,
+                is_error: false,
+                is_terminal: false,
+                kind: RecordKind::ResponseItem,
+                provenance: crate::advisor::test_support::source(1),
+            }],
+            ..CanonicalData::default()
+        };
+
+        let report = doctor(
+            &data,
+            &[],
+            StoreFreshness::recorded(1, Some("2099-01-01T00:00:00Z".to_owned())),
+            &DoctorOptions::default(),
+        );
+
+        assert_eq!(report.period_start.as_deref(), Some("2025-12-31T20:00:00Z"));
+        assert_eq!(
+            report.period_end.as_deref(),
+            Some("2026-01-01T00:00:00+09:00")
+        );
+        let coverage = report_coverage(&data);
+        assert_eq!(
+            coverage.activity_start.as_deref(),
+            Some("2026-01-01T00:00:00+09:00")
+        );
+        assert_eq!(
+            coverage.activity_end.as_deref(),
+            Some("2025-12-31T20:00:00Z")
+        );
     }
 
     #[test]

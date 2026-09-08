@@ -9,8 +9,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use codexlens::advisor::{
     ApplyPlan, ApplyReport, DiffBatch, DoctorOptions, doctor, prepare_apply_proposals,
-    proposals_for_findings, render_diffs, render_doctor, render_json_diff,
-    render_json_finding_report, render_json_sessions, render_proposal_summary,
+    proposals_for_findings, render_diffs, render_doctor_with_coverage, render_json_diff,
+    render_json_finding_report_with_coverage, render_json_sessions, render_proposal_summary,
+    render_report_metadata, report_coverage, report_sessions,
 };
 use codexlens::analysis::{
     Finding, analyze_default, corrections, failures, instructions, knowledge, rework, verification,
@@ -311,9 +312,15 @@ fn main() -> Result<()> {
                     ..DoctorOptions::default()
                 },
             );
+            let coverage = report_coverage(&data);
             store.format.write_report(
-                || (render_doctor(&report), String::new()),
-                || render_json_finding_report("doctor", &report),
+                || {
+                    (
+                        render_doctor_with_coverage(&report, &coverage),
+                        String::new(),
+                    )
+                },
+                || render_json_finding_report_with_coverage("doctor", &report, &coverage),
             )
         }
         Command::Optimize {
@@ -839,9 +846,15 @@ fn run_finding_report(
 ) -> Result<()> {
     let (data, freshness) = load_store(options)?;
     let report = doctor(&data, &lens(&data), freshness, &DoctorOptions::default());
+    let coverage = report_coverage(&data);
     options.format.write_report(
-        || (render_doctor(&report), String::new()),
-        || render_json_finding_report(command, &report),
+        || {
+            (
+                render_doctor_with_coverage(&report, &coverage),
+                String::new(),
+            )
+        },
+        || render_json_finding_report_with_coverage(command, &report, &coverage),
     )
 }
 
@@ -866,17 +879,8 @@ fn render_optimize_human(batch: &DiffBatch) -> (String, String) {
 }
 
 fn render_sessions(data: &CanonicalData, freshness: &StoreFreshness) -> String {
-    let mut sessions = data.sessions.iter().collect::<Vec<_>>();
-    sessions.sort_by(|left, right| left.id.cmp(&right.id));
-    sessions.dedup_by(|left, right| left.id == right.id);
-
-    let mut output = format!(
-        "Store freshness: {} ({} source files)\nSessions: {}\n",
-        freshness,
-        freshness.source_count,
-        sessions.len()
-    );
-    for session in sessions {
+    let mut output = render_report_metadata(&report_coverage(data), freshness);
+    for session in report_sessions(data) {
         output.push_str("- ");
         output.push_str(&session.id);
         output.push('\n');

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use codexlens::advisor::DoctorReport;
 use codexlens::discovery::{DiscoveredInput, InputKind, ReaderKind};
 use codexlens::model::{
     DiagnosticKind, InstructionFile, InstructionFileKind, InstructionFileState, InstructionScope,
@@ -44,6 +45,19 @@ struct KnownFreshness {
     state: String,
     source_count: usize,
     latest_ingested_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownCoverage {
+    scope: String,
+    status: String,
+    activity_start: Option<String>,
+    activity_end: Option<String>,
+    valid_activity_timestamps: usize,
+    missing_activity_timestamps: usize,
+    invalid_activity_timestamps: usize,
+    session_count: usize,
+    record_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +109,7 @@ struct KnownFindingData {
     period_end: Option<String>,
     session_count: usize,
     freshness: KnownFreshness,
+    coverage: KnownCoverage,
     finding_counts: BTreeMap<String, usize>,
     groups: Vec<KnownFindingGroup>,
 }
@@ -118,6 +133,7 @@ struct KnownSession {
 #[derive(Debug, Deserialize)]
 struct KnownSessionsData {
     freshness: KnownFreshness,
+    coverage: KnownCoverage,
     sessions: Vec<KnownSession>,
 }
 
@@ -173,6 +189,23 @@ struct KnownOptimizeDocument {
     schema_version: u32,
     command: String,
     data: KnownOptimizeData,
+}
+
+fn assert_known_coverage(coverage: &KnownCoverage) {
+    assert_eq!(coverage.scope, "selected_store");
+    assert!(matches!(
+        coverage.status.as_str(),
+        "empty" | "observed" | "partial"
+    ));
+    let _ = (
+        &coverage.activity_start,
+        &coverage.activity_end,
+        coverage.valid_activity_timestamps,
+        coverage.missing_activity_timestamps,
+        coverage.invalid_activity_timestamps,
+        coverage.session_count,
+        coverage.record_count,
+    );
 }
 
 fn assert_known_proposal(proposal: &KnownProposal) {
@@ -1406,7 +1439,7 @@ fn post_mvp_contract_spec_tracks_documented_boundaries() {
         "compatibility and privacy contract for the implemented Phase 5",
         "Implementation status: implemented by Issue #57",
         "Implementation status: implemented by Issue #58",
-        "Implementation status: implemented by Issue #59",
+        "Implementation status: implemented by Issues #59 and #82",
         "Implementation status: implemented by Issue #60",
         "Implementation status: implemented by Issue #61",
         "Before a future feature issue extends",
@@ -2183,6 +2216,82 @@ fn json_doctor_matches_human_counts_scopes_evidence_and_order() {
 }
 
 #[test]
+fn reporting_metadata_exposes_store_coverage_and_separates_ingestion_time() {
+    let store = fixture_store();
+    let human = run_args(&["doctor"], &store);
+    assert!(human.status.success());
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(human_stdout.contains(
+        "Coverage: selected store (partial; not necessarily all historical activity or current raw inputs; refresh explicitly, archives via --include-archived)"
+    ));
+    assert!(
+        human_stdout.contains("Activity: 2026-01-03T00:00:00.000Z .. 2026-01-04T00:05:00.000Z")
+    );
+    assert!(human_stdout.contains("Records: 16"), "{human_stdout}");
+    assert!(
+        human_stdout.contains("Latest ingestion: "),
+        "{human_stdout}"
+    );
+
+    let document = parse_json_report(&run_args(&["doctor", "--format", "json"], &store), "doctor");
+    let coverage = &document["data"]["coverage"];
+    assert_eq!(coverage["scope"], "selected_store");
+    assert_eq!(coverage["status"], "partial");
+    assert_eq!(coverage["activity_start"], "2026-01-03T00:00:00.000Z");
+    assert_eq!(coverage["activity_end"], "2026-01-04T00:05:00.000Z");
+    assert_eq!(coverage["session_count"], 2);
+    assert_eq!(coverage["record_count"], 16);
+    assert!(coverage["valid_activity_timestamps"].as_u64().unwrap() > 0);
+    assert!(coverage["missing_activity_timestamps"].as_u64().unwrap() > 0);
+    assert_eq!(coverage["invalid_activity_timestamps"], 0);
+    assert_ne!(
+        coverage["activity_end"],
+        document["data"]["freshness"]["latest_ingested_at"]
+    );
+
+    let sessions = parse_json_report(
+        &run_args(&["sessions", "--format", "json"], &store),
+        "sessions",
+    );
+    assert_eq!(sessions["data"]["coverage"], coverage.clone());
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn empty_reporting_store_marks_activity_unknown_without_using_ingestion_time() {
+    let store = empty_store();
+    for args in [
+        &["sessions"][..],
+        &["sessions", "--format", "json"][..],
+        &["doctor"][..],
+        &["doctor", "--format", "json"][..],
+    ] {
+        let output = run_args(args, &store);
+        assert!(output.status.success(), "{args:?}");
+        if args.contains(&"--format") {
+            let command = args[0];
+            let document = parse_json_report(&output, command);
+            let coverage = &document["data"]["coverage"];
+            assert_eq!(coverage["status"], "empty", "{args:?}");
+            assert!(coverage["activity_start"].is_null(), "{args:?}");
+            assert!(coverage["activity_end"].is_null(), "{args:?}");
+            assert_eq!(coverage["session_count"], 0, "{args:?}");
+            assert_eq!(coverage["record_count"], 0, "{args:?}");
+            assert!(document["data"]["freshness"]["latest_ingested_at"].is_null());
+        } else {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("Coverage: selected store (empty;"),
+                "{stdout}"
+            );
+            assert!(stdout.contains("Activity: unknown"), "{stdout}");
+            assert!(stdout.contains("Latest ingestion: unknown"), "{stdout}");
+        }
+    }
+    let _ = fs::remove_file(store);
+}
+
+#[test]
 fn optimize_json_contains_typed_proposals_and_keeps_skips_in_document() {
     let (store, target, project_root) = rendered_diff_store();
     let output = run_args(&["optimize", "--diff", "--format", "json"], &store);
@@ -2392,6 +2501,20 @@ fn json_errors_stay_on_stderr_for_every_reporting_command() {
 }
 
 #[test]
+fn doctor_report_public_struct_literal_remains_compatible() {
+    let report = DoctorReport {
+        period_start: None,
+        period_end: None,
+        session_count: 0,
+        freshness: codexlens::store::StoreFreshness::recorded(0, None),
+        finding_counts: BTreeMap::new(),
+        groups: Vec::new(),
+    };
+
+    assert_eq!(report.session_count, 0);
+}
+
+#[test]
 fn json_schema_readers_can_ignore_unknown_optional_fields() {
     let store = fixture_store();
     let mut document = parse_json_report(
@@ -2416,6 +2539,9 @@ fn json_schema_readers_can_ignore_unknown_optional_fields() {
     assert_eq!(decoded.data.freshness.state, "recorded");
     assert!(decoded.data.freshness.source_count > 0);
     assert!(decoded.data.freshness.latest_ingested_at.is_some());
+    assert_known_coverage(&decoded.data.coverage);
+    assert!(decoded.data.coverage.valid_activity_timestamps > 0);
+    assert!(decoded.data.coverage.record_count > 0);
     assert!(!decoded.data.finding_counts.is_empty());
     assert!(!decoded.data.groups.is_empty());
     assert!(decoded.data.groups.iter().any(|group| {
@@ -2473,6 +2599,9 @@ fn json_schema_readers_cover_sessions_and_optimize_shapes() {
     assert_eq!(sessions.schema_version, 1);
     assert_eq!(sessions.command, "sessions");
     assert_eq!(sessions.data.freshness.state, "recorded");
+    assert_known_coverage(&sessions.data.coverage);
+    assert!(sessions.data.coverage.session_count > 0);
+    assert!(sessions.data.coverage.record_count > 0);
     assert!(!sessions.data.sessions.is_empty());
     for session in &sessions.data.sessions {
         let _ = (
