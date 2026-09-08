@@ -5,6 +5,7 @@ boundaries, plus an entry contract for future feature issues. The compressed
 rollout reader in section 1, refresh/frozen reporting in section 2,
 machine-readable output in section 3, live monitoring in section 4, and safe
 apply in section 5 are implemented by issues #57, #58, #59, #60, and #61.
+Issue #82 adds the shared read-only reporting coverage metadata in section 3.
 
 Issue #53 originally tracked the capabilities that crossed the MVP input,
 runtime, output, or write boundary. Issues #57 through #61 implement sections
@@ -65,6 +66,11 @@ extensions are kept explicit:
   `optimize_diff_renders_a_proposal_without_writing_the_target` cover the
   current deterministic human-readable, bounded-evidence, and read-only
   reporting behavior.
+- `reporting_metadata_exposes_store_coverage_and_separates_ingestion_time` and
+  `empty_reporting_store_marks_activity_unknown_without_using_ingestion_time`
+  cover multi-session spans, explicit empty/partial coverage, missing and
+  invalid activity timestamps, distinct ingestion time, and deterministic JSON
+  metadata.
 
 The executable tests cover the primary compatibility and privacy boundaries
 described below. The remaining cases are contract requirements for future
@@ -163,10 +169,11 @@ discovers or ingests raw inputs; reporting does not refresh implicitly.
 
 ## 3. Machine-readable output
 
-Implementation status: implemented by Issue #59.
+Implementation status: implemented by Issues #59 and #82.
 
 This section is implemented for the supported reporting commands by issue
-#59. The default human-readable output remains unchanged.
+#59 and the coverage extension in #82. The default human-readable output
+remains compatible; #82 adds the coverage metadata prefix described below.
 
 ### Scope
 
@@ -190,14 +197,15 @@ The top-level JSON contract is versioned and uses stable snake-case fields:
 - Finding commands (`analyze`, `failures`, `corrections`, `rework`, `stuck`,
   `verification`, `knowledge`, `rediscovery`, `instructions`, and `doctor`)
   use `{period_start, period_end, session_count, freshness, finding_counts,
-  groups}`. `freshness` is `{state, source_count, latest_ingested_at}`;
+  groups}` with optional additive `coverage`. `freshness` is
+  `{state, source_count, latest_ingested_at}`;
   `groups` is an ordered array of `{scope, findings}`; each finding contains
   the typed `Finding` fields `kind`, `severity`, `confidence`, `scope`, `key`,
   `summary`, `evidence`, `occurrences`, `distinct_sessions`,
   `affected_paths`, `observed_commands`, `sequence`, `suggested_action`,
   `limitations`, and `verification_status`, plus `heuristic`.
-- `sessions` uses `{freshness, sessions}`, where each session is
-  `{id, created_at, updated_at, cwd, project}`.
+- `sessions` uses `{freshness, sessions}` with optional additive `coverage`,
+  where each session is `{id, created_at, updated_at, cwd, project}`.
 - `optimize --diff` uses `{rendered, skipped}`, where `rendered` contains the
   typed proposal and unified `diff`, and `skipped` contains
   `{target_path, reason, proposal}`. `proposal` is the typed proposal when a
@@ -226,7 +234,8 @@ knowledge | instructions | doctor | optimize_diff`, and `data: object`.
 Finding-report data has `period_start: string | null`,
 `period_end: string | null`, `session_count: non-negative integer`,
 `freshness: Freshness`, `finding_counts: object<string, non-negative integer>`,
-and `groups: FindingGroup[]`. `Freshness` has required
+and `groups: FindingGroup[]`, plus optional additive `coverage: Coverage`.
+`Freshness` has required
 `state: empty | recorded`, `source_count: non-negative integer`, and
 `latest_ingested_at: string | null`.
 
@@ -258,7 +267,8 @@ types named by their fields, and each array is present even when empty. Each
 `heuristic` and `diff` are required strings. The wrapper's `rendered` and
 `skipped` arrays are present even when empty.
 
-The `sessions` data object is `{freshness: Freshness, sessions: Session[]}`;
+The `sessions` data object is `{freshness: Freshness, optional coverage:
+Coverage, sessions: Session[]}`;
 `Session` is `{id: string, created_at: string | null, updated_at: string | null,
 cwd: string | null, project: string | null}`. A `RenderedDiff` is
 `{proposal: Proposal, diff: string}`. A `Proposal` has required
@@ -276,6 +286,55 @@ rendered proposal is omitted for machine-output safety, `proposal` preserves
 its bounded scope and evidence references so the machine report remains
 comparable with the human proposal summary.
 
+### Reporting coverage metadata
+
+Issue #82 adds the same additive `coverage` object to `sessions` and finding
+reports (the shared finding renderer also exposes it for focused lens
+commands). The JSON schema remains version `1`: existing required fields,
+freshness fields, command names, and aliases keep their meaning, while
+`coverage` is an optional object that current producers always emit. Existing
+readers must continue ignoring unknown optional fields; a future change to the
+meaning or type of an existing field still requires a new schema version.
+
+`Coverage` is:
+
+```text
+{
+  "scope": "selected_store",
+  "status": "empty | observed | partial",
+  "activity_start": "timestamp | null",
+  "activity_end": "timestamp | null",
+  "valid_activity_timestamps": non-negative integer,
+  "missing_activity_timestamps": non-negative integer,
+  "invalid_activity_timestamps": non-negative integer,
+  "session_count": non-negative integer,
+  "record_count": non-negative integer
+}
+```
+
+The report covers exactly the selected derived store. It does not claim to
+cover all historical activity or currently available raw inputs. `refresh` is
+the only operation that discovers or ingests raw inputs; reporting never
+refreshes implicitly, and archived sessions are included only when refresh is
+run with `--include-archived`.
+
+`session_count` is the number of distinct session IDs observed across the
+canonical session-bearing data. `record_count` is the number of canonical
+`Record` rows, including unknown record kinds. Activity timestamp counts are
+field observations, not distinct instants: they include session
+`created_at`/`updated_at`, turn start/completion and lifecycle timestamps, and
+the canonical record, message, file-operation, and token-usage timestamps.
+Missing fields increment `missing_activity_timestamps`; present values that do
+not pass the existing timestamp parser increment `invalid_activity_timestamps`.
+`activity_start` and `activity_end` use only valid observed activity times and
+are `null` when none exist. The latest recorded ingestion time remains only in
+`freshness.latest_ingested_at`; it is never substituted for an unknown activity
+time. `empty` means there are no canonical sessions, records, or timestamp
+observations; `partial` means at least one timestamp observation is missing or
+invalid; otherwise the status is `observed`. The `sessions` list uses the same
+session-ID set as `session_count`; an ID inferred from canonical records or
+other session-bearing rows has `null` metadata when no session row exists.
+
 For `optimize --diff`, `action` is `add | modify | remove | move_to_docs |
 split_scope`; all fields are required, including nullable fields, as defined
 by `Proposal` above.
@@ -291,7 +350,12 @@ no ANSI control sequences, and exactly one final LF. Its grammar is:
 
 ```text
 Analyzed period: <unknown | timestamp | timestamp .. timestamp>\n
+Coverage: selected store (<empty | observed | partial>; bounded scope note)\n
+Activity: <unknown | timestamp | timestamp .. timestamp>\n
+Activity timestamps: <integer> valid, <integer> missing, <integer> invalid\n
 Sessions: <non-negative integer>\n
+Records: <non-negative integer>\n
+Latest ingestion: <unknown | timestamp>\n
 Store freshness: <empty | recorded | recorded at timestamp> (<integer> source files)\n
 Finding counts: <none | kind=integer[, kind=integer...]>\n
 \n[<scope>]\n
@@ -321,10 +385,10 @@ creating extra grammar lines.
 The command-specific empty and alias forms are exact:
 
 - Finding commands (`analyze`, each focused lens, `doctor`, and their aliases)
-  emit only the four header lines above when there are no groups; the fourth
-  line is exactly `Finding counts: none`.
-- `sessions` emits exactly `Store freshness`, `Sessions: <n>`, and, for each
-  session in lexicographic `id` order, `- <id>` followed by exactly
+  emit the coverage metadata lines above and `Finding counts: none` when there
+  are no groups.
+- `sessions` emits the coverage metadata lines above and, for each session in
+  lexicographic `id` order, `- <id>` followed by exactly
   `created`, `updated`, `cwd`, and `project` lines. It emits no session block
   when `<n>` is zero.
 - `optimize --diff` emits `No applicable proposals.` followed by one LF when

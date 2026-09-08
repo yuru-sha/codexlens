@@ -1427,7 +1427,7 @@ fn secret_value_end(value: &str, start: usize, quoted: Option<char>) -> usize {
         .map_or(value.len(), |(offset, _)| start + offset)
 }
 
-fn parse_timestamp(value: &str) -> Option<i64> {
+pub(crate) fn parse_timestamp(value: &str) -> Option<i64> {
     let value = value.trim();
     if value.len() < 20 {
         return None;

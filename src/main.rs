@@ -11,6 +11,7 @@ use codexlens::advisor::{
     ApplyPlan, ApplyReport, DiffBatch, DoctorOptions, doctor, prepare_apply_proposals,
     proposals_for_findings, render_diffs, render_doctor, render_json_diff,
     render_json_finding_report, render_json_sessions, render_proposal_summary,
+    render_report_metadata, report_coverage, report_sessions,
 };
 use codexlens::analysis::{
     Finding, analyze_default, corrections, failures, instructions, knowledge, rework, verification,
@@ -866,17 +867,8 @@ fn render_optimize_human(batch: &DiffBatch) -> (String, String) {
 }
 
 fn render_sessions(data: &CanonicalData, freshness: &StoreFreshness) -> String {
-    let mut sessions = data.sessions.iter().collect::<Vec<_>>();
-    sessions.sort_by(|left, right| left.id.cmp(&right.id));
-    sessions.dedup_by(|left, right| left.id == right.id);
-
-    let mut output = format!(
-        "Store freshness: {} ({} source files)\nSessions: {}\n",
-        freshness,
-        freshness.source_count,
-        sessions.len()
-    );
-    for session in sessions {
+    let mut output = render_report_metadata(&report_coverage(data), freshness);
+    for session in report_sessions(data) {
         output.push_str("- ");
         output.push_str(&session.id);
         output.push('\n');
