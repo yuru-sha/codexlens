@@ -550,6 +550,57 @@ outcome.
 - Recovery failures are explicit and actionable; the command never reports
   success while any file or backup is in an unknown state.
 
+## 6. Scoped finding evaluation
+
+Status: planning contract for Issue #84. This section defines how a bounded
+human-reviewed local pilot may evaluate findings and proposals; it does not
+claim that a real-history pilot has been run or add an automated analytics
+backend.
+
+### Scope
+
+Before reading real history, the owner must select and authorize the
+source/project scope, observation period, archive inclusion, storage location,
+and retention/deletion policy. The pilot records the exact code version,
+relevant settings, resolved interval, observed coverage and sample counts, and
+store freshness. It reviews bounded samples by lens and severity, records
+`actionable`, `incorrect`, or `inconclusive` judgments with denominators, and
+checks a small independent activity sample for missed problems.
+
+`optimize --diff` is the proposal-evaluation boundary. It remains review-only;
+optimize --apply requires separate review and authorization. Before-and-after
+comparisons use the documented comparable windows and normalized denominators,
+and report observed associations without causal claims. Results contain only
+concise aggregates, limitations, prioritized decisions, and synthetic examples.
+
+The executable procedure is the [finding usefulness pilot runbook](../evaluations/finding-usefulness-pilot.md).
+Until the coverage and period contracts in #82 and #83 are available, any real
+run must disclose unfiltered selected-store coverage and must not claim a
+comparable period.
+
+### Compatibility tests
+
+- The runbook blocks a real read until all owner authorization fields are
+  recorded and keeps the selected store and refresh/frozen boundary explicit.
+- The sample worksheet records population and review denominators separately,
+  includes all three usefulness judgments, and includes an independent
+  activity sample.
+- Proposal review uses `optimize --diff` and records skipped proposals and
+  scope accuracy; no evaluation step invokes `optimize --apply`.
+- A comparison records the resolved intervals, shared selection semantics, and
+  normalized denominators, while keeping association separate from causation.
+- A confirmed failure maps to a newly constructed synthetic regression case and
+  a narrowly scoped follow-up issue.
+
+### Privacy tests
+
+- Raw logs, excerpts, credentials, personal identifiers, and private paths are
+  kept outside committed artifacts and GitHub.
+- The derived store and detailed worksheet follow the owner-selected
+  retention/deletion policy; reporting remains local and source read-only.
+- Published output is bounded aggregate evidence with synthetic examples only,
+  and no automatic instruction edit or external analytics service.
+
 ## Entry gate for implementation issues
 
 Before a future feature issue extends one section or changes a boundary, it
