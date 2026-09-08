@@ -69,6 +69,7 @@ struct AnalysisContext<'a> {
     record_positions: HashMap<SourceKey<'a>, (Option<i64>, usize)>,
     turn_ids_by_session_source: HashMap<SnapshotSourceKey<'a>, &'a str>,
     snapshots_by_source: HashMap<SnapshotSourceKey<'a>, &'a InstructionSnapshot>,
+    unusable_snapshots_by_source: HashSet<SnapshotSourceKey<'a>>,
     snapshots_by_turn: HashMap<SnapshotTurnKey<'a>, &'a InstructionSnapshot>,
     usable_snapshot_sessions: HashSet<&'a str>,
     calls_by_id: HashMap<&'a str, Vec<&'a ToolCall>>,
@@ -103,25 +104,24 @@ impl<'a> AnalysisContext<'a> {
         }
 
         let mut snapshots_by_source = HashMap::with_capacity(data.instruction_snapshots.len());
+        let mut unusable_snapshots_by_source = HashSet::new();
         let mut snapshots_by_turn = HashMap::with_capacity(data.instruction_snapshots.len());
         let mut usable_snapshot_sessions = HashSet::new();
         for snapshot in &data.instruction_snapshots {
-            if !snapshot_is_usable(snapshot) {
-                continue;
-            }
             let Some(session_id) = snapshot.session_id.as_deref() else {
                 continue;
             };
-            usable_snapshot_sessions.insert(session_id);
-            insert_snapshot(
-                &mut snapshots_by_source,
-                (
-                    session_id,
-                    snapshot.provenance.path.as_path(),
-                    snapshot.provenance.line,
-                ),
-                snapshot,
+            let source_key = (
+                session_id,
+                snapshot.provenance.path.as_path(),
+                snapshot.provenance.line,
             );
+            if !snapshot_is_usable(snapshot) {
+                unusable_snapshots_by_source.insert(source_key);
+                continue;
+            }
+            usable_snapshot_sessions.insert(session_id);
+            insert_snapshot(&mut snapshots_by_source, source_key, snapshot);
             if let Some(turn_id) = snapshot.turn_id.as_deref() {
                 insert_snapshot(&mut snapshots_by_turn, (session_id, turn_id), snapshot);
             }
@@ -162,6 +162,7 @@ impl<'a> AnalysisContext<'a> {
             record_positions,
             turn_ids_by_session_source,
             snapshots_by_source,
+            unusable_snapshots_by_source,
             snapshots_by_turn,
             usable_snapshot_sessions,
             calls_by_id,
@@ -729,20 +730,20 @@ fn snapshot_for_evidence<'a>(
     evidence: &EvidenceRef,
 ) -> Option<&'a InstructionSnapshot> {
     let session_id = evidence.session_id.as_deref()?;
+    let source_key = (
+        session_id,
+        evidence.source.path.as_path(),
+        evidence.source.line,
+    );
     context
         .snapshots_by_source
-        .get(&(
-            session_id,
-            evidence.source.path.as_path(),
-            evidence.source.line,
-        ))
+        .get(&source_key)
         .copied()
         .or_else(|| {
-            let turn_id = context.turn_ids_by_session_source.get(&(
-                session_id,
-                evidence.source.path.as_path(),
-                evidence.source.line,
-            ))?;
+            if context.unusable_snapshots_by_source.contains(&source_key) {
+                return None;
+            }
+            let turn_id = context.turn_ids_by_session_source.get(&source_key)?;
             context
                 .snapshots_by_turn
                 .get(&(session_id, *turn_id))
@@ -1627,6 +1628,83 @@ mod tests {
         let first_output = serde_json::to_string(&findings).unwrap();
         let second_output = serde_json::to_string(&analyze_default(&data)).unwrap();
         assert_eq!(first_output, second_output);
+    }
+
+    #[test]
+    fn exact_unusable_snapshots_make_instruction_comparison_inconclusive() {
+        for truncated in [false, true] {
+            let mut data = fixture_data();
+            data.instruction_snapshots.clear();
+            for (session_id, turn_id, line) in [
+                ("fixture-analysis-session-a", "fixture-analysis-turn-a", 5),
+                ("fixture-analysis-session-b", "fixture-analysis-turn-b", 13),
+            ] {
+                let content = if truncated {
+                    Some("incomplete historical guidance")
+                } else {
+                    None
+                };
+                let mut snapshot = snapshot_from_rollout(
+                    Some(session_id.to_owned()),
+                    Some(turn_id.to_owned()),
+                    content,
+                    SourceRef::rollout(PathBuf::from("fixture-analysis.jsonl"), line),
+                );
+                snapshot.truncated = truncated;
+                data.instruction_snapshots.push(snapshot);
+                data.instruction_snapshots.push(snapshot_from_rollout(
+                    Some(session_id.to_owned()),
+                    Some(turn_id.to_owned()),
+                    Some("unrelated historical guidance"),
+                    SourceRef::rollout(PathBuf::from("fixture-analysis.jsonl"), line - 3),
+                ));
+            }
+
+            let recurring = analyze_failures(&data, &AnalysisOptions::default());
+            let failure = recurring
+                .iter()
+                .find(|finding| finding.kind == FindingType::Failure)
+                .expect("synthetic failure finding exists");
+            assert_eq!(failure.kind, FindingType::Failure);
+            assert_eq!(
+                failure.scope,
+                FindingScope::Project(PathBuf::from("/fixture/project"))
+            );
+            assert_eq!(failure.occurrences, 2);
+            assert_eq!(failure.distinct_sessions, 2);
+            assert_eq!(failure.confidence, FindingConfidence::High);
+            assert_eq!(
+                failure
+                    .evidence
+                    .iter()
+                    .map(|evidence| evidence.source.line)
+                    .collect::<Vec<_>>(),
+                vec![Some(5), Some(13)]
+            );
+            assert!(failure.evidence.iter().any(|evidence| {
+                evidence.session_id.as_deref() == Some("fixture-analysis-session-a")
+                    && evidence.source.path == Path::new("fixture-analysis.jsonl")
+                    && evidence.source.line == Some(5)
+            }));
+            assert!(failure.evidence.iter().any(|evidence| {
+                evidence.session_id.as_deref() == Some("fixture-analysis-session-b")
+                    && evidence.source.path == Path::new("fixture-analysis.jsonl")
+                    && evidence.source.line == Some(13)
+            }));
+            let findings = analyze_instructions(&data, &recurring, &AnalysisOptions::default());
+            assert!(
+                findings
+                    .iter()
+                    .all(|finding| !matches!(finding.kind, FindingType::Gap | FindingType::Stale))
+            );
+            assert!(recurring.iter().any(|finding| {
+                finding.kind == FindingType::Failure
+                    && finding
+                        .limitations
+                        .iter()
+                        .any(|limitation| limitation == MISSING_SNAPSHOT_LIMITATION)
+            }));
+        }
     }
 
     #[test]
