@@ -7,7 +7,7 @@ grouping, and JSON rendering. It uses only bounded synthetic data.
 Run it with:
 
 ```bash
-cargo bench --bench reporting
+cargo bench --locked --bench reporting
 ```
 
 The dataset contains 500 sessions, 200,000 canonical records, 10,000
@@ -21,8 +21,20 @@ reporting commands against the same store. Each focused command output is
 capped at 256 KiB; the doctor output keeps the stricter 64 KiB cap.
 
 The chosen target is at most 5 seconds per reporting command on macOS arm64.
-This is a development benchmark target; it does not claim runtime or package
-support for other platforms.
+The benchmark is enforced by the pinned `macos-14` arm64 CI job with
+`cargo bench --locked --bench reporting`. A non-timing benchmark failure fails
+CI immediately. If a run reports only a timing failure, CI allows up to three
+total attempts and requires two subsequent clean attempts before passing; each
+clean attempt enforces the 5-second limit for every command. This is a
+development benchmark target for that runner; it does not claim runtime or
+package support for other platforms or a universal runtime guarantee under
+noisy hardware.
+
+The synthetic assertions also require observed snapshot evidence to retain its
+session-scoped source association and turn fallback, and require missing or
+unavailable snapshots to produce the documented inconclusive limitation. The
+JSON remains bounded and uses only synthetic data; existing privacy and
+read-only tests remain the source of truth for those boundaries.
 
 | Run | Store | Result |
 | --- | --- | --- |

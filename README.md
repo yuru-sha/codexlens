@@ -200,15 +200,17 @@ completion criteria. The underlying Rust checks are:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
 ```
 
-GitHub Actions runs the build and full test suite with Rust 1.85.0 on
-`macos-latest` and `windows-latest`; these tests use only the repository's
-synthetic fixtures and do not require a real Codex home. Windows hosted-runner
-build/test coverage is the verification boundary—Windows runtime behavior,
-packaging, and installers are not supported claims.
+GitHub Actions runs the full gate with Rust 1.85.0 and 1.92.0 on Ubuntu.
+The pinned `macos-14` arm64 and `windows-latest` jobs run the platform gate
+(privacy checks, build, and all-feature tests); the macOS job also enforces the
+reporting benchmark. These jobs use only the repository's synthetic fixtures
+and do not require a real Codex home. Windows hosted-runner build/test coverage
+is the verification boundary—Windows runtime behavior, packaging, and
+installers are not supported claims.
 
 See [AGENTS.md](AGENTS.md) for repository rules and the synthetic fixture
 policy.
