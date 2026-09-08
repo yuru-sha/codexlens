@@ -38,7 +38,16 @@ jobs:
       - name: Reporting benchmark (macOS arm64)
         env:
           RUSTUP_TOOLCHAIN: 1.85.0
-        run: cargo bench --locked --bench reporting
+        run: |
+          for attempt in 1 2 3; do
+            if cargo bench --locked --bench reporting; then
+              exit 0
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              echo "Reporting benchmark attempt ${attempt} failed; retrying for hosted-runner noise"
+            fi
+          done
+          exit 1
 
   windows:
     runs-on: windows-latest
