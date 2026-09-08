@@ -18,7 +18,9 @@ pub use apply::{
 pub use diff::{DiffBatch, DiffError, RenderedDiff, SkippedProposal, render_diff, render_diffs};
 pub use proposal::{Proposal, ProposalAction, ProposalError, ProposalPlan, proposals_for_findings};
 pub use report::{
-    DoctorFinding, DoctorGroup, DoctorOptions, DoctorReport, doctor, render_doctor,
-    render_json_diff, render_json_finding_report, render_json_sessions, render_proposal_summary,
+    DoctorFinding, DoctorGroup, DoctorOptions, DoctorReport, ReportCoverage, SessionSummary,
+    doctor, render_doctor, render_doctor_with_coverage, render_json_diff,
+    render_json_finding_report, render_json_finding_report_with_coverage, render_json_sessions,
+    render_proposal_summary, render_report_metadata, report_coverage, report_sessions,
 };
 pub use scope::{ScopeRecommendation, recommend_scope};

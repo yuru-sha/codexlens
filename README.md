@@ -59,7 +59,7 @@ order to render a diff.
 | --- | --- | --- | --- |
 | `refresh` | discovered Codex home, rollout/state inputs, and instruction files | build or update the derived store | writes only the selected derived store; raw inputs remain unchanged |
 | `analyze` | derived store | all lens findings | reads the store only |
-| `sessions` | derived store | stored session metadata and freshness | reads the store only |
+| `sessions` | derived store | stored session metadata, coverage, and freshness | reads the store only |
 | `failures` | derived store | failure-lens findings | reads the store only |
 | `corrections` | derived store | correction-lens findings | reads the store only |
 | `rework` | derived store | rework and stuck findings | reads the store only |
@@ -68,7 +68,7 @@ order to render a diff.
 | `knowledge` | derived store | knowledge-lens findings | reads the store only |
 | `rediscovery` | derived store | alias for `knowledge` | reads the store only |
 | `instructions` | derived store | instruction-lens findings | reads the store only |
-| `doctor` | derived store | ranked findings grouped by scope | reads the store only |
+| `doctor` | derived store | coverage and ranked findings grouped by scope | reads the store only |
 | `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | does not modify the supplied store or target files; legacy stores use a temporary migrated copy |
 | `optimize --apply --yes` | derived store and validated instruction/documentation targets | applies reviewed proposals and reports retained backups/recovery | modifies only the validated write set; never modifies the supplied store or rollout/state inputs |
 | `monitor` | one local rollout JSONL or state SQLite source | bounded incremental ingestion and cursor/status output | does not modify the source; writes the derived store and optional cursor file |
@@ -81,7 +81,10 @@ re-reads and re-hashes every file, keeps backups after success, and rolls back
 the whole batch on failure. `analyze` reports every lens, while the focused
 analysis commands report one lens through the same deterministic report format.
 Add `--format json` to read-only reporting commands for schema version 1;
-aliases emit their canonical command name. Missing or invalid stores return a
+aliases emit their canonical command name. Sessions and finding reports include
+an additive `coverage` object with the selected-store scope, valid activity
+range, session/record counts, and missing/invalid timestamp counts. Existing
+schema fields and aliases remain unchanged. Missing or invalid stores return a
 bounded, actionable error. Older supported store schemas are migrated only in
 a temporary copy, leaving the supplied store unchanged.
 
@@ -133,6 +136,26 @@ cargo run -- doctor --store .codexlens.sqlite
 cargo run -- optimize --diff --store .codexlens.sqlite
 cargo run -- monitor --source tests/fixtures/rollout/monitoring.jsonl --kind rollout --store .codexlens.sqlite --max-polls 1
 cargo run -- doctor --format json --store .codexlens.sqlite
+```
+
+Read-only reports make the data boundary explicit. `Activity` is the earliest
+and latest valid timestamp observed in the selected store; `Latest ingestion`
+is the separate time the store recorded an input. An unfiltered report is not
+necessarily all historical activity or the current raw inputs. Run `refresh`
+explicitly to update the store, and pass `--include-archived` during refresh to
+opt in to archived sessions; reporting never refreshes implicitly. Empty,
+missing, invalid, and partial timestamp coverage is reported as such rather
+than filling activity dates from ingestion time.
+
+Example human-readable metadata prefix:
+
+```text
+Coverage: selected store (observed; not necessarily all historical activity or current raw inputs; refresh explicitly, archives via --include-archived)
+Activity: 2026-01-03T00:00:00.000Z .. 2026-01-04T00:05:00.000Z
+Activity timestamps: 16 valid, 0 missing, 0 invalid
+Sessions: 2
+Records: 16
+Latest ingestion: 2026-09-09T00:00:00Z
 ```
 
 The Phase 3 lenses, Phase 4 advisor, and Phase 5 safe-apply workflow remain exposed from the
