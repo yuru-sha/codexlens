@@ -8,3 +8,10 @@
 .env.*
 !.env.example
 __pycache__/
+
+# Machine-local agent links; keep only project-owned skills versioned.
+.agents/agent-capabilities/
+.codex/agents/
+.agents/skills/*
+!.agents/skills/codexlens-verify/
+!.agents/skills/codexlens-verify/**
