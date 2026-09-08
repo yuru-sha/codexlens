@@ -48,7 +48,10 @@ over the derived SQLite store. Reporting commands accept `-s, --store PATH`,
 which defaults to `.codexlens.sqlite`, `--frozen` to state that the selected
 store must be used exactly as recorded, and `--format json` for the versioned
 machine-readable schema. Both normal and frozen reporting formats are
-read-only with respect to raw inputs and never refresh implicitly. The explicit
+read-only with respect to raw inputs and never refresh implicitly. Read-only
+reports also accept reproducible `--since` and `--until` RFC3339 bounds; their
+output distinguishes the requested period, observed coverage, and store
+freshness. The explicit
 `optimize --apply` path is the write exception and may update only its
 validated instruction/documentation write set.
 Legacy-store reporting may create a temporary migrated copy, which is removed
@@ -87,6 +90,17 @@ range, session/record counts, and missing/invalid timestamp counts. Existing
 schema fields and aliases remain unchanged. Missing or invalid stores return a
 bounded, actionable error. Older supported store schemas are migrated only in
 a temporary copy, leaving the supplied store unchanged.
+
+Reporting periods use complete RFC3339 timestamps with `Z` or a numeric
+`+HH:MM`/`-HH:MM` offset and optional fractional seconds (up to 9 digits).
+Instants are compared in UTC and the interval is half-open: `[since, until)`.
+Either bound may be omitted, equal bounds select no activity, and reversed or
+invalid bounds fail without reading or changing the store. Relative periods
+are intentionally not part of this interface. Period-filtered JSON adds
+requested/observed bounds, included/excluded record counts, unknown
+record/event counts, and `empty`/`complete`/`partial` state to `data.coverage`.
+`optimize --apply` rejects period filters; `monitor` keeps its own ingestion
+boundary.
 
 `refresh` accepts `--codex-home PATH` (or `--home PATH`),
 `--include-archived`, `--config PATH`, and `--store PATH`. Without
@@ -132,7 +146,7 @@ cargo run -- rework --store .codexlens.sqlite
 cargo run -- verification --store .codexlens.sqlite
 cargo run -- knowledge --store .codexlens.sqlite
 cargo run -- instructions --store .codexlens.sqlite
-cargo run -- doctor --store .codexlens.sqlite
+cargo run -- doctor --store .codexlens.sqlite --since 2026-01-01T00:00:00Z --until 2026-01-08T00:00:00Z
 cargo run -- optimize --diff --store .codexlens.sqlite
 cargo run -- monitor --source tests/fixtures/rollout/monitoring.jsonl --kind rollout --store .codexlens.sqlite --max-polls 1
 cargo run -- doctor --format json --store .codexlens.sqlite

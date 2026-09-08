@@ -201,10 +201,15 @@ snapshot is unavailable; it should say that comparison is inconclusive.
 
 The output is useful without a database query. It includes the analyzed
 period, session count, freshness, finding counts, and a bounded evidence
-sample. The `codexlens doctor` command accepts an optional `--limit COUNT` to
-cap findings per scope. All reporting commands also accept explicit
-`--format json` output; the versioned schema keeps stdout free of progress
-text and sends diagnostics and operational errors to stderr.
+sample. Read-only reporting commands also accept explicit `--since` and
+`--until` RFC3339 bounds using the half-open interval `[since, until)`; the
+requested period, observed coverage, and store freshness remain separate. The
+`codexlens doctor` command accepts an optional `--limit COUNT` to cap findings
+per scope. All reporting commands also accept explicit `--format json` output;
+the versioned schema keeps stdout free of progress text and sends diagnostics
+and operational errors to stderr. Period-filtered JSON adds the version-1
+`data.coverage` object defined in
+[`post-mvp.md`](post-mvp.md#7-explicit-reporting-periods).
 
 The `analyze` command renders all lens findings. `failures`, `corrections`,
 `rework`, `verification`, `knowledge`, and `instructions` render one lens

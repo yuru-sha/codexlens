@@ -94,8 +94,10 @@ per-source replacement transactions to the store. Reporting commands consume
 the existing derived store in read-only mode; they do not reopen raw
 rollout/state inputs or refresh the store. `--frozen` makes that store-only
 contract explicit. Analysis, `sessions`, and `doctor` reports make the
-recorded freshness state visible; `optimize --diff` reports proposal and diff
-state instead.
+recorded freshness state visible; read-only reports may select an explicit
+half-open timestamp period before lens aggregation, keeping the requested
+period, observed coverage, and recorded freshness separate. `optimize --diff`
+reports proposal and diff state in addition to period metadata when filtered.
 
 ## 5. Components
 
@@ -197,7 +199,8 @@ MVP human-readable output must include:
 
 Every reporting command also supports explicit `--format json` output using
 schema version 1 from [`post-mvp.md`](post-mvp.md). JSON is one document on
-stdout; diagnostics and operational errors remain on stderr.
+stdout; diagnostics and operational errors remain on stderr. Period-filtered
+reports add the version-1 `data.coverage` metadata defined in that contract.
 
 The write boundary for `optimize --apply` is the validated instruction-target
 contract in [`post-mvp.md`](post-mvp.md); rollout/state inputs and the derived

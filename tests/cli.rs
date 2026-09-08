@@ -830,6 +830,226 @@ fn reporting_commands_render_local_store_data() {
 }
 
 #[test]
+fn reporting_period_filter_is_half_open_and_visible_in_human_and_json() {
+    let store = fixture_store();
+    let human = run_args(
+        &[
+            "sessions",
+            "--since",
+            "2026-01-03T00:00:00Z",
+            "--until",
+            "2026-01-04T00:00:00Z",
+        ],
+        &store,
+    );
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        stdout.contains("Requested period: [2026-01-03T00:00:00.000Z, 2026-01-04T00:00:00.000Z)")
+    );
+    assert!(stdout.contains("Sessions: 1"), "{stdout}");
+    assert!(stdout.contains("fixture-analysis-session-a"), "{stdout}");
+    assert!(!stdout.contains("fixture-analysis-session-b"), "{stdout}");
+    assert!(stdout.contains("Observed records: "), "{stdout}");
+    assert!(stdout.contains("Coverage: "), "{stdout}");
+
+    let utc = run_args(
+        &[
+            "analyze",
+            "--format",
+            "json",
+            "--since",
+            "2026-01-03T00:00:00Z",
+            "--until",
+            "2026-01-04T00:00:00Z",
+        ],
+        &store,
+    );
+    let offset = run_args(
+        &[
+            "analyze",
+            "--format",
+            "json",
+            "--since",
+            "2026-01-03T09:00:00+09:00",
+            "--until",
+            "2026-01-04T09:00:00+09:00",
+        ],
+        &store,
+    );
+    assert_eq!(utc.stdout, offset.stdout, "equivalent instants must match");
+    let document = parse_json_report(&utc, "analyze");
+    let coverage = &document["data"]["coverage"];
+    assert_eq!(coverage["requested_start"], "2026-01-03T00:00:00.000Z");
+    assert_eq!(coverage["requested_end"], "2026-01-04T00:00:00.000Z");
+    assert_eq!(coverage["included_sessions"], 1);
+    assert!(coverage["included_records"].as_u64().unwrap() > 0);
+    assert!(coverage["excluded_records"].as_u64().unwrap() > 0);
+    assert_eq!(coverage["unknown_timestamp_records"], 0);
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn empty_reporting_period_has_no_selected_activity() {
+    let store = fixture_store();
+    let output = run_args(
+        &[
+            "sessions",
+            "--since",
+            "2026-01-03T00:00:00Z",
+            "--until",
+            "2026-01-03T00:00:00Z",
+        ],
+        &store,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Sessions: 0"), "{stdout}");
+    assert!(!stdout.contains("fixture-analysis-session-"), "{stdout}");
+    assert!(stdout.contains("Coverage: empty"), "{stdout}");
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn reporting_period_rejects_invalid_and_reversed_bounds() {
+    let store = empty_store();
+    for args in [
+        &[
+            "doctor",
+            "--since",
+            "not-a-timestamp",
+            "--until",
+            "2026-01-04T00:00:00Z",
+        ][..],
+        &[
+            "doctor",
+            "--since",
+            "2026-01-04T00:00:00Z",
+            "--until",
+            "2026-01-03T00:00:00Z",
+        ][..],
+    ] {
+        let output = run_args(args, &store);
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("reporting period"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.len() < 512, "{args:?} error is unbounded");
+    }
+    let monitor = run_args_with_flags(
+        &["monitor", "--source", "synthetic.jsonl"],
+        &["--since", "2026-01-03T00:00:00Z"],
+        &store,
+    );
+    assert!(!monitor.status.success());
+    assert!(String::from_utf8_lossy(&monitor.stderr).contains("monitor"));
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn reporting_coverage_marks_unknown_event_timestamps_as_partial() {
+    let store = fixture_store();
+    Store::open(&store)
+        .unwrap()
+        .connection()
+        .execute("UPDATE records SET timestamp = NULL WHERE sequence = 1", [])
+        .unwrap();
+    Store::open(&store)
+        .unwrap()
+        .connection()
+        .execute(
+            "UPDATE messages SET timestamp = 'invalid-event-timestamp' WHERE timestamp IS NOT NULL",
+            [],
+        )
+        .unwrap();
+
+    let output = run_args_with_flags(
+        &["doctor", "--format", "json"],
+        &[
+            "--since",
+            "2026-01-03T00:00:00Z",
+            "--until",
+            "2026-01-04T00:00:00Z",
+        ],
+        &store,
+    );
+    let document = parse_json_report(&output, "doctor");
+    let coverage = &document["data"]["coverage"];
+    assert_eq!(coverage["unknown_timestamp_records"], 1);
+    assert!(coverage["unknown_timestamp_events"].as_u64().unwrap() > 0);
+    assert_eq!(coverage["state"], "partial");
+    assert!(coverage["observed_start"].is_string());
+    assert!(coverage["observed_end"].is_string());
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn all_read_only_reports_share_period_selection_and_json_coverage() {
+    let store = fixture_store();
+    let flags = [
+        "--since",
+        "2026-01-03T00:00:00Z",
+        "--until",
+        "2026-01-04T00:00:00Z",
+    ];
+    for args in REPORTING_COMMANDS {
+        let output = run_args_with_flags(args, &flags, &store);
+        assert!(
+            output.status.success(),
+            "{args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("Requested period:"),
+            "{args:?} omitted the selected period"
+        );
+    }
+
+    for command in [
+        "sessions",
+        "failures",
+        "corrections",
+        "rework",
+        "verification",
+        "knowledge",
+        "instructions",
+        "doctor",
+    ] {
+        let mut args = vec![command, "--format", "json"];
+        args.extend(flags);
+        let document = parse_json_report(&run_args(&args, &store), command);
+        let coverage = &document["data"]["coverage"];
+        assert_eq!(coverage["requested_start"], "2026-01-03T00:00:00.000Z");
+        assert_eq!(coverage["requested_end"], "2026-01-04T00:00:00.000Z");
+        assert_eq!(coverage["included_sessions"], 1);
+    }
+
+    let mut optimize_args = vec!["optimize", "--diff", "--format", "json"];
+    optimize_args.extend(flags);
+    let optimize = parse_json_report(&run_args(&optimize_args, &store), "optimize_diff");
+    assert_eq!(optimize["data"]["coverage"]["included_sessions"], 1);
+    assert!(optimize["data"]["freshness"]["state"].is_string());
+
+    let apply = run_args_with_flags(&["optimize", "--apply", "--yes"], &flags, &store);
+    assert!(!apply.status.success());
+    assert!(String::from_utf8_lossy(&apply.stderr).contains("optimize --diff only"));
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
 fn monitor_command_updates_a_local_store_and_honors_max_polls() {
     let source = temp_rollout_path("monitor");
     let store = temp_store_path("monitor-store");
@@ -1414,6 +1634,10 @@ fn post_mvp_contract_spec_tracks_documented_boundaries() {
         ),
         (
             "## 6. Scoped finding evaluation",
+            "## 7. Explicit reporting periods",
+        ),
+        (
+            "## 7. Explicit reporting periods",
             "## Entry gate for implementation issues",
         ),
     ];
@@ -1442,6 +1666,7 @@ fn post_mvp_contract_spec_tracks_documented_boundaries() {
         "Implementation status: implemented by Issues #59 and #82",
         "Implementation status: implemented by Issue #60",
         "Implementation status: implemented by Issue #61",
+        "Implementation status: implemented by Issue #83",
         "Before a future feature issue extends",
         "primary compatibility and privacy boundaries",
         "The remaining cases are contract requirements",
