@@ -39,12 +39,31 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.85.0
         run: |
+          timing_failure_marker='CODEXLENS_REPORTING_BENCHMARK_TIMING_FAILURE:'
+          timing_failure_seen=false
+          clean_runs=0
           for attempt in 1 2 3; do
-            if cargo bench --locked --bench reporting; then
-              exit 0
-            fi
-            if [ "${attempt}" -lt 3 ]; then
-              echo "Reporting benchmark attempt ${attempt} failed; retrying for hosted-runner noise"
+            if output=$(cargo bench --locked --bench reporting 2>&1); then
+              printf '%s\n' "${output}"
+              if [ "${timing_failure_seen}" = true ]; then
+                clean_runs=$((clean_runs + 1))
+                if [ "${clean_runs}" -ge 2 ]; then
+                  exit 0
+                fi
+              else
+                exit 0
+              fi
+              continue
+            else
+              status=$?
+              printf '%s\n' "${output}"
+              case "${output}" in
+                *"${timing_failure_marker}"*) ;;
+                *) exit "${status}" ;;
+              esac
+              timing_failure_seen=true
+              clean_runs=0
+              echo "Reporting benchmark timing attempt ${attempt} failed; retrying for hosted-runner noise" >&2
             fi
           done
           exit 1

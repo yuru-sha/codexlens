@@ -22,6 +22,7 @@ const MISSING_SNAPSHOT_SESSION: usize = 498;
 const UNAVAILABLE_SNAPSHOT_SESSIONS: &[usize] = &[499];
 const SHARED_TURN_ID: &str = "synthetic-turn-shared";
 const TARGET_MS: u128 = 5_000;
+const TIMING_FAILURE_MARKER: &str = "CODEXLENS_REPORTING_BENCHMARK_TIMING_FAILURE:";
 const MAX_DOCTOR_JSON_BYTES: usize = 64 * 1024;
 const MAX_REPORT_JSON_BYTES: usize = 256 * 1024;
 const REPORTING_COMMANDS: &[&str] = &[
@@ -53,6 +54,13 @@ fn synthetic_failure_output(prefix: &str) -> String {
     let mut output = prefix.to_owned();
     output.push_str(&"x".repeat(FAILURE_OUTPUT_BYTES.saturating_sub(output.len())));
     output
+}
+
+fn assert_reporting_target(command: &str, elapsed_ms: u128) {
+    assert!(
+        elapsed_ms <= TARGET_MS,
+        "{TIMING_FAILURE_MARKER} {command} took {elapsed_ms} ms"
+    );
 }
 
 fn synthetic_data() -> CanonicalData {
@@ -519,7 +527,7 @@ fn assert_snapshot_coverage(document: &serde_json::Value) {
             }
 
             if finding["kind"] == "gap" {
-                direct_association = evidence.iter().any(|value| {
+                direct_association |= evidence.iter().any(|value| {
                     value["session_id"] == "synthetic-session-496"
                         && value["role"] == "observation"
                         && value["source"]["line"] == 1_001
@@ -528,7 +536,7 @@ fn assert_snapshot_coverage(document: &serde_json::Value) {
                         && value["role"] == "instruction_snapshot"
                         && value["source"]["line"] == 1_001
                 });
-                turn_fallback = evidence.iter().any(|value| {
+                turn_fallback |= evidence.iter().any(|value| {
                     value["session_id"] == "synthetic-session-497"
                         && value["role"] == "observation"
                         && value["source"]["line"] == 1
@@ -631,7 +639,7 @@ fn main() {
     }
     assert!(json.len() <= MAX_DOCTOR_JSON_BYTES);
     assert!(json.ends_with('\n'));
-    assert!(elapsed_ms <= TARGET_MS, "doctor took {elapsed_ms} ms");
+    assert_reporting_target("doctor", elapsed_ms);
 
     let mut command_timings = Vec::new();
     for command in REPORTING_COMMANDS {
@@ -660,7 +668,7 @@ fn main() {
             output.stdout.len()
         );
         let elapsed_ms = started.elapsed().as_millis();
-        assert!(elapsed_ms <= TARGET_MS, "{command} took {elapsed_ms} ms");
+        assert_reporting_target(command, elapsed_ms);
         command_timings.push((*command, elapsed_ms));
     }
 
@@ -690,10 +698,7 @@ fn main() {
         output.stdout.len()
     );
     let elapsed_ms = started.elapsed().as_millis();
-    assert!(
-        elapsed_ms <= TARGET_MS,
-        "optimize --diff took {elapsed_ms} ms"
-    );
+    assert_reporting_target("optimize --diff", elapsed_ms);
     command_timings.push(("optimize --diff", elapsed_ms));
     fs::remove_file(&store_path).expect("synthetic store is removable");
     println!(
