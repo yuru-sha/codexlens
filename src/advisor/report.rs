@@ -9,6 +9,7 @@ use crate::analysis::{
     parse_timestamp, sort_findings,
 };
 use crate::model::{CanonicalData, SourceKind, SourceRef};
+use crate::period::PeriodCoverage;
 use crate::store::{FreshnessState, StoreFreshness};
 
 use super::diff::{DiffBatch, RenderedDiff, SkippedProposal};
@@ -85,7 +86,7 @@ pub fn render_json_finding_report(
     command: &str,
     report: &DoctorReport,
 ) -> Result<String, serde_json::Error> {
-    render_json_finding_report_inner(command, report, None)
+    render_json_finding_report_inner(command, report, None, None)
 }
 
 pub fn render_json_finding_report_with_coverage(
@@ -93,13 +94,23 @@ pub fn render_json_finding_report_with_coverage(
     report: &DoctorReport,
     coverage: &ReportCoverage,
 ) -> Result<String, serde_json::Error> {
-    render_json_finding_report_inner(command, report, Some(coverage))
+    render_json_finding_report_inner(command, report, Some(coverage), None)
+}
+
+pub fn render_json_finding_report_with_period(
+    command: &str,
+    report: &DoctorReport,
+    coverage: &ReportCoverage,
+    period: &PeriodCoverage,
+) -> Result<String, serde_json::Error> {
+    render_json_finding_report_inner(command, report, Some(coverage), Some(period))
 }
 
 fn render_json_finding_report_inner(
     command: &str,
     report: &DoctorReport,
     coverage: Option<&ReportCoverage>,
+    period: Option<&PeriodCoverage>,
 ) -> Result<String, serde_json::Error> {
     let groups = report
         .groups
@@ -124,7 +135,10 @@ fn render_json_finding_report_inner(
         "groups": groups,
     });
     if let Some(coverage) = coverage {
-        data["coverage"] = coverage_json(coverage);
+        data["coverage"] = period.map_or_else(
+            || coverage_json(coverage),
+            |period| coverage_json_with_period(coverage, period),
+        );
     }
     json_document(command, data)
 }
@@ -152,7 +166,47 @@ pub fn render_json_sessions(
     )
 }
 
+pub fn render_json_sessions_with_period(
+    data: &CanonicalData,
+    freshness: &StoreFreshness,
+    coverage: &ReportCoverage,
+    period: &PeriodCoverage,
+) -> Result<String, serde_json::Error> {
+    json_document(
+        "sessions",
+        serde_json::json!({
+            "freshness": freshness_json(freshness),
+            "coverage": coverage_json_with_period(coverage, period),
+            "sessions": report_sessions(data).into_iter().map(|session| {
+                serde_json::json!({
+                    "id": session.id,
+                    "created_at": session.created_at,
+                    "updated_at": session.updated_at,
+                    "cwd": session.cwd,
+                    "project": session.project,
+                })
+            }).collect::<Vec<_>>(),
+        }),
+    )
+}
+
 pub fn render_json_diff(batch: &DiffBatch) -> Result<String, serde_json::Error> {
+    render_json_diff_inner(batch, None)
+}
+
+pub fn render_json_diff_with_period(
+    batch: &DiffBatch,
+    freshness: &StoreFreshness,
+    coverage: &ReportCoverage,
+    period: &PeriodCoverage,
+) -> Result<String, serde_json::Error> {
+    render_json_diff_inner(batch, Some((freshness, coverage, period)))
+}
+
+fn render_json_diff_inner(
+    batch: &DiffBatch,
+    metadata: Option<(&StoreFreshness, &ReportCoverage, &PeriodCoverage)>,
+) -> Result<String, serde_json::Error> {
     let mut rendered = batch.rendered.iter().collect::<Vec<_>>();
     rendered.sort_by(|left, right| {
         left.proposal
@@ -205,22 +259,24 @@ pub fn render_json_diff(batch: &DiffBatch) -> Result<String, serde_json::Error> 
             .cmp(&right.0.target_path)
             .then_with(|| left.0.reason.cmp(&right.0.reason))
     });
-    json_document(
-        "optimize_diff",
-        serde_json::json!({
-            "rendered": rendered_json,
-            "skipped": skipped
-                .into_iter()
-                .map(|(skipped, proposal)| {
-                    serde_json::json!({
-                        "target_path": skipped.target_path.to_string_lossy(),
-                        "reason": bounded_excerpt(&skipped.reason, MAX_PROPOSAL_TEXT_BYTES),
-                        "proposal": proposal.map(proposal_json),
-                    })
+    let mut data = serde_json::json!({
+        "rendered": rendered_json,
+        "skipped": skipped
+            .into_iter()
+            .map(|(skipped, proposal)| {
+                serde_json::json!({
+                    "target_path": skipped.target_path.to_string_lossy(),
+                    "reason": bounded_excerpt(&skipped.reason, MAX_PROPOSAL_TEXT_BYTES),
+                    "proposal": proposal.map(proposal_json),
                 })
-                .collect::<Vec<_>>(),
-        }),
-    )
+            })
+            .collect::<Vec<_>>(),
+    });
+    if let Some((freshness, coverage, period)) = metadata {
+        data["freshness"] = freshness_json(freshness);
+        data["coverage"] = coverage_json_with_period(coverage, period);
+    }
+    json_document("optimize_diff", data)
 }
 
 fn json_document(command: &str, data: serde_json::Value) -> Result<String, serde_json::Error> {
@@ -256,6 +312,24 @@ fn coverage_json(coverage: &ReportCoverage) -> serde_json::Value {
         "session_count": coverage.session_count,
         "record_count": coverage.record_count,
     })
+}
+
+fn coverage_json_with_period(
+    coverage: &ReportCoverage,
+    period: &PeriodCoverage,
+) -> serde_json::Value {
+    let mut value = coverage_json(coverage);
+    value["requested_start"] = serde_json::json!(period.requested_start);
+    value["requested_end"] = serde_json::json!(period.requested_end);
+    value["observed_start"] = serde_json::json!(period.observed_start);
+    value["observed_end"] = serde_json::json!(period.observed_end);
+    value["included_sessions"] = serde_json::json!(period.included_sessions);
+    value["included_records"] = serde_json::json!(period.included_records);
+    value["excluded_records"] = serde_json::json!(period.excluded_records);
+    value["unknown_timestamp_records"] = serde_json::json!(period.unknown_timestamp_records);
+    value["unknown_timestamp_events"] = serde_json::json!(period.unknown_timestamp_events);
+    value["state"] = serde_json::json!(period.state.as_str());
+    value
 }
 
 fn scope_json(scope: &FindingScope) -> serde_json::Value {
@@ -682,15 +756,30 @@ fn sanitize_finding(mut finding: Finding, excerpt_max_bytes: usize) -> Finding {
 }
 
 pub fn render_doctor(report: &DoctorReport) -> String {
-    render_doctor_inner(report, None)
+    render_doctor_inner(report, None, None)
 }
 
 pub fn render_doctor_with_coverage(report: &DoctorReport, coverage: &ReportCoverage) -> String {
-    render_doctor_inner(report, Some(coverage))
+    render_doctor_inner(report, Some(coverage), None)
 }
 
-fn render_doctor_inner(report: &DoctorReport, coverage: Option<&ReportCoverage>) -> String {
+pub fn render_doctor_with_period(
+    report: &DoctorReport,
+    coverage: &ReportCoverage,
+    period: &PeriodCoverage,
+) -> String {
+    render_doctor_inner(report, Some(coverage), Some(period))
+}
+
+fn render_doctor_inner(
+    report: &DoctorReport,
+    coverage: Option<&ReportCoverage>,
+    period: Option<&PeriodCoverage>,
+) -> String {
     let mut output = String::new();
+    if let Some(period) = period {
+        output.push_str(&render_period_metadata(period));
+    }
     output.push_str("Analyzed period: ");
     match (&report.period_start, &report.period_end) {
         (Some(start), Some(end)) if start == end => output.push_str(start),
@@ -761,6 +850,33 @@ fn render_doctor_inner(report: &DoctorReport, coverage: Option<&ReportCoverage>)
             }
         }
     }
+    output
+}
+
+fn render_period_metadata(period: &PeriodCoverage) -> String {
+    let requested = match (&period.requested_start, &period.requested_end) {
+        (Some(start), Some(end)) => format!("[{start}, {end})"),
+        (Some(start), None) => format!("[{start}, ∞)"),
+        (None, Some(end)) => format!("(-∞, {end})"),
+        (None, None) => "all".to_owned(),
+    };
+    format!(
+        "Requested period: {requested}\nObserved records: {} (excluded: {}, unknown timestamps: {} records, {} events)\nCoverage: {}\n",
+        period.included_records,
+        period.excluded_records,
+        period.unknown_timestamp_records,
+        period.unknown_timestamp_events,
+        period.state.as_str(),
+    )
+}
+
+pub fn render_report_metadata_with_period(
+    coverage: &ReportCoverage,
+    freshness: &StoreFreshness,
+    period: &PeriodCoverage,
+) -> String {
+    let mut output = render_period_metadata(period);
+    output.push_str(&render_report_metadata(coverage, freshness));
     output
 }
 
