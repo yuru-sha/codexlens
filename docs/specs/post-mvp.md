@@ -6,6 +6,7 @@ rollout reader in section 1, refresh/frozen reporting in section 2,
 machine-readable output in section 3, live monitoring in section 4, and safe
 apply in section 5 are implemented by issues #57, #58, #59, #60, and #61.
 Issue #82 adds the shared read-only reporting coverage metadata in section 3.
+Issue #83 adds explicit reporting-period selection in section 7.
 
 Issue #53 originally tracked the capabilities that crossed the MVP input,
 runtime, output, or write boundary. Issues #57 through #61 implement sections
@@ -71,10 +72,18 @@ extensions are kept explicit:
   cover multi-session spans, explicit empty/partial coverage, missing and
   invalid activity timestamps, distinct ingestion time, and deterministic JSON
   metadata.
+- `reporting_period_filter_is_half_open_and_visible_in_human_and_json`,
+  `empty_reporting_period_has_no_selected_activity`,
+  `reporting_period_rejects_invalid_and_reversed_bounds`,
+  `reporting_coverage_marks_unknown_event_timestamps_as_partial`, and
+  `all_read_only_reports_share_period_selection_and_json_coverage` cover
+  normalized bounds, empty intervals, coverage metadata, aliases, and the
+  `optimize --apply` boundary.
 
 The executable tests cover the primary compatibility and privacy boundaries
 described below. The remaining cases are contract requirements for future
-regression coverage. Sections 1 through 5 are implemented.
+regression coverage. Sections 1 through 5 and the explicit reporting-period
+selection in section 7 are implemented; section 6 remains a planning contract.
 
 ## 1. Compressed rollout readers
 
@@ -664,6 +673,83 @@ comparable period.
   retention/deletion policy; reporting remains local and source read-only.
 - Published output is bounded aggregate evidence with synthetic examples only,
   and no automatic instruction edit or external analytics service.
+
+## 7. Explicit reporting periods
+
+Implementation status: implemented by Issue #83.
+
+### Scope
+
+The read-only reporting commands `analyze`, `sessions`, `failures`,
+`corrections`, `rework`/`stuck`, `verification`, `knowledge`/`rediscovery`,
+`instructions`, `doctor`, and `optimize --diff` accept `--since` and `--until`.
+Selection applies to the loaded derived store before lens aggregation,
+ranking, proposal generation, or rendering. It never refreshes the store or
+reopens raw rollout/state inputs. `monitor` keeps its own cursor/ingestion
+boundary, and `optimize --apply` rejects period selectors because its validated
+write set must not become implicit.
+
+### Timestamp and interval contract
+
+- Each bound is a complete RFC3339 date-time with seconds, an optional
+  fractional part of one through nine digits, and either `Z` or a numeric
+  `+HH:MM`/`-HH:MM` offset. Naive timestamps and leap-second `:60` values are
+  rejected.
+- Bounds are normalized to UTC for comparison and output. The interval is
+  half-open: `[since, until)`. A missing bound is unbounded; equal bounds are
+  valid and select no timestamp; a reversed or malformed bound is an
+  actionable error.
+- Relative periods are intentionally not accepted. A rolling-window caller
+  must resolve one reference instant and pass absolute bounds explicitly.
+
+### Selection and coverage contract
+
+- Canonical records are the primary activity population. A valid record is
+  included only when its timestamp is in the interval. A missing or invalid
+  record timestamp is excluded from a filtered report and counted as
+  `unknown_timestamp_records`; unfiltered reports retain it.
+- Sessions and turns with selected facts, or spans intersecting the interval,
+  remain available as boundary context. The observed period is derived from
+  valid selected timestamps, not from store freshness.
+- A selected user message retains its immediately preceding assistant message
+  in the same session as context. A selected tool result retains its matching
+  call for correlation even when the call is outside the interval; a call
+  retained only for that purpose is not itself an observed verification event.
+  Turn completion and lifecycle events outside the interval are removed from a
+  filtered turn.
+- File operations and token usage use their own event timestamp or canonical
+  source-record timestamp. Instruction snapshots use the same rule, and
+  instruction joins follow selected sessions.
+- Every lens and `optimize --diff` receives the selected canonical data. No
+  report aggregates the unfiltered store and applies a display-only filter.
+
+Human-readable filtered reports show the requested interval, observed period,
+selected counts, period coverage state, unknown/excluded counts, and store
+freshness as separate values. Version-1 JSON keeps the existing report fields
+and adds `data.coverage` with the existing selected-store coverage plus
+`requested_start`, `requested_end`, `observed_start`, `observed_end`,
+`included_sessions`, `included_records`, `excluded_records`,
+`unknown_timestamp_records`, `unknown_timestamp_events`, and `state`.
+`optimize --diff` also includes its freshness object when filtered. The period
+state is `empty` when no valid selected timestamp is observed, `partial` when
+unknown timestamps remain, and `complete` otherwise.
+
+### Compatibility tests
+
+- Equivalent UTC and offset bounds produce byte-identical output, boundaries
+  obey half-open membership, empty intervals select no activity, and invalid
+  or reversed bounds fail without changing the store.
+- Synthetic calls/results, boundary-crossing messages/turns, missing and
+  invalid timestamps, aliases, all read-only report commands, and the
+  `optimize --apply` rejection are covered by deterministic CLI/unit tests.
+
+### Privacy tests
+
+- Period selection reads only the derived store; tests use bounded synthetic
+  data and do not commit real prompts, commands, outputs, credentials, or
+  personal identifiers.
+- Reporting remains local and source read-only; period metadata does not expose
+  raw event content or bypass the existing bounded evidence contract.
 
 ## Entry gate for implementation issues
 

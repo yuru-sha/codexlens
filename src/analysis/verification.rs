@@ -343,6 +343,11 @@ fn verification_events(data: &AnalysisContext<'_>) -> Vec<VerificationEvent> {
         if !call_has_observed_result(data, call) {
             continue;
         }
+        // A paired call may be retained as boundary context; only a call
+        // from the selected source record is an observed verification event.
+        if !call_source_is_selected(data, call) {
+            continue;
+        }
         let Some(event) = verification_event_for_call(data, call) else {
             continue;
         };
@@ -386,6 +391,13 @@ fn verification_events(data: &AnalysisContext<'_>) -> Vec<VerificationEvent> {
     events
 }
 
+fn call_source_is_selected(data: &AnalysisContext<'_>, call: &ToolCall) -> bool {
+    data.records.is_empty()
+        || data
+            .record_positions
+            .contains_key(&(call.provenance.path.as_path(), call.provenance.line))
+}
+
 fn unobserved_verification_events(data: &AnalysisContext<'_>) -> Vec<VerificationEvent> {
     data.tool_calls
         .iter()
@@ -420,7 +432,21 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use crate::model::{OutcomeSource, ToolOutcome, ToolResult};
+    use crate::model::{
+        FileOperation, OutcomeSource, Record, RecordKind, SourceKind, SourceRef, ToolCall,
+        ToolOutcome, ToolResult, Turn,
+    };
+    use crate::period::{ReportingPeriod, select_report_data};
+
+    fn source(line: usize) -> SourceRef {
+        SourceRef {
+            kind: SourceKind::Rollout,
+            path: PathBuf::from("verification.jsonl"),
+            line: Some(line),
+            ingested_at: None,
+            parser_schema_version: 1,
+        }
+    }
 
     #[test]
     fn call_without_id_can_supply_observed_verification() {
@@ -460,5 +486,115 @@ mod tests {
             ..CanonicalData::default()
         };
         assert_eq!(verification_events(&AnalysisContext::new(&data)).len(), 1);
+    }
+
+    #[test]
+    fn boundary_context_call_is_not_an_observed_verification_event() {
+        let data = CanonicalData {
+            records: vec![
+                Record {
+                    session_id: Some("fixture-session".to_owned()),
+                    turn_id: Some("fixture-turn".to_owned()),
+                    timestamp: Some("2026-01-02T23:59:59Z".to_owned()),
+                    sequence: 1,
+                    original_record_type: None,
+                    original_nested_type: None,
+                    error_category: None,
+                    is_error: false,
+                    is_terminal: false,
+                    kind: RecordKind::ResponseItem,
+                    provenance: source(1),
+                },
+                Record {
+                    session_id: Some("fixture-session".to_owned()),
+                    turn_id: Some("fixture-turn".to_owned()),
+                    timestamp: Some("2026-01-03T00:00:00Z".to_owned()),
+                    sequence: 2,
+                    original_record_type: None,
+                    original_nested_type: None,
+                    error_category: None,
+                    is_error: false,
+                    is_terminal: false,
+                    kind: RecordKind::ResponseItem,
+                    provenance: source(2),
+                },
+                Record {
+                    session_id: Some("fixture-session".to_owned()),
+                    turn_id: Some("fixture-turn".to_owned()),
+                    timestamp: Some("2026-01-03T00:01:00Z".to_owned()),
+                    sequence: 3,
+                    original_record_type: None,
+                    original_nested_type: None,
+                    error_category: None,
+                    is_error: false,
+                    is_terminal: false,
+                    kind: RecordKind::ResponseItem,
+                    provenance: source(3),
+                },
+            ],
+            turns: vec![Turn {
+                id: "fixture-turn".to_owned(),
+                session_id: Some("fixture-session".to_owned()),
+                started_at: Some("2026-01-03T00:00:00Z".to_owned()),
+                completed_at: Some("2026-01-03T00:02:00Z".to_owned()),
+                cwd: None,
+                model: None,
+                reasoning_effort: None,
+                sequence: 1,
+                lifecycle: Vec::new(),
+                provenance: source(2),
+            }],
+            file_operations: vec![FileOperation {
+                session_id: Some("fixture-session".to_owned()),
+                turn_id: Some("fixture-turn".to_owned()),
+                path: "src/lib.rs".to_owned(),
+                operation: "modify".to_owned(),
+                timestamp: Some("2026-01-03T00:00:30Z".to_owned()),
+                provenance: source(2),
+            }],
+            tool_calls: vec![ToolCall {
+                id: None,
+                call_id: Some("call".to_owned()),
+                session_id: Some("fixture-session".to_owned()),
+                turn_id: Some("fixture-turn".to_owned()),
+                tool_name: Some("exec_command".to_owned()),
+                input_summary: None,
+                command: Some("cargo test".to_owned()),
+                cwd: None,
+                status: None,
+                provenance: source(1),
+            }],
+            tool_results: vec![ToolResult {
+                id: None,
+                call_id: Some("call".to_owned()),
+                session_id: Some("fixture-session".to_owned()),
+                turn_id: Some("fixture-turn".to_owned()),
+                command: None,
+                cwd: None,
+                stdout: None,
+                stderr: None,
+                duration_ms: None,
+                exit_code: Some(0),
+                status: Some("completed".to_owned()),
+                outcome: ToolOutcome::Succeeded,
+                outcome_source: OutcomeSource::ExitCode,
+                matched_call: true,
+                deduplication_key: None,
+                equivalent_to: None,
+                is_duplicate: false,
+                provenance: source(3),
+            }],
+            ..CanonicalData::default()
+        };
+        let period = ReportingPeriod::from_bounds(
+            Some("2026-01-03T00:00:00Z"),
+            Some("2026-01-04T00:00:00Z"),
+        )
+        .unwrap();
+        let selected = select_report_data(&data, period.as_ref());
+        assert_eq!(selected.data.tool_calls.len(), 1);
+
+        let context = AnalysisContext::new(&selected.data);
+        assert!(verification_events(&context).is_empty());
     }
 }

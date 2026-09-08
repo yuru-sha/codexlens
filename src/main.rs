@@ -9,9 +9,11 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use codexlens::advisor::{
     ApplyPlan, ApplyReport, DiffBatch, DoctorOptions, doctor, prepare_apply_proposals,
-    proposals_for_findings, render_diffs, render_doctor_with_coverage, render_json_diff,
-    render_json_finding_report_with_coverage, render_json_sessions, render_proposal_summary,
-    render_report_metadata, report_coverage, report_sessions,
+    proposals_for_findings, render_diffs, render_doctor_with_coverage, render_doctor_with_period,
+    render_json_diff, render_json_diff_with_period, render_json_finding_report_with_coverage,
+    render_json_finding_report_with_period, render_json_sessions, render_json_sessions_with_period,
+    render_proposal_summary, render_report_metadata, render_report_metadata_with_period,
+    report_coverage, report_coverage_with_period, report_sessions,
 };
 use codexlens::analysis::{
     Finding, analyze_default, corrections, failures, instructions, knowledge, rework, verification,
@@ -22,6 +24,7 @@ use codexlens::discovery::{
 use codexlens::instructions::InstructionCaptureOptions;
 use codexlens::model::CanonicalData;
 use codexlens::normalize::normalize_rollout;
+use codexlens::period::{PeriodCoverage, ReportingPeriod, select_report_data};
 use codexlens::rollout::{RolloutParseOptions, parse_rollout};
 use codexlens::state::read_state_database;
 use codexlens::store::{IngestOptions, SCHEMA_VERSION, Store, StoreFreshness};
@@ -131,6 +134,10 @@ struct StoreOptions {
         help = "Read exactly this derived store without refreshing raw inputs"
     )]
     frozen: bool,
+    #[arg(long, value_name = "RFC3339")]
+    since: Option<String>,
+    #[arg(long, value_name = "RFC3339")]
+    until: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -289,11 +296,36 @@ fn main() -> Result<()> {
         Command::Refresh { refresh } => run_refresh(&refresh),
         Command::Analyze { store } => run_finding_report(&store, analyze_default, "analyze"),
         Command::Sessions { store } => {
-            let (data, freshness) = load_store(&store)?;
-            store.format.write_report(
-                || (render_sessions(&data, &freshness), String::new()),
-                || render_json_sessions(&data, &freshness),
-            )
+            let (data, freshness, selection) = load_reporting(&store)?;
+            if let Some(selection) = selection.as_ref() {
+                let coverage = report_coverage_with_period(&data, &selection.period);
+                store.format.write_report(
+                    || {
+                        (
+                            render_sessions_with_period(
+                                &data,
+                                &freshness,
+                                &coverage,
+                                &selection.coverage,
+                            ),
+                            String::new(),
+                        )
+                    },
+                    || {
+                        render_json_sessions_with_period(
+                            &data,
+                            &freshness,
+                            &coverage,
+                            &selection.coverage,
+                        )
+                    },
+                )
+            } else {
+                store.format.write_report(
+                    || (render_sessions(&data, &freshness), String::new()),
+                    || render_json_sessions(&data, &freshness),
+                )
+            }
         }
         Command::Failures { store } => run_finding_report(&store, failures, "failures"),
         Command::Corrections { store } => run_finding_report(&store, corrections, "corrections"),
@@ -302,8 +334,8 @@ fn main() -> Result<()> {
         Command::Knowledge { store } => run_finding_report(&store, knowledge, "knowledge"),
         Command::Instructions { store } => run_finding_report(&store, instructions, "instructions"),
         Command::Doctor { store, limit } => {
-            let (data, findings, freshness) = load_analysis(&store)?;
-            let report = doctor(
+            let (data, findings, freshness, selection) = load_analysis(&store)?;
+            let mut report = doctor(
                 &data,
                 &findings,
                 freshness,
@@ -312,16 +344,42 @@ fn main() -> Result<()> {
                     ..DoctorOptions::default()
                 },
             );
-            let coverage = report_coverage(&data);
-            store.format.write_report(
-                || {
-                    (
-                        render_doctor_with_coverage(&report, &coverage),
-                        String::new(),
-                    )
-                },
-                || render_json_finding_report_with_coverage("doctor", &report, &coverage),
-            )
+            if let Some(selection) = selection.as_ref() {
+                report.period_start = selection.coverage.observed_start.clone();
+                report.period_end = selection.coverage.observed_end.clone();
+            }
+            let coverage = selection.as_ref().map_or_else(
+                || report_coverage(&data),
+                |selection| report_coverage_with_period(&data, &selection.period),
+            );
+            if let Some(selection) = selection.as_ref() {
+                store.format.write_report(
+                    || {
+                        (
+                            render_doctor_with_period(&report, &coverage, &selection.coverage),
+                            String::new(),
+                        )
+                    },
+                    || {
+                        render_json_finding_report_with_period(
+                            "doctor",
+                            &report,
+                            &coverage,
+                            &selection.coverage,
+                        )
+                    },
+                )
+            } else {
+                store.format.write_report(
+                    || {
+                        (
+                            render_doctor_with_coverage(&report, &coverage),
+                            String::new(),
+                        )
+                    },
+                    || render_json_finding_report_with_coverage("doctor", &report, &coverage),
+                )
+            }
         }
         Command::Optimize {
             store,
@@ -332,14 +390,41 @@ fn main() -> Result<()> {
             if !diff && !apply {
                 bail!("optimize requires --diff or --apply");
             }
-            let (data, findings, _) = load_analysis(&store)?;
+            if apply && (store.since.is_some() || store.until.is_some()) {
+                bail!(
+                    "reporting period filters are supported by optimize --diff only; optimize --apply requires the unfiltered store"
+                );
+            }
+            let (data, findings, freshness, selection) = load_analysis(&store)?;
             let proposal_plan = proposals_for_findings(&data, &findings);
             if diff {
                 let batch = proposal_batch(&proposal_plan);
-                store.format.write_report(
-                    || render_optimize_human(&batch),
-                    || render_json_diff(&batch),
-                )
+                if let Some(selection) = selection.as_ref() {
+                    let coverage = report_coverage_with_period(&data, &selection.period);
+                    store.format.write_report(
+                        || {
+                            render_optimize_human_with_period(
+                                &batch,
+                                &coverage,
+                                &freshness,
+                                &selection.coverage,
+                            )
+                        },
+                        || {
+                            render_json_diff_with_period(
+                                &batch,
+                                &freshness,
+                                &coverage,
+                                &selection.coverage,
+                            )
+                        },
+                    )
+                } else {
+                    store.format.write_report(
+                        || render_optimize_human(&batch),
+                        || render_json_diff(&batch),
+                    )
+                }
             } else {
                 run_apply(&data, &proposal_plan.proposals, &proposal_plan.skipped, yes)?;
                 Ok(())
@@ -352,14 +437,19 @@ fn main() -> Result<()> {
             max_polls,
             interval_ms,
             cursor,
-        } => run_monitor(
-            &store,
-            &source,
-            kind,
-            max_polls,
-            interval_ms,
-            cursor.as_deref(),
-        ),
+        } => {
+            if store.since.is_some() || store.until.is_some() {
+                bail!("--since and --until are reporting filters; monitor does not accept them");
+            }
+            run_monitor(
+                &store,
+                &source,
+                kind,
+                max_polls,
+                interval_ms,
+                cursor.as_deref(),
+            )
+        }
     }
 }
 
@@ -783,10 +873,43 @@ fn bounded_path(path: &Path) -> String {
     bounded_text(&path.display().to_string())
 }
 
-fn load_analysis(options: &StoreOptions) -> Result<(CanonicalData, Vec<Finding>, StoreFreshness)> {
-    let (data, freshness) = load_store(options)?;
+fn load_analysis(
+    options: &StoreOptions,
+) -> Result<(
+    CanonicalData,
+    Vec<Finding>,
+    StoreFreshness,
+    Option<ReportingSelection>,
+)> {
+    let (data, freshness, selection) = load_reporting(options)?;
     let findings = analyze_default(&data);
-    Ok((data, findings, freshness))
+    Ok((data, findings, freshness, selection))
+}
+
+#[derive(Debug, Clone)]
+struct ReportingSelection {
+    period: ReportingPeriod,
+    coverage: PeriodCoverage,
+}
+
+fn load_reporting(
+    options: &StoreOptions,
+) -> Result<(CanonicalData, StoreFreshness, Option<ReportingSelection>)> {
+    let period = ReportingPeriod::from_bounds(options.since.as_deref(), options.until.as_deref())
+        .map_err(anyhow::Error::new)?;
+    let (data, freshness) = load_store(options)?;
+    let Some(period) = period else {
+        return Ok((data, freshness, None));
+    };
+    let selected = select_report_data(&data, Some(&period));
+    Ok((
+        selected.data,
+        freshness,
+        Some(ReportingSelection {
+            period,
+            coverage: selected.coverage,
+        }),
+    ))
 }
 
 fn load_store(options: &StoreOptions) -> Result<(CanonicalData, StoreFreshness)> {
@@ -844,18 +967,44 @@ fn run_finding_report(
     lens: fn(&CanonicalData) -> Vec<Finding>,
     command: &str,
 ) -> Result<()> {
-    let (data, freshness) = load_store(options)?;
-    let report = doctor(&data, &lens(&data), freshness, &DoctorOptions::default());
-    let coverage = report_coverage(&data);
-    options.format.write_report(
-        || {
-            (
-                render_doctor_with_coverage(&report, &coverage),
-                String::new(),
-            )
-        },
-        || render_json_finding_report_with_coverage(command, &report, &coverage),
-    )
+    let (data, freshness, selection) = load_reporting(options)?;
+    let mut report = doctor(&data, &lens(&data), freshness, &DoctorOptions::default());
+    if let Some(selection) = selection.as_ref() {
+        report.period_start = selection.coverage.observed_start.clone();
+        report.period_end = selection.coverage.observed_end.clone();
+    }
+    let coverage = selection.as_ref().map_or_else(
+        || report_coverage(&data),
+        |selection| report_coverage_with_period(&data, &selection.period),
+    );
+    if let Some(selection) = selection.as_ref() {
+        options.format.write_report(
+            || {
+                (
+                    render_doctor_with_period(&report, &coverage, &selection.coverage),
+                    String::new(),
+                )
+            },
+            || {
+                render_json_finding_report_with_period(
+                    command,
+                    &report,
+                    &coverage,
+                    &selection.coverage,
+                )
+            },
+        )
+    } else {
+        options.format.write_report(
+            || {
+                (
+                    render_doctor_with_coverage(&report, &coverage),
+                    String::new(),
+                )
+            },
+            || render_json_finding_report_with_coverage(command, &report, &coverage),
+        )
+    }
 }
 
 fn render_optimize_human(batch: &DiffBatch) -> (String, String) {
@@ -878,8 +1027,37 @@ fn render_optimize_human(batch: &DiffBatch) -> (String, String) {
     (stdout, stderr)
 }
 
+fn render_optimize_human_with_period(
+    batch: &DiffBatch,
+    coverage: &codexlens::advisor::ReportCoverage,
+    freshness: &StoreFreshness,
+    period: &PeriodCoverage,
+) -> (String, String) {
+    let (mut stdout, stderr) = render_optimize_human(batch);
+    let mut metadata = render_report_metadata_with_period(coverage, freshness, period);
+    metadata.push_str(&stdout);
+    stdout = metadata;
+    (stdout, stderr)
+}
+
 fn render_sessions(data: &CanonicalData, freshness: &StoreFreshness) -> String {
     let mut output = render_report_metadata(&report_coverage(data), freshness);
+    append_sessions(&mut output, data);
+    output
+}
+
+fn render_sessions_with_period(
+    data: &CanonicalData,
+    freshness: &StoreFreshness,
+    coverage: &codexlens::advisor::ReportCoverage,
+    period: &PeriodCoverage,
+) -> String {
+    let mut output = render_report_metadata_with_period(coverage, freshness, period);
+    append_sessions(&mut output, data);
+    output
+}
+
+fn append_sessions(output: &mut String, data: &CanonicalData) {
     for session in report_sessions(data) {
         output.push_str("- ");
         output.push_str(&session.id);
@@ -897,7 +1075,6 @@ fn render_sessions(data: &CanonicalData, freshness: &StoreFreshness) -> String {
         output.push_str(session.project.as_deref().unwrap_or("unknown"));
         output.push('\n');
     }
-    output
 }
 
 #[cfg(test)]

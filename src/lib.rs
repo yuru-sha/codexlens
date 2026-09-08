@@ -6,6 +6,7 @@ pub mod instructions;
 pub mod model;
 pub mod monitor;
 pub mod normalize;
+pub mod period;
 pub mod rollout;
 pub mod state;
 pub mod store;
