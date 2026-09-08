@@ -1359,7 +1359,7 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
 }
 
 #[test]
-fn post_mvp_contract_spec_tracks_each_implemented_phase5_boundary() {
+fn post_mvp_contract_spec_tracks_documented_boundaries() {
     let spec =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/specs/post-mvp.md"))
             .unwrap();
@@ -1377,6 +1377,10 @@ fn post_mvp_contract_spec_tracks_each_implemented_phase5_boundary() {
         ("## 4. Live monitoring", "## 5. `optimize --apply`"),
         (
             "## 5. `optimize --apply`",
+            "## 6. Scoped finding evaluation",
+        ),
+        (
+            "## 6. Scoped finding evaluation",
             "## Entry gate for implementation issues",
         ),
     ];
@@ -1469,6 +1473,62 @@ fn post_mvp_contract_spec_tracks_each_implemented_phase5_boundary() {
         assert!(spec.contains(marker), "missing contract marker: {marker}");
     }
     assert!(!spec.contains("a configured fallback"));
+}
+
+#[test]
+fn finding_evaluation_plan_is_bounded_human_reviewed_and_private() {
+    let plan = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/evaluations/finding-usefulness-pilot.md"),
+    )
+    .unwrap();
+
+    for marker in [
+        "No real-history pilot has been run",
+        "set -eu",
+        "source/project scope",
+        "Project scope check",
+        "SELECTED_PROJECT",
+        "project scope check failed",
+        "observation period",
+        "archive inclusion",
+        "retention/deletion policy",
+        "exact code version",
+        "resolved interval",
+        "coverage",
+        "freshness",
+        "actionable",
+        "incorrect",
+        "inconclusive",
+        "sample denominator",
+        "independent activity sample",
+        "optimize --diff",
+        "optimize --apply requires separate review and authorization",
+        "no raw-history upload",
+        "external analytics service",
+        "background monitoring",
+        "comparable windows",
+        "causal",
+        "synthetic regression",
+        "#82",
+        "#83",
+        "Prioritized decision",
+    ] {
+        assert!(
+            plan.contains(marker),
+            "evaluation plan is missing: {marker}"
+        );
+    }
+    for forbidden in [
+        "raw logs",
+        "credentials",
+        "personal identifiers",
+        "private paths",
+    ] {
+        assert!(
+            plan.contains(forbidden),
+            "privacy boundary is missing: {forbidden}"
+        );
+    }
 }
 
 #[test]
