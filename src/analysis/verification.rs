@@ -393,10 +393,9 @@ fn verification_events(data: &AnalysisContext<'_>) -> Vec<VerificationEvent> {
 
 fn call_source_is_selected(data: &AnalysisContext<'_>, call: &ToolCall) -> bool {
     data.records.is_empty()
-        || data.records.iter().any(|record| {
-            record.provenance.path == call.provenance.path
-                && record.provenance.line == call.provenance.line
-        })
+        || data
+            .record_positions
+            .contains_key(&(call.provenance.path.as_path(), call.provenance.line))
 }
 
 fn unobserved_verification_events(data: &AnalysisContext<'_>) -> Vec<VerificationEvent> {
