@@ -1485,6 +1485,10 @@ fn finding_evaluation_plan_is_bounded_human_reviewed_and_private() {
     for marker in [
         "No real-history pilot has been run",
         "set -eu",
+        "AUTHORIZATION_RECORD",
+        "authorization gate incomplete",
+        "source_scope",
+        "project_scope",
         "source/project scope",
         "Project scope check",
         "SELECTED_PROJECT",

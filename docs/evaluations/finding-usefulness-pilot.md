@@ -14,11 +14,13 @@ background monitoring.
 ## 1. Authorization gate
 
 Before reading any real history, the owner must record all of the following in
-the private worksheet:
+the private worksheet and authorization record. The `source/project scope`
+decision is recorded as two separate fields:
 
 | Decision | Required value |
 | --- | --- |
-| source/project scope | One explicitly named local source and project boundary |
+| source scope | One explicitly named local source |
+| project scope | One explicitly named project boundary |
 | observation period | Start and end, including timezone and whether archives are included |
 | archive inclusion | Yes or no, with the reason |
 | storage location | A local path outside this repository for raw inputs, the derived store, and private notes |
@@ -28,6 +30,11 @@ the private worksheet:
 An incomplete gate means stop. Do not put these selected values, raw logs,
 excerpts, credentials, personal identifiers, or private paths in GitHub,
 fixtures, or committed evaluation artifacts.
+
+Create the private JSON authorization record before running the commands below.
+It must contain non-empty string values for `source_scope`, `project_scope`,
+`observation_period`, `archive_inclusion`, `storage_location`,
+`retention_deletion_policy`, and `owner_authorization`.
 
 The pilot depends on the reporting coverage and period contracts in [#82](https://github.com/yuru-sha/codexlens/issues/82)
 and [#83](https://github.com/yuru-sha/codexlens/issues/83). Until those
@@ -47,8 +54,34 @@ PILOT_DIR=/path/outside/repository/codexlens-pilot
 PILOT_STORE="$PILOT_DIR/store.sqlite"
 AUTHORIZED_CODEX_HOME=/path/owner-approved/codex-home
 SELECTED_PROJECT=/path/owner-approved/project
+AUTHORIZATION_RECORD="$PILOT_DIR/authorization.json"
 
 mkdir -p "$PILOT_DIR"
+
+python3 - "$AUTHORIZATION_RECORD" <<'PY'
+import json
+import sys
+
+required = (
+    "source_scope",
+    "project_scope",
+    "observation_period",
+    "archive_inclusion",
+    "storage_location",
+    "retention_deletion_policy",
+    "owner_authorization",
+)
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        record = json.load(stream)
+except (OSError, ValueError):
+    raise SystemExit("authorization gate incomplete")
+if not isinstance(record, dict) or any(
+    not isinstance(record.get(field), str) or not record[field].strip()
+    for field in required
+):
+    raise SystemExit("authorization gate incomplete")
+PY
 
 cargo run -- refresh \
   --codex-home "$AUTHORIZED_CODEX_HOME" \
