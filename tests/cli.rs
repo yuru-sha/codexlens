@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use codexlens::advisor::DoctorReport;
 use codexlens::discovery::{DiscoveredInput, InputKind, ReaderKind};
 use codexlens::model::{
     DiagnosticKind, InstructionFile, InstructionFileKind, InstructionFileState, InstructionScope,
@@ -2433,6 +2434,20 @@ fn json_errors_stay_on_stderr_for_every_reporting_command() {
             "{args:?} wrote JSON to stderr"
         );
     }
+}
+
+#[test]
+fn doctor_report_public_struct_literal_remains_compatible() {
+    let report = DoctorReport {
+        period_start: None,
+        period_end: None,
+        session_count: 0,
+        freshness: codexlens::store::StoreFreshness::recorded(0, None),
+        finding_counts: BTreeMap::new(),
+        groups: Vec::new(),
+    };
+
+    assert_eq!(report.session_count, 0);
 }
 
 #[test]

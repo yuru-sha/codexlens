@@ -53,7 +53,6 @@ pub struct DoctorReport {
     pub period_end: Option<String>,
     pub session_count: usize,
     pub freshness: StoreFreshness,
-    pub coverage: ReportCoverage,
     pub finding_counts: BTreeMap<String, usize>,
     pub groups: Vec<DoctorGroup>,
 }
@@ -86,6 +85,22 @@ pub fn render_json_finding_report(
     command: &str,
     report: &DoctorReport,
 ) -> Result<String, serde_json::Error> {
+    render_json_finding_report_inner(command, report, None)
+}
+
+pub fn render_json_finding_report_with_coverage(
+    command: &str,
+    report: &DoctorReport,
+    coverage: &ReportCoverage,
+) -> Result<String, serde_json::Error> {
+    render_json_finding_report_inner(command, report, Some(coverage))
+}
+
+fn render_json_finding_report_inner(
+    command: &str,
+    report: &DoctorReport,
+    coverage: Option<&ReportCoverage>,
+) -> Result<String, serde_json::Error> {
     let groups = report
         .groups
         .iter()
@@ -100,18 +115,18 @@ pub fn render_json_finding_report(
             })
         })
         .collect::<Vec<_>>();
-    json_document(
-        command,
-        serde_json::json!({
-            "period_start": report.period_start,
-            "period_end": report.period_end,
-            "session_count": report.session_count,
-            "freshness": freshness_json(&report.freshness),
-            "coverage": coverage_json(&report.coverage),
-            "finding_counts": report.finding_counts,
-            "groups": groups,
-        }),
-    )
+    let mut data = serde_json::json!({
+        "period_start": report.period_start,
+        "period_end": report.period_end,
+        "session_count": report.session_count,
+        "freshness": freshness_json(&report.freshness),
+        "finding_counts": report.finding_counts,
+        "groups": groups,
+    });
+    if let Some(coverage) = coverage {
+        data["coverage"] = coverage_json(coverage);
+    }
+    json_document(command, data)
 }
 
 pub fn render_json_sessions(
@@ -371,7 +386,6 @@ pub fn doctor(
     freshness: StoreFreshness,
     options: &DoctorOptions,
 ) -> DoctorReport {
-    let coverage = report_coverage(data);
     let mut ranked = findings.to_vec();
     sort_findings(&mut ranked);
     let mut finding_counts = BTreeMap::new();
@@ -408,9 +422,8 @@ pub fn doctor(
     DoctorReport {
         period_start: period(data).0,
         period_end: period(data).1,
-        session_count: coverage.session_count,
+        session_count: session_count(data),
         freshness,
-        coverage,
         finding_counts,
         groups,
     }
@@ -669,6 +682,14 @@ fn sanitize_finding(mut finding: Finding, excerpt_max_bytes: usize) -> Finding {
 }
 
 pub fn render_doctor(report: &DoctorReport) -> String {
+    render_doctor_inner(report, None)
+}
+
+pub fn render_doctor_with_coverage(report: &DoctorReport, coverage: &ReportCoverage) -> String {
+    render_doctor_inner(report, Some(coverage))
+}
+
+fn render_doctor_inner(report: &DoctorReport, coverage: Option<&ReportCoverage>) -> String {
     let mut output = String::new();
     output.push_str("Analyzed period: ");
     match (&report.period_start, &report.period_end) {
@@ -681,7 +702,15 @@ pub fn render_doctor(report: &DoctorReport) -> String {
         _ => output.push_str("unknown"),
     }
     output.push('\n');
-    output.push_str(&render_report_metadata(&report.coverage, &report.freshness));
+    if let Some(coverage) = coverage {
+        output.push_str(&render_report_metadata(coverage, &report.freshness));
+    } else {
+        output.push_str(&format!("Sessions: {}\n", report.session_count));
+        output.push_str(&format!(
+            "Store freshness: {} ({} source files)\n",
+            report.freshness, report.freshness.source_count
+        ));
+    }
     output.push_str("Finding counts:");
     if report.finding_counts.is_empty() {
         output.push_str(" none\n");
@@ -973,12 +1002,13 @@ mod tests {
             report.period_end.as_deref(),
             Some("2026-01-01T00:00:00+09:00")
         );
+        let coverage = report_coverage(&data);
         assert_eq!(
-            report.coverage.activity_start.as_deref(),
+            coverage.activity_start.as_deref(),
             Some("2026-01-01T00:00:00+09:00")
         );
         assert_eq!(
-            report.coverage.activity_end.as_deref(),
+            coverage.activity_end.as_deref(),
             Some("2025-12-31T20:00:00Z")
         );
     }

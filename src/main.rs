@@ -9,8 +9,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use codexlens::advisor::{
     ApplyPlan, ApplyReport, DiffBatch, DoctorOptions, doctor, prepare_apply_proposals,
-    proposals_for_findings, render_diffs, render_doctor, render_json_diff,
-    render_json_finding_report, render_json_sessions, render_proposal_summary,
+    proposals_for_findings, render_diffs, render_doctor_with_coverage, render_json_diff,
+    render_json_finding_report_with_coverage, render_json_sessions, render_proposal_summary,
     render_report_metadata, report_coverage, report_sessions,
 };
 use codexlens::analysis::{
@@ -312,9 +312,15 @@ fn main() -> Result<()> {
                     ..DoctorOptions::default()
                 },
             );
+            let coverage = report_coverage(&data);
             store.format.write_report(
-                || (render_doctor(&report), String::new()),
-                || render_json_finding_report("doctor", &report),
+                || {
+                    (
+                        render_doctor_with_coverage(&report, &coverage),
+                        String::new(),
+                    )
+                },
+                || render_json_finding_report_with_coverage("doctor", &report, &coverage),
             )
         }
         Command::Optimize {
@@ -840,9 +846,15 @@ fn run_finding_report(
 ) -> Result<()> {
     let (data, freshness) = load_store(options)?;
     let report = doctor(&data, &lens(&data), freshness, &DoctorOptions::default());
+    let coverage = report_coverage(&data);
     options.format.write_report(
-        || (render_doctor(&report), String::new()),
-        || render_json_finding_report(command, &report),
+        || {
+            (
+                render_doctor_with_coverage(&report, &coverage),
+                String::new(),
+            )
+        },
+        || render_json_finding_report_with_coverage(command, &report, &coverage),
     )
 }
 
