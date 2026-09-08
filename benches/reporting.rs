@@ -18,6 +18,9 @@ const MESSAGE_COUNT: usize = 10_000;
 const FILE_OPERATION_COUNT: usize = 1_661;
 const SNAPSHOT_COUNT: usize = 1_650;
 const FAILURE_OUTPUT_BYTES: usize = 1_024;
+const MISSING_SNAPSHOT_SESSION: usize = 498;
+const UNAVAILABLE_SNAPSHOT_SESSIONS: &[usize] = &[499];
+const SHARED_TURN_ID: &str = "synthetic-turn-shared";
 const TARGET_MS: u128 = 5_000;
 const MAX_DOCTOR_JSON_BYTES: usize = 64 * 1024;
 const MAX_REPORT_JSON_BYTES: usize = 256 * 1024;
@@ -42,8 +45,12 @@ fn source(session: usize, line: usize) -> SourceRef {
     )
 }
 
-fn synthetic_failure_output() -> String {
-    let mut output = "synthetic failure: permission denied ".to_owned();
+fn unavailable_snapshot_session(session: usize) -> bool {
+    UNAVAILABLE_SNAPSHOT_SESSIONS.contains(&session)
+}
+
+fn synthetic_failure_output(prefix: &str) -> String {
+    let mut output = prefix.to_owned();
     output.push_str(&"x".repeat(FAILURE_OUTPUT_BYTES.saturating_sub(output.len())));
     output
 }
@@ -85,7 +92,7 @@ fn synthetic_data() -> CanonicalData {
     for index in 0..RECORD_COUNT {
         let session = index % SESSION_COUNT;
         let line = index / SESSION_COUNT + 1;
-        let turn_id = (line == 1).then(|| format!("synthetic-turn-{session}"));
+        let turn_id = (line == 1).then(|| SHARED_TURN_ID.to_owned());
         data.records.push(Record {
             session_id: Some(format!("synthetic-session-{session}")),
             turn_id,
@@ -101,14 +108,25 @@ fn synthetic_data() -> CanonicalData {
         });
     }
 
-    let failure_output = synthetic_failure_output();
+    let failure_output = synthetic_failure_output("synthetic failure: permission denied ");
+    let scoped_failure_output = synthetic_failure_output("synthetic failure: parse error ");
+    let unavailable_failure_output =
+        synthetic_failure_output("synthetic failure: missing snapshot ");
     for index in 0..CALL_COUNT {
         let session = index % SESSION_COUNT;
         let line = index / SESSION_COUNT + 1;
         let session_id = format!("synthetic-session-{session}");
         let call_id = format!("synthetic-call-{index}");
-        let turn_id = (line == 1).then(|| format!("synthetic-turn-{session}"));
+        let turn_id = (line == 1).then(|| SHARED_TURN_ID.to_owned());
         let provenance = source(session, line);
+        let result_provenance = source(
+            session,
+            if session == 496 && line == 1 {
+                1_001
+            } else {
+                line
+            },
+        );
         data.tool_calls.push(ToolCall {
             id: Some(call_id.clone()),
             call_id: Some(call_id.clone()),
@@ -129,7 +147,15 @@ fn synthetic_data() -> CanonicalData {
             command: Some("cargo test".to_owned()),
             cwd: Some("/synthetic/project".to_owned()),
             stdout: None,
-            stderr: Some(failure_output.clone()),
+            stderr: Some(if unavailable_snapshot_session(session) {
+                unavailable_failure_output.clone()
+            } else if line == 1 && (496..498).contains(&session) {
+                scoped_failure_output.clone()
+            } else if line == 1 && session == MISSING_SNAPSHOT_SESSION {
+                unavailable_failure_output.clone()
+            } else {
+                failure_output.clone()
+            }),
             duration_ms: None,
             exit_code: None,
             status: None,
@@ -139,7 +165,7 @@ fn synthetic_data() -> CanonicalData {
             deduplication_key: None,
             equivalent_to: None,
             is_duplicate: false,
-            provenance,
+            provenance: result_provenance,
         });
     }
 
@@ -188,11 +214,17 @@ fn synthetic_data() -> CanonicalData {
         });
     }
 
-    let snapshot_content = "Remember that cargo test is required.".to_owned();
+    let snapshot_content = "Synthetic historical instruction guidance.".to_owned();
     let snapshot_hash = codexlens::instructions::content_hash(snapshot_content.as_bytes());
-    for index in 0..SNAPSHOT_COUNT {
+    let mut index = 0;
+    while data.instruction_snapshots.len() < SNAPSHOT_COUNT {
         let session = index % SESSION_COUNT;
         let occurrence = index / SESSION_COUNT;
+        index += 1;
+        if session == MISSING_SNAPSHOT_SESSION {
+            continue;
+        }
+        let unavailable = unavailable_snapshot_session(session);
         let line = if occurrence == 1 {
             1_001
         } else {
@@ -200,18 +232,44 @@ fn synthetic_data() -> CanonicalData {
         };
         data.instruction_snapshots.push(InstructionSnapshot {
             session_id: Some(format!("synthetic-session-{session}")),
-            turn_id: Some(format!("synthetic-turn-{session}")),
-            source: InstructionSnapshotSource::Rollout,
-            accuracy: InstructionSnapshotAccuracy::Observed,
-            content: Some(snapshot_content.clone()),
-            content_hash: Some(snapshot_hash.clone()),
-            byte_count: snapshot_content.len(),
+            turn_id: Some(SHARED_TURN_ID.to_owned()),
+            source: if unavailable {
+                InstructionSnapshotSource::Unavailable
+            } else {
+                InstructionSnapshotSource::Rollout
+            },
+            accuracy: if unavailable {
+                InstructionSnapshotAccuracy::Unavailable
+            } else {
+                InstructionSnapshotAccuracy::Observed
+            },
+            content: (!unavailable).then(|| snapshot_content.clone()),
+            content_hash: (!unavailable).then(|| snapshot_hash.clone()),
+            byte_count: if unavailable {
+                0
+            } else {
+                snapshot_content.len()
+            },
             chain: Vec::new(),
-            effective_chain_hash: Some(snapshot_hash.clone()),
+            effective_chain_hash: (!unavailable).then(|| snapshot_hash.clone()),
             truncated: false,
             provenance: source(session, line),
         });
     }
+
+    assert_eq!(data.instruction_snapshots.len(), SNAPSHOT_COUNT);
+    assert!(
+        !data
+            .instruction_snapshots
+            .iter()
+            .any(|snapshot| { snapshot.session_id.as_deref() == Some("synthetic-session-498") })
+    );
+    assert!(data.instruction_snapshots.iter().any(|snapshot| {
+        snapshot.session_id.as_deref() == Some("synthetic-session-499")
+            && snapshot.source == InstructionSnapshotSource::Unavailable
+            && snapshot.accuracy == InstructionSnapshotAccuracy::Unavailable
+            && snapshot.content.is_none()
+    }));
 
     data
 }
@@ -364,7 +422,8 @@ fn synthetic_store(data: &CanonicalData, path: &Path) -> Store {
 
     let snapshot = data
         .instruction_snapshots
-        .first()
+        .iter()
+        .find(|snapshot| snapshot.content.is_some())
         .expect("synthetic snapshot exists");
     transaction
         .execute(
@@ -379,7 +438,7 @@ fn synthetic_store(data: &CanonicalData, path: &Path) -> Store {
         .expect("instruction blob persists");
     let mut snapshots = transaction
         .prepare(
-            "INSERT INTO instruction_snapshots (snapshot_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, turn_id, snapshot_source, accuracy, blob_key, content_hash, byte_count, effective_chain_hash, truncated, chain_json) VALUES (?1, ?2, ?3, ?4, 'rollout', ?5, 1, ?6, ?7, 'rollout', 'observed', 'synthetic-instruction', ?8, ?9, ?10, 0, ?11)",
+            "INSERT INTO instruction_snapshots (snapshot_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, turn_id, snapshot_source, accuracy, blob_key, content_hash, byte_count, effective_chain_hash, truncated, chain_json) VALUES (?1, ?2, ?3, ?4, 'rollout', ?5, 1, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, ?14)",
         )
         .expect("snapshot statement prepares");
     for (index, snapshot) in data.instruction_snapshots.iter().enumerate() {
@@ -392,6 +451,9 @@ fn synthetic_store(data: &CanonicalData, path: &Path) -> Store {
                 "2026-01-01T00:01:00Z",
                 snapshot.session_id,
                 snapshot.turn_id,
+                snapshot.source.as_str(),
+                snapshot.accuracy.as_str(),
+                snapshot.content.as_ref().map(|_| "synthetic-instruction"),
                 snapshot.content_hash,
                 snapshot.byte_count,
                 snapshot.effective_chain_hash,
@@ -402,6 +464,125 @@ fn synthetic_store(data: &CanonicalData, path: &Path) -> Store {
     drop(snapshots);
     transaction.commit().expect("synthetic transaction commits");
     store
+}
+
+fn assert_snapshot_coverage(document: &serde_json::Value) {
+    let groups = document["data"]["groups"]
+        .as_array()
+        .expect("doctor groups are an array");
+    let mut snapshot_evidence = None;
+    let mut snapshot_evidence_count = 0;
+    let mut missing_limitation = false;
+    let mut unavailable_limitation = false;
+    let mut direct_association = false;
+    let mut turn_fallback = false;
+
+    for group in groups {
+        for finding in group["findings"]
+            .as_array()
+            .expect("doctor findings are an array")
+        {
+            let evidence = finding["evidence"]
+                .as_array()
+                .expect("finding evidence is an array");
+            if finding["kind"] == "gap" || finding["kind"] == "stale" {
+                assert!(!evidence.iter().any(|value| {
+                    matches!(
+                        value["session_id"].as_str(),
+                        Some("synthetic-session-498") | Some("synthetic-session-499")
+                    )
+                }));
+            }
+            if finding["kind"] == "failure"
+                && finding["limitations"]
+                    .as_array()
+                    .is_some_and(|limitations| {
+                        limitations.iter().any(|value| {
+                            let text = value.as_str().unwrap_or_default();
+                            text.contains("instruction snapshot was unavailable")
+                                && text.contains("inconclusive")
+                        })
+                    })
+            {
+                if evidence
+                    .iter()
+                    .any(|value| value["session_id"] == "synthetic-session-498")
+                {
+                    missing_limitation = true;
+                }
+                if evidence
+                    .iter()
+                    .any(|value| value["session_id"] == "synthetic-session-499")
+                {
+                    unavailable_limitation = true;
+                }
+            }
+
+            if finding["kind"] == "gap" {
+                direct_association = evidence.iter().any(|value| {
+                    value["session_id"] == "synthetic-session-496"
+                        && value["role"] == "observation"
+                        && value["source"]["line"] == 1_001
+                }) && evidence.iter().any(|value| {
+                    value["session_id"] == "synthetic-session-496"
+                        && value["role"] == "instruction_snapshot"
+                        && value["source"]["line"] == 1_001
+                });
+                turn_fallback = evidence.iter().any(|value| {
+                    value["session_id"] == "synthetic-session-497"
+                        && value["role"] == "observation"
+                        && value["source"]["line"] == 1
+                }) && evidence.iter().any(|value| {
+                    value["session_id"] == "synthetic-session-497"
+                        && value["role"] == "instruction_snapshot"
+                        && value["source"]["line"] == 1_001
+                });
+            }
+
+            for evidence in evidence {
+                if evidence["role"] != "instruction_snapshot" {
+                    continue;
+                }
+                snapshot_evidence_count += 1;
+                let session = evidence["session_id"]
+                    .as_str()
+                    .expect("snapshot evidence has a session");
+                let session_suffix = session
+                    .strip_prefix("synthetic-")
+                    .expect("synthetic snapshot session is bounded");
+                let expected_path = format!("/synthetic/{session_suffix}.jsonl");
+                assert_eq!(
+                    evidence["source"]["path"].as_str(),
+                    Some(expected_path.as_str())
+                );
+                if session == "synthetic-session-496" {
+                    snapshot_evidence = Some(evidence);
+                }
+            }
+        }
+    }
+
+    let snapshot = snapshot_evidence.expect("doctor must include snapshot evidence");
+    assert_eq!(snapshot["source"]["line"], 1_001);
+    assert_ne!(snapshot["source"]["line"], 1);
+    assert!(
+        snapshot["excerpt"]
+            .as_str()
+            .is_some_and(|excerpt| excerpt.contains("Synthetic historical"))
+    );
+    assert!(snapshot_evidence_count > 0);
+    assert!(
+        direct_association,
+        "benchmark must exercise direct snapshot source association"
+    );
+    assert!(
+        turn_fallback,
+        "benchmark must exercise session-scoped turn fallback"
+    );
+    assert!(
+        missing_limitation && unavailable_limitation,
+        "missing and unusable snapshots must make comparison inconclusive"
+    );
 }
 
 fn main() {
@@ -439,6 +620,7 @@ fn main() {
     let document: serde_json::Value = serde_json::from_str(&json).expect("synthetic JSON parses");
     assert_eq!(document["schema_version"], 1);
     assert_eq!(document["data"]["session_count"], SESSION_COUNT);
+    assert_snapshot_coverage(&document);
     for kind in ["failure", "correction", "rework", "knowledge"] {
         assert!(
             document["data"]["finding_counts"][kind]
