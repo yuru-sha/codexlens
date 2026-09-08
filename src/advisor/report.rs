@@ -9,7 +9,7 @@ use crate::analysis::{
     parse_timestamp, sort_findings,
 };
 use crate::model::{CanonicalData, SourceKind, SourceRef};
-use crate::period::PeriodCoverage;
+use crate::period::{PeriodCoverage, ReportingPeriod};
 use crate::store::{FreshnessState, StoreFreshness};
 
 use super::diff::{DiffBatch, RenderedDiff, SkippedProposal};
@@ -531,6 +531,20 @@ pub fn report_sessions(data: &CanonicalData) -> Vec<SessionSummary> {
 }
 
 pub fn report_coverage(data: &CanonicalData) -> ReportCoverage {
+    report_coverage_filtered(data, None)
+}
+
+pub fn report_coverage_with_period(
+    data: &CanonicalData,
+    period: &ReportingPeriod,
+) -> ReportCoverage {
+    report_coverage_filtered(data, Some(period))
+}
+
+fn report_coverage_filtered(
+    data: &CanonicalData,
+    period: Option<&ReportingPeriod>,
+) -> ReportCoverage {
     let mut timestamps = Vec::<(i64, String)>::new();
     let mut missing_activity_timestamps = 0;
     let mut invalid_activity_timestamps = 0;
@@ -542,6 +556,7 @@ pub fn report_coverage(data: &CanonicalData) -> ReportCoverage {
                 &mut timestamps,
                 &mut missing_activity_timestamps,
                 &mut invalid_activity_timestamps,
+                period,
             );
         }
     }
@@ -552,6 +567,7 @@ pub fn report_coverage(data: &CanonicalData) -> ReportCoverage {
                 &mut timestamps,
                 &mut missing_activity_timestamps,
                 &mut invalid_activity_timestamps,
+                period,
             );
         }
         for event in &turn.lifecycle {
@@ -560,6 +576,7 @@ pub fn report_coverage(data: &CanonicalData) -> ReportCoverage {
                 &mut timestamps,
                 &mut missing_activity_timestamps,
                 &mut invalid_activity_timestamps,
+                period,
             );
         }
     }
@@ -588,6 +605,7 @@ pub fn report_coverage(data: &CanonicalData) -> ReportCoverage {
             &mut timestamps,
             &mut missing_activity_timestamps,
             &mut invalid_activity_timestamps,
+            period,
         );
     }
 
@@ -633,6 +651,7 @@ fn observe_timestamp(
     valid: &mut Vec<(i64, String)>,
     missing: &mut usize,
     invalid: &mut usize,
+    period: Option<&ReportingPeriod>,
 ) {
     let Some(timestamp) = timestamp else {
         *missing += 1;
@@ -642,6 +661,9 @@ fn observe_timestamp(
         *invalid += 1;
         return;
     };
+    if period.is_some_and(|period| !period.contains_text(timestamp)) {
+        return;
+    }
     valid.push((parsed, timestamp.trim().to_owned()));
 }
 
@@ -949,6 +971,7 @@ mod tests {
     use crate::advisor::{ProposalAction, RenderedDiff};
     use crate::analysis::{FindingScope, FindingType, VerificationStatus};
     use crate::model::{Record, RecordKind, Session};
+    use crate::period::{ReportingPeriod, select_report_data};
     use crate::store::StoreFreshness;
     use std::path::PathBuf;
 
@@ -1064,6 +1087,67 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, "session-a");
         assert!(summaries[0].created_at.is_none());
+    }
+
+    #[test]
+    fn period_coverage_ignores_boundary_session_timestamps() {
+        let data = CanonicalData {
+            sessions: vec![Session {
+                id: "session".to_owned(),
+                created_at: Some("2026-01-02T00:00:00Z".to_owned()),
+                updated_at: Some("2026-01-04T00:00:00Z".to_owned()),
+                cwd: None,
+                project: None,
+                model: None,
+                provider: None,
+                source: None,
+                thread_source: None,
+                rollout_path: None,
+                archive_state: None,
+                title: None,
+                preview: None,
+                parent_id: None,
+                cli_version: None,
+                originator: None,
+                history_mode: None,
+                reasoning_effort: None,
+                provenance: crate::advisor::test_support::source(1),
+            }],
+            records: vec![Record {
+                session_id: Some("session".to_owned()),
+                turn_id: None,
+                timestamp: Some("2026-01-03T12:00:00Z".to_owned()),
+                sequence: 0,
+                original_record_type: None,
+                original_nested_type: None,
+                error_category: None,
+                is_error: false,
+                is_terminal: false,
+                kind: RecordKind::ResponseItem,
+                provenance: crate::advisor::test_support::source(2),
+            }],
+            ..CanonicalData::default()
+        };
+        let period = ReportingPeriod::from_bounds(
+            Some("2026-01-03T00:00:00Z"),
+            Some("2026-01-04T00:00:00Z"),
+        )
+        .unwrap()
+        .unwrap();
+        let selected = select_report_data(&data, Some(&period));
+        assert_eq!(selected.data.sessions.len(), 1);
+
+        let coverage = report_coverage_with_period(&selected.data, &period);
+
+        assert_eq!(
+            coverage.activity_start.as_deref(),
+            Some("2026-01-03T12:00:00Z")
+        );
+        assert_eq!(
+            coverage.activity_end.as_deref(),
+            Some("2026-01-03T12:00:00Z")
+        );
+        assert_eq!(coverage.valid_activity_timestamps, 1);
     }
 
     #[test]

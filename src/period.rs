@@ -188,13 +188,17 @@ impl ReportingPeriod {
             && self.end.is_none_or(|end| timestamp < end)
     }
 
+    pub(crate) fn contains_text(self, value: &str) -> bool {
+        Timestamp::parse(value).is_some_and(|timestamp| self.contains(timestamp))
+    }
+
     fn overlaps(self, start: Timestamp, end: Timestamp) -> bool {
         self.start
             .zip(self.end)
             .is_none_or(|(lower, upper)| lower < upper)
             && start <= end
             && self.end.is_none_or(|bound| start < bound)
-            && self.start.is_none_or(|bound| end >= bound)
+            && self.start.is_none_or(|bound| end > bound)
     }
 
     fn is_empty(self) -> bool {
@@ -942,6 +946,21 @@ mod tests {
 
         assert_eq!(selected.data.records.len(), 1);
         assert_eq!(selected.data.records[0].sequence, 1);
+    }
+
+    #[test]
+    fn excludes_a_span_ending_at_the_since_boundary() {
+        let period = ReportingPeriod::from_bounds(
+            Some("2026-01-03T00:00:00Z"),
+            Some("2026-01-04T00:00:00Z"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(!period.overlaps(
+            Timestamp::parse("2026-01-02T00:00:00Z").unwrap(),
+            Timestamp::parse("2026-01-03T00:00:00Z").unwrap(),
+        ));
     }
 
     #[test]

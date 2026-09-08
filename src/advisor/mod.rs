@@ -23,6 +23,7 @@ pub use report::{
     render_json_diff, render_json_diff_with_period, render_json_finding_report,
     render_json_finding_report_with_coverage, render_json_finding_report_with_period,
     render_json_sessions, render_json_sessions_with_period, render_proposal_summary,
-    render_report_metadata, render_report_metadata_with_period, report_coverage, report_sessions,
+    render_report_metadata, render_report_metadata_with_period, report_coverage,
+    report_coverage_with_period, report_sessions,
 };
 pub use scope::{ScopeRecommendation, recommend_scope};

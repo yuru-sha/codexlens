@@ -13,7 +13,7 @@ use codexlens::advisor::{
     render_json_diff, render_json_diff_with_period, render_json_finding_report_with_coverage,
     render_json_finding_report_with_period, render_json_sessions, render_json_sessions_with_period,
     render_proposal_summary, render_report_metadata, render_report_metadata_with_period,
-    report_coverage, report_sessions,
+    report_coverage, report_coverage_with_period, report_sessions,
 };
 use codexlens::analysis::{
     Finding, analyze_default, corrections, failures, instructions, knowledge, rework, verification,
@@ -296,17 +296,29 @@ fn main() -> Result<()> {
         Command::Refresh { refresh } => run_refresh(&refresh),
         Command::Analyze { store } => run_finding_report(&store, analyze_default, "analyze"),
         Command::Sessions { store } => {
-            let (data, freshness, period) = load_reporting(&store)?;
-            if let Some(period) = period.as_ref() {
-                let coverage = report_coverage(&data);
+            let (data, freshness, selection) = load_reporting(&store)?;
+            if let Some(selection) = selection.as_ref() {
+                let coverage = report_coverage_with_period(&data, &selection.period);
                 store.format.write_report(
                     || {
                         (
-                            render_sessions_with_period(&data, &freshness, &coverage, period),
+                            render_sessions_with_period(
+                                &data,
+                                &freshness,
+                                &coverage,
+                                &selection.coverage,
+                            ),
                             String::new(),
                         )
                     },
-                    || render_json_sessions_with_period(&data, &freshness, &coverage, period),
+                    || {
+                        render_json_sessions_with_period(
+                            &data,
+                            &freshness,
+                            &coverage,
+                            &selection.coverage,
+                        )
+                    },
                 )
             } else {
                 store.format.write_report(
@@ -322,7 +334,7 @@ fn main() -> Result<()> {
         Command::Knowledge { store } => run_finding_report(&store, knowledge, "knowledge"),
         Command::Instructions { store } => run_finding_report(&store, instructions, "instructions"),
         Command::Doctor { store, limit } => {
-            let (data, findings, freshness, period) = load_analysis(&store)?;
+            let (data, findings, freshness, selection) = load_analysis(&store)?;
             let mut report = doctor(
                 &data,
                 &findings,
@@ -332,20 +344,30 @@ fn main() -> Result<()> {
                     ..DoctorOptions::default()
                 },
             );
-            if let Some(period) = period.as_ref() {
-                report.period_start = period.observed_start.clone();
-                report.period_end = period.observed_end.clone();
+            if let Some(selection) = selection.as_ref() {
+                report.period_start = selection.coverage.observed_start.clone();
+                report.period_end = selection.coverage.observed_end.clone();
             }
-            let coverage = report_coverage(&data);
-            if let Some(period) = period.as_ref() {
+            let coverage = selection.as_ref().map_or_else(
+                || report_coverage(&data),
+                |selection| report_coverage_with_period(&data, &selection.period),
+            );
+            if let Some(selection) = selection.as_ref() {
                 store.format.write_report(
                     || {
                         (
-                            render_doctor_with_period(&report, &coverage, period),
+                            render_doctor_with_period(&report, &coverage, &selection.coverage),
                             String::new(),
                         )
                     },
-                    || render_json_finding_report_with_period("doctor", &report, &coverage, period),
+                    || {
+                        render_json_finding_report_with_period(
+                            "doctor",
+                            &report,
+                            &coverage,
+                            &selection.coverage,
+                        )
+                    },
                 )
             } else {
                 store.format.write_report(
@@ -373,15 +395,29 @@ fn main() -> Result<()> {
                     "reporting period filters are supported by optimize --diff only; optimize --apply requires the unfiltered store"
                 );
             }
-            let (data, findings, freshness, period) = load_analysis(&store)?;
+            let (data, findings, freshness, selection) = load_analysis(&store)?;
             let proposal_plan = proposals_for_findings(&data, &findings);
             if diff {
                 let batch = proposal_batch(&proposal_plan);
-                if let Some(period) = period.as_ref() {
-                    let coverage = report_coverage(&data);
+                if let Some(selection) = selection.as_ref() {
+                    let coverage = report_coverage_with_period(&data, &selection.period);
                     store.format.write_report(
-                        || render_optimize_human_with_period(&batch, &coverage, &freshness, period),
-                        || render_json_diff_with_period(&batch, &freshness, &coverage, period),
+                        || {
+                            render_optimize_human_with_period(
+                                &batch,
+                                &coverage,
+                                &freshness,
+                                &selection.coverage,
+                            )
+                        },
+                        || {
+                            render_json_diff_with_period(
+                                &batch,
+                                &freshness,
+                                &coverage,
+                                &selection.coverage,
+                            )
+                        },
                     )
                 } else {
                     store.format.write_report(
@@ -843,16 +879,22 @@ fn load_analysis(
     CanonicalData,
     Vec<Finding>,
     StoreFreshness,
-    Option<PeriodCoverage>,
+    Option<ReportingSelection>,
 )> {
-    let (data, freshness, period) = load_reporting(options)?;
+    let (data, freshness, selection) = load_reporting(options)?;
     let findings = analyze_default(&data);
-    Ok((data, findings, freshness, period))
+    Ok((data, findings, freshness, selection))
+}
+
+#[derive(Debug, Clone)]
+struct ReportingSelection {
+    period: ReportingPeriod,
+    coverage: PeriodCoverage,
 }
 
 fn load_reporting(
     options: &StoreOptions,
-) -> Result<(CanonicalData, StoreFreshness, Option<PeriodCoverage>)> {
+) -> Result<(CanonicalData, StoreFreshness, Option<ReportingSelection>)> {
     let period = ReportingPeriod::from_bounds(options.since.as_deref(), options.until.as_deref())
         .map_err(anyhow::Error::new)?;
     let (data, freshness) = load_store(options)?;
@@ -860,7 +902,14 @@ fn load_reporting(
         return Ok((data, freshness, None));
     };
     let selected = select_report_data(&data, Some(&period));
-    Ok((selected.data, freshness, Some(selected.coverage)))
+    Ok((
+        selected.data,
+        freshness,
+        Some(ReportingSelection {
+            period,
+            coverage: selected.coverage,
+        }),
+    ))
 }
 
 fn load_store(options: &StoreOptions) -> Result<(CanonicalData, StoreFreshness)> {
@@ -918,22 +967,32 @@ fn run_finding_report(
     lens: fn(&CanonicalData) -> Vec<Finding>,
     command: &str,
 ) -> Result<()> {
-    let (data, freshness, period) = load_reporting(options)?;
+    let (data, freshness, selection) = load_reporting(options)?;
     let mut report = doctor(&data, &lens(&data), freshness, &DoctorOptions::default());
-    if let Some(period) = period.as_ref() {
-        report.period_start = period.observed_start.clone();
-        report.period_end = period.observed_end.clone();
+    if let Some(selection) = selection.as_ref() {
+        report.period_start = selection.coverage.observed_start.clone();
+        report.period_end = selection.coverage.observed_end.clone();
     }
-    let coverage = report_coverage(&data);
-    if let Some(period) = period.as_ref() {
+    let coverage = selection.as_ref().map_or_else(
+        || report_coverage(&data),
+        |selection| report_coverage_with_period(&data, &selection.period),
+    );
+    if let Some(selection) = selection.as_ref() {
         options.format.write_report(
             || {
                 (
-                    render_doctor_with_period(&report, &coverage, period),
+                    render_doctor_with_period(&report, &coverage, &selection.coverage),
                     String::new(),
                 )
             },
-            || render_json_finding_report_with_period(command, &report, &coverage, period),
+            || {
+                render_json_finding_report_with_period(
+                    command,
+                    &report,
+                    &coverage,
+                    &selection.coverage,
+                )
+            },
         )
     } else {
         options.format.write_report(
