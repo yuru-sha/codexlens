@@ -113,6 +113,11 @@ the release checklist, and the minimal source-release procedure are in
 [docs/release.md](docs/release.md); the current version history is in
 [CHANGELOG.md](CHANGELOG.md).
 
+The bounded, human-reviewed finding evaluation plan is in
+[docs/evaluations/finding-usefulness-pilot.md](docs/evaluations/finding-usefulness-pilot.md).
+It is a planning worksheet: real history requires explicit owner authorization,
+and `optimize --apply` is outside the pilot.
+
 The command examples below use an existing derived store at the default path:
 
 ```bash
