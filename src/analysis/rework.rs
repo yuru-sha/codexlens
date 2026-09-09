@@ -245,9 +245,7 @@ fn qualifying_edit_window(edits: &[EditEvent], window_seconds: i64) -> Option<Ve
 fn within_window(left: &Position, right: &Position, window_seconds: i64) -> bool {
     left.timestamp
         .zip(right.timestamp)
-        .is_some_and(|(left, right)| {
-            right.saturating_sub(left) >= 0 && right - left <= window_seconds.max(0)
-        })
+        .is_some_and(|(left, right)| right.within_seconds(left, window_seconds.max(0)))
 }
 
 fn rework_window_label(seconds: i64) -> String {

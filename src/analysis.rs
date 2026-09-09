@@ -14,6 +14,7 @@ use crate::model::{
     CanonicalData, InstructionJoin, InstructionSnapshot, SourceRef, ToolCall, ToolResult,
     normalize_path,
 };
+use crate::period::Timestamp;
 use serde::{Deserialize, Serialize};
 
 mod corrections;
@@ -66,7 +67,7 @@ type CallContextKey<'a> = (Option<&'a str>, Option<&'a str>);
 
 struct AnalysisContext<'a> {
     data: &'a CanonicalData,
-    record_positions: HashMap<SourceKey<'a>, (Option<i64>, usize)>,
+    record_positions: HashMap<SourceKey<'a>, (Option<Timestamp>, usize)>,
     turn_ids_by_session_source: HashMap<SnapshotSourceKey<'a>, &'a str>,
     snapshots_by_source: HashMap<SnapshotSourceKey<'a>, &'a InstructionSnapshot>,
     unusable_snapshots_by_source: HashSet<SnapshotSourceKey<'a>>,
@@ -87,7 +88,7 @@ impl<'a> AnalysisContext<'a> {
             record_positions
                 .entry(source_key(&record.provenance))
                 .or_insert((
-                    record.timestamp.as_deref().and_then(parse_timestamp),
+                    record.timestamp.as_deref().and_then(Timestamp::parse),
                     record.sequence,
                 ));
             if let (Some(session_id), Some(turn_id)) =
@@ -188,7 +189,7 @@ impl<'a> AnalysisContext<'a> {
             .get(&(source.path.as_path(), source.line));
         Position {
             timestamp: timestamp
-                .and_then(parse_timestamp)
+                .and_then(Timestamp::parse)
                 .or_else(|| record.and_then(|(timestamp, _)| *timestamp)),
             sequence: record.map(|(_, sequence)| *sequence),
             source: source.clone(),
@@ -540,7 +541,7 @@ pub fn sort_findings(findings: &mut [Finding]) {
 
 #[derive(Debug, Clone)]
 struct Position {
-    timestamp: Option<i64>,
+    timestamp: Option<Timestamp>,
     sequence: Option<usize>,
     source: SourceRef,
 }
@@ -1428,88 +1429,6 @@ fn secret_value_end(value: &str, start: usize, quoted: Option<char>) -> usize {
         .map_or(value.len(), |(offset, _)| start + offset)
 }
 
-pub(crate) fn parse_timestamp(value: &str) -> Option<i64> {
-    let value = value.trim();
-    if value.len() < 20 {
-        return None;
-    }
-    let year = parse_digits(value, 0, 4)?;
-    let month = parse_digits(value, 5, 2)?;
-    let day = parse_digits(value, 8, 2)?;
-    let hour = parse_digits(value, 11, 2)?;
-    let minute = parse_digits(value, 14, 2)?;
-    let second = parse_digits(value, 17, 2)?;
-    if value.as_bytes().get(4) != Some(&b'-')
-        || value.as_bytes().get(7) != Some(&b'-')
-        || value.as_bytes().get(10) != Some(&b'T') && value.as_bytes().get(10) != Some(&b't')
-        || value.as_bytes().get(13) != Some(&b':')
-        || value.as_bytes().get(16) != Some(&b':')
-        || month == 0
-        || month > 12
-        || day == 0
-        || day > days_in_month(year, month)
-        || hour > 23
-        || minute > 59
-        || second > 60
-    {
-        return None;
-    }
-    let suffix = value.get(19..).unwrap_or_default();
-    let suffix = if let Some(fraction) = suffix.strip_prefix('.') {
-        let fraction_len = fraction
-            .bytes()
-            .take_while(|byte| byte.is_ascii_digit())
-            .count();
-        if fraction_len == 0 {
-            return None;
-        }
-        &fraction[fraction_len..]
-    } else {
-        suffix
-    };
-    let offset = if suffix.eq_ignore_ascii_case("z") {
-        0
-    } else if suffix.len() == 6
-        && (suffix.starts_with('+') || suffix.starts_with('-'))
-        && suffix.as_bytes().get(3) == Some(&b':')
-    {
-        let sign = if suffix.starts_with('+') { 1 } else { -1 };
-        let hours = parse_digits(suffix, 1, 2)?;
-        let minutes = parse_digits(suffix, 4, 2)?;
-        if hours > 23 || minutes > 59 {
-            return None;
-        }
-        sign * (hours * 3600 + minutes * 60)
-    } else {
-        return None;
-    };
-    let days = days_from_civil(year, month, day);
-    Some(days * 86_400 + hour * 3_600 + minute * 60 + second - offset)
-}
-
-fn parse_digits(value: &str, start: usize, length: usize) -> Option<i64> {
-    value.get(start..start + length)?.parse().ok()
-}
-
-fn days_in_month(year: i64, month: i64) -> i64 {
-    match month {
-        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
-        2 => 28,
-        4 | 6 | 9 | 11 => 30,
-        _ => 31,
-    }
-}
-
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = year - i64::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let month = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2052,11 +1971,14 @@ mod tests {
 
     #[test]
     fn timestamps_require_a_valid_rfc3339_offset() {
-        assert!(parse_timestamp("2026-01-01T00:00:00Z").is_some());
-        assert!(parse_timestamp("2026-01-01T00:00:00.123+09:00").is_some());
-        assert!(parse_timestamp("2026-01-01T00:00:00+0900").is_none());
-        assert!(parse_timestamp("2026-01-01T00:00:00+09:00junk").is_none());
-        assert!(parse_timestamp("2026-01-01T00:00:00+99:99").is_none());
+        assert!(Timestamp::parse("2026-01-01T00:00:00Z").is_some());
+        assert!(Timestamp::parse("2026-01-01T00:00:00.123+09:00").is_some());
+        assert!(Timestamp::parse("2026-01-01T00:00:00+0900").is_none());
+        assert!(Timestamp::parse("2026-01-01T00:00:00+09:00junk").is_none());
+        assert!(Timestamp::parse("2026-01-01T00:00:00+99:99").is_none());
+        assert!(Timestamp::parse(" 2026-01-01T00:00:00Z").is_none());
+        assert!(Timestamp::parse("2026-01-01T00:00:60Z").is_none());
+        assert!(Timestamp::parse("2026-01-01T00:00:00.1234567890Z").is_none());
     }
 
     #[test]

@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::analysis::{
     EvidenceRef, EvidenceRole, Finding, FindingScope, VerificationStatus, bounded_excerpt,
-    parse_timestamp, sort_findings,
+    sort_findings,
 };
 use crate::model::{CanonicalData, SourceKind, SourceRef};
-use crate::period::{PeriodCoverage, ReportingPeriod};
+use crate::period::{PeriodCoverage, ReportingPeriod, Timestamp};
 use crate::store::{FreshnessState, StoreFreshness};
 
 use super::diff::{DiffBatch, RenderedDiff, SkippedProposal};
@@ -545,7 +545,7 @@ fn report_coverage_filtered(
     data: &CanonicalData,
     period: Option<&ReportingPeriod>,
 ) -> ReportCoverage {
-    let mut timestamps = Vec::<(i64, String)>::new();
+    let mut timestamps = Vec::<(Timestamp, String)>::new();
     let mut missing_activity_timestamps = 0;
     let mut invalid_activity_timestamps = 0;
 
@@ -648,7 +648,7 @@ fn report_coverage_filtered(
 
 fn observe_timestamp(
     timestamp: Option<&str>,
-    valid: &mut Vec<(i64, String)>,
+    valid: &mut Vec<(Timestamp, String)>,
     missing: &mut usize,
     invalid: &mut usize,
     period: Option<&ReportingPeriod>,
@@ -657,14 +657,14 @@ fn observe_timestamp(
         *missing += 1;
         return;
     };
-    let Some(parsed) = parse_timestamp(timestamp) else {
+    let Some(parsed) = Timestamp::parse(timestamp) else {
         *invalid += 1;
         return;
     };
-    if period.is_some_and(|period| !period.contains_text(timestamp)) {
+    if period.is_some_and(|period| !period.contains(parsed)) {
         return;
     }
-    valid.push((parsed, timestamp.trim().to_owned()));
+    valid.push((parsed, timestamp.to_owned()));
 }
 
 fn session_count(data: &CanonicalData) -> usize {
@@ -975,6 +975,22 @@ mod tests {
     use crate::store::StoreFreshness;
     use std::path::PathBuf;
 
+    fn record_with_timestamp(session_id: &str, timestamp: Option<&str>) -> Record {
+        Record {
+            session_id: Some(session_id.to_owned()),
+            turn_id: None,
+            timestamp: timestamp.map(str::to_owned),
+            sequence: 0,
+            original_record_type: None,
+            original_nested_type: None,
+            error_category: None,
+            is_error: false,
+            is_terminal: false,
+            kind: RecordKind::ResponseItem,
+            provenance: crate::advisor::test_support::source(1),
+        }
+    }
+
     #[test]
     fn doctor_orders_scopes_and_bounds_evidence() {
         let mut value = finding(FindingScope::Global, FindingType::Failure, None);
@@ -1032,19 +1048,6 @@ mod tests {
             reasoning_effort: None,
             provenance: crate::advisor::test_support::source(1),
         };
-        let record = |timestamp: Option<&str>| Record {
-            session_id: Some("session-a".to_owned()),
-            turn_id: None,
-            timestamp: timestamp.map(str::to_owned),
-            sequence: 0,
-            original_record_type: None,
-            original_nested_type: None,
-            error_category: None,
-            is_error: false,
-            is_terminal: false,
-            kind: RecordKind::ResponseItem,
-            provenance: crate::advisor::test_support::source(1),
-        };
         let data = CanonicalData {
             sessions: vec![
                 session("session-a", Some("2026-01-02T00:00:00Z"), None),
@@ -1055,9 +1058,9 @@ mod tests {
                 ),
             ],
             records: vec![
-                record(Some("2026-01-01T00:00:00Z")),
-                record(None),
-                record(Some("also-not-a-timestamp")),
+                record_with_timestamp("session-a", Some("2026-01-01T00:00:00Z")),
+                record_with_timestamp("session-a", None),
+                record_with_timestamp("session-a", Some("also-not-a-timestamp")),
             ],
             ..CanonicalData::default()
         };
@@ -1080,13 +1083,99 @@ mod tests {
         assert_eq!(coverage.record_count, 3);
 
         let record_only = CanonicalData {
-            records: vec![record(Some("2026-01-01T00:00:00Z"))],
+            records: vec![record_with_timestamp(
+                "session-a",
+                Some("2026-01-01T00:00:00Z"),
+            )],
             ..CanonicalData::default()
         };
         let summaries = report_sessions(&record_only);
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, "session-a");
         assert!(summaries[0].created_at.is_none());
+    }
+
+    #[test]
+    fn coverage_orders_timestamps_by_full_precision_and_offset() {
+        let data = CanonicalData {
+            records: vec![
+                record_with_timestamp("session", Some("2026-01-01T00:00:00.900Z")),
+                record_with_timestamp("session", Some("2026-01-01T01:00:00.100+01:00")),
+            ],
+            ..CanonicalData::default()
+        };
+
+        let coverage = report_coverage(&data);
+
+        assert_eq!(
+            coverage.activity_start.as_deref(),
+            Some("2026-01-01T01:00:00.100+01:00")
+        );
+        assert_eq!(
+            coverage.activity_end.as_deref(),
+            Some("2026-01-01T00:00:00.900Z")
+        );
+    }
+
+    #[test]
+    fn period_selection_and_coverage_agree_on_invalid_event_timestamps() {
+        let period = ReportingPeriod::from_bounds(
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-02T00:00:00Z"),
+        )
+        .unwrap()
+        .unwrap();
+
+        for timestamp in [
+            " 2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:60Z",
+            "2026-01-01T00:00:00.1234567890Z",
+        ] {
+            let data = CanonicalData {
+                records: vec![record_with_timestamp("session", Some(timestamp))],
+                ..CanonicalData::default()
+            };
+
+            let selected = select_report_data(&data, Some(&period));
+            let coverage = report_coverage_with_period(&data, &period);
+
+            assert!(selected.data.records.is_empty(), "{timestamp}");
+            assert_eq!(
+                selected.coverage.unknown_timestamp_records, 1,
+                "{timestamp}"
+            );
+            assert_eq!(coverage.valid_activity_timestamps, 0, "{timestamp}");
+            assert_eq!(coverage.invalid_activity_timestamps, 1, "{timestamp}");
+        }
+    }
+
+    #[test]
+    fn period_selection_normalizes_equivalent_utc_and_offset_timestamps() {
+        let period = ReportingPeriod::from_bounds(
+            Some("2026-01-01T00:00:00.100Z"),
+            Some("2026-01-01T00:00:00.101Z"),
+        )
+        .unwrap()
+        .unwrap();
+        let data = CanonicalData {
+            records: vec![
+                record_with_timestamp("session", Some("2026-01-01T00:00:00.100Z")),
+                record_with_timestamp("session", Some("2026-01-01T01:00:00.100+01:00")),
+            ],
+            ..CanonicalData::default()
+        };
+
+        let selected = select_report_data(&data, Some(&period));
+
+        assert_eq!(selected.data.records.len(), 2);
+        assert_eq!(
+            selected.coverage.observed_start.as_deref(),
+            Some("2026-01-01T00:00:00.1Z")
+        );
+        assert_eq!(
+            selected.coverage.observed_end.as_deref(),
+            Some("2026-01-01T00:00:00.1Z")
+        );
     }
 
     #[test]
