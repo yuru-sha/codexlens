@@ -647,9 +647,12 @@ and report observed associations without causal claims. Results contain only
 concise aggregates, limitations, prioritized decisions, and synthetic examples.
 
 The executable procedure is the [finding usefulness pilot runbook](../evaluations/finding-usefulness-pilot.md).
-Until the coverage and period contracts in #82 and #83 are available, any real
-run must disclose unfiltered selected-store coverage and must not claim a
-comparable period.
+The coverage and period contracts in #82 and #83 are available on current
+`main`. A comparable before-and-after run must use owner-authorized absolute
+RFC3339 bounds passed as both `--since` and `--until` to every read-only report,
+and must disclose any incomplete coverage. A one-window observation must record
+its explicit interval and must not be presented as a comparable period when
+the selection semantics or coverage are not comparable.
 
 ### Compatibility tests
 
