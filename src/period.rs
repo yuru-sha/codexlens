@@ -14,13 +14,13 @@ use crate::model::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Timestamp {
+pub(crate) struct Timestamp {
     seconds: i64,
     nanos: u32,
 }
 
 impl Timestamp {
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         if value.len() < 20
             || value.as_bytes().get(4) != Some(&b'-')
             || value.as_bytes().get(7) != Some(&b'-')
@@ -99,6 +99,14 @@ impl Timestamp {
             format!(".{}", value.trim_end_matches('0'))
         };
         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}{fraction}Z")
+    }
+
+    pub(crate) fn within_seconds(self, start: Self, max_seconds: i64) -> bool {
+        if max_seconds < 0 || self < start {
+            return false;
+        }
+        let seconds = self.seconds - start.seconds;
+        seconds < max_seconds || seconds == max_seconds && self.nanos <= start.nanos
     }
 }
 
@@ -183,13 +191,9 @@ impl ReportingPeriod {
         Ok(Some(Self { start, end }))
     }
 
-    fn contains(self, timestamp: Timestamp) -> bool {
+    pub(crate) fn contains(self, timestamp: Timestamp) -> bool {
         self.start.is_none_or(|start| timestamp >= start)
             && self.end.is_none_or(|end| timestamp < end)
-    }
-
-    pub(crate) fn contains_text(self, value: &str) -> bool {
-        Timestamp::parse(value).is_some_and(|timestamp| self.contains(timestamp))
     }
 
     fn overlaps(self, start: Timestamp, end: Timestamp) -> bool {
@@ -608,9 +612,10 @@ fn event_timestamp(
     source: &SourceRef,
     record_times: &HashMap<SourceKey, Option<Timestamp>>,
 ) -> Option<Timestamp> {
-    value
-        .map(Timestamp::parse)
-        .unwrap_or_else(|| source_timestamp(source, record_times))
+    match value {
+        Some(value) => Timestamp::parse(value),
+        None => source_timestamp(source, record_times),
+    }
 }
 
 fn event_timestamp_with_unknown(
@@ -857,7 +862,10 @@ impl fmt::Display for ReportingPeriod {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Message, MessageRole, Record, RecordKind, SourceKind, TurnLifecycleEvent};
+    use crate::model::{
+        FileOperation, Message, MessageRole, Record, RecordKind, SourceKind, TokenUsage,
+        TurnLifecycleEvent,
+    };
 
     fn source(line: usize) -> SourceRef {
         SourceRef {
@@ -923,6 +931,14 @@ mod tests {
             ReportingPeriod::from_bounds(Some("2026-01-03T00:00:00"), None),
             Err(PeriodError::InvalidTimestamp { bound: "since" })
         ));
+        assert!(ReportingPeriod::from_bounds(Some("2026-01-03T00:00:00.1Z"), None,).is_ok());
+        assert!(
+            ReportingPeriod::from_bounds(Some("2026-01-03T00:00:00.123456789Z"), None,).is_ok()
+        );
+        assert!(
+            ReportingPeriod::from_bounds(Some("2026-01-03T00:00:00.1234567890Z"), None,).is_err()
+        );
+        assert!(ReportingPeriod::from_bounds(Some("2026-01-03T00:00:60Z"), None).is_err());
         assert!(ReportingPeriod::from_bounds(Some("+026-01-03T00:00:00Z"), None,).is_err());
         assert!(ReportingPeriod::from_bounds(Some(" 2026-01-03T00:00:00Z"), None,).is_err());
     }
@@ -1124,5 +1140,69 @@ mod tests {
         assert_eq!(selected.data.messages.len(), 2);
         assert_eq!(selected.data.turns[0].completed_at, None);
         assert!(selected.data.turns[0].lifecycle.is_empty());
+    }
+
+    #[test]
+    fn does_not_replace_invalid_event_timestamps_with_record_timestamps() {
+        let provenance = source(1);
+        let data = CanonicalData {
+            records: vec![record(1, Some("2026-01-03T12:00:00Z"))],
+            messages: vec![
+                Message {
+                    id: None,
+                    session_id: Some("session".to_owned()),
+                    turn_id: Some("turn".to_owned()),
+                    role: Some(MessageRole::Assistant),
+                    content: Some("invalid message timestamp".to_owned()),
+                    timestamp: Some("not-a-timestamp".to_owned()),
+                    provenance: provenance.clone(),
+                },
+                Message {
+                    id: None,
+                    session_id: Some("session".to_owned()),
+                    turn_id: Some("turn".to_owned()),
+                    role: Some(MessageRole::Assistant),
+                    content: Some("missing message timestamp".to_owned()),
+                    timestamp: None,
+                    provenance: provenance.clone(),
+                },
+            ],
+            file_operations: vec![FileOperation {
+                session_id: Some("session".to_owned()),
+                turn_id: Some("turn".to_owned()),
+                path: "src/lib.rs".to_owned(),
+                operation: "write".to_owned(),
+                timestamp: Some("not-a-timestamp".to_owned()),
+                provenance: provenance.clone(),
+            }],
+            token_usage: vec![TokenUsage {
+                session_id: Some("session".to_owned()),
+                turn_id: Some("turn".to_owned()),
+                timestamp: Some("not-a-timestamp".to_owned()),
+                input_tokens: Some(1),
+                cached_input_tokens: None,
+                output_tokens: Some(1),
+                reasoning_output_tokens: None,
+                sequence: 1,
+                provenance,
+            }],
+            ..CanonicalData::default()
+        };
+        let period = ReportingPeriod::from_bounds(
+            Some("2026-01-03T00:00:00Z"),
+            Some("2026-01-04T00:00:00Z"),
+        )
+        .unwrap();
+
+        let selected = select_report_data(&data, period.as_ref());
+
+        assert_eq!(selected.data.messages.len(), 1);
+        assert_eq!(
+            selected.data.messages[0].content.as_deref(),
+            Some("missing message timestamp")
+        );
+        assert!(selected.data.file_operations.is_empty());
+        assert!(selected.data.token_usage.is_empty());
+        assert_eq!(selected.coverage.unknown_timestamp_events, 3);
     }
 }
