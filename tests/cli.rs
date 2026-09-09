@@ -1752,12 +1752,16 @@ fn finding_evaluation_plan_is_bounded_human_reviewed_and_private() {
         "SELECTED_PROJECT",
         "project scope check failed",
         "observation period",
+        "period_since",
+        "period_until",
+        "canonical bounds",
+        "validate_pilot_authorization.py",
         "archive inclusion",
         "retention/deletion policy",
         "exact code version",
         "resolved interval",
-        "owner-authorized RFC3339 start bound",
-        "owner-authorized RFC3339 end bound",
+        "Owner-authorized complete RFC3339 start bound",
+        "Owner-authorized complete RFC3339 end bound",
         "--since",
         "--until",
         "PERIOD_ARGS",
@@ -1796,6 +1800,71 @@ fn finding_evaluation_plan_is_bounded_human_reviewed_and_private() {
             "privacy boundary is missing: {forbidden}"
         );
     }
+}
+
+#[test]
+fn finding_pilot_authorization_binds_and_validates_period_bounds() {
+    let validator =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/validate_pilot_authorization.py");
+    let authorization = temp_store_path("pilot-authorization").with_extension("json");
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".to_owned()
+        } else {
+            "python3".to_owned()
+        }
+    });
+    let run = |since: &str, until: &str| {
+        let record = json!({
+            "source_scope": "synthetic-source",
+            "project_scope": "synthetic-project",
+            "observation_period": "owner-authorized synthetic interval",
+            "period_since": since,
+            "period_until": until,
+            "archive_inclusion": "no",
+            "storage_location": "synthetic-local-storage",
+            "retention_deletion_policy": "delete after review",
+            "owner_authorization": "synthetic-owner/2026-09-09",
+        });
+        fs::write(&authorization, record.to_string()).unwrap();
+        Command::new(&python)
+            .args([
+                "-B",
+                validator.to_str().unwrap(),
+                authorization.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+    };
+
+    let since = "2026-01-01T00:00:00.123456789Z";
+    let until = "2026-01-01T00:00:01Z";
+    let valid = run(since, until);
+    assert!(
+        valid.status.success(),
+        "validator rejected valid bounds: {valid:?}"
+    );
+    assert_eq!(
+        String::from_utf8(valid.stdout).unwrap(),
+        format!("{since}\t{until}\n")
+    );
+
+    for (invalid_since, invalid_until) in [
+        ("2026-01-01T00:00Z", until),
+        ("2026-01-02T00:00:00Z", "2026-01-01T00:00:00Z"),
+        ("2026-01-01T00:00:00+00:00:00", until),
+    ] {
+        let invalid = run(invalid_since, invalid_until);
+        assert!(
+            !invalid.status.success(),
+            "validator accepted invalid bounds"
+        );
+        assert_eq!(
+            String::from_utf8(invalid.stderr).unwrap().trim(),
+            "authorization period invalid"
+        );
+    }
+    let _ = fs::remove_file(authorization);
 }
 
 #[test]

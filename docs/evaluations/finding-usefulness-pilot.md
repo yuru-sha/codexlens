@@ -22,6 +22,8 @@ decision is recorded as two separate fields:
 | source scope | One explicitly named local source |
 | project scope | One explicitly named project boundary |
 | observation period | Start and end, including timezone and whether archives are included |
+| period start (`period_since`) | Owner-authorized complete RFC3339 start bound |
+| period end (`period_until`) | Owner-authorized complete RFC3339 end bound |
 | archive inclusion | Yes or no, with the reason |
 | storage location | A local path outside this repository for raw inputs, the derived store, and private notes |
 | retention/deletion policy | Who may retain the material, for how long, and how it will be deleted |
@@ -33,8 +35,11 @@ fixtures, or committed evaluation artifacts.
 
 Create the private JSON authorization record before running the commands below.
 It must contain non-empty string values for `source_scope`, `project_scope`,
-`observation_period`, `archive_inclusion`, `storage_location`,
-`retention_deletion_policy`, and `owner_authorization`.
+`observation_period`, `period_since`, `period_until`, `archive_inclusion`,
+`storage_location`, `retention_deletion_policy`, and `owner_authorization`.
+`period_since` and `period_until` are the canonical bounds used by the
+commands below; `observation_period` is the human-readable record of the same
+selection.
 
 The pilot depends on the reporting coverage and period contracts in [#82](https://github.com/yuru-sha/codexlens/issues/82)
 and [#83](https://github.com/yuru-sha/codexlens/issues/83), which are available
@@ -58,37 +63,17 @@ PILOT_STORE="$PILOT_DIR/store.sqlite"
 AUTHORIZED_CODEX_HOME=/path/owner-approved/codex-home
 SELECTED_PROJECT=/path/owner-approved/project
 AUTHORIZATION_RECORD="$PILOT_DIR/authorization.json"
-# Set these to the owner-authorized observation bounds before running the pilot.
-: "${PERIOD_SINCE:?set the owner-authorized RFC3339 start bound}"
-: "${PERIOD_UNTIL:?set the owner-authorized RFC3339 end bound}"
-PERIOD_ARGS=(--since "$PERIOD_SINCE" --until "$PERIOD_UNTIL")
+PYTHON_BIN=${PYTHON:-python3}
 
 mkdir -p "$PILOT_DIR"
 
-python3 - "$AUTHORIZATION_RECORD" <<'PY'
-import json
-import sys
-
-required = (
-    "source_scope",
-    "project_scope",
-    "observation_period",
-    "archive_inclusion",
-    "storage_location",
-    "retention_deletion_policy",
-    "owner_authorization",
-)
-try:
-    with open(sys.argv[1], encoding="utf-8") as stream:
-        record = json.load(stream)
-except (OSError, ValueError):
-    raise SystemExit("authorization gate incomplete")
-if not isinstance(record, dict) or any(
-    not isinstance(record.get(field), str) or not record[field].strip()
-    for field in required
-):
-    raise SystemExit("authorization gate incomplete")
-PY
+if ! IFS=$'\t' read -r PERIOD_SINCE PERIOD_UNTIL < <(
+  "$PYTHON_BIN" -B scripts/validate_pilot_authorization.py "$AUTHORIZATION_RECORD"
+); then
+    echo "authorization gate incomplete" >&2
+    exit 1
+fi
+PERIOD_ARGS=(--since "$PERIOD_SINCE" --until "$PERIOD_UNTIL")
 
 cargo run -- refresh \
   --codex-home "$AUTHORIZED_CODEX_HOME" \
