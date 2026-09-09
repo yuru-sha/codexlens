@@ -381,6 +381,7 @@ pub fn select_report_data(data: &CanonicalData, period: Option<&ReportingPeriod>
             );
         }
     }
+    let directly_selected_result_indices = selected_result_indices.clone();
     let mut selected_call_indices = HashSet::new();
     for (index, call) in data.tool_calls.iter().enumerate() {
         let timestamp = source_timestamp_with_unknown(
@@ -390,25 +391,30 @@ pub fn select_report_data(data: &CanonicalData, period: Option<&ReportingPeriod>
         );
         let own_event_selected =
             period.is_none_or(|period| timestamp.is_some_and(|value| period.contains(value)));
-        let paired_result_selected =
-            data.tool_results
-                .iter()
-                .enumerate()
-                .any(|(result_index, result)| {
-                    selected_result_indices.contains(&result_index)
-                        && call_matches_result(data, call, result)
-                });
-        if own_event_selected || paired_result_selected {
+        if own_event_selected {
             selected_call_indices.insert(index);
-            if own_event_selected {
-                add_observed(&mut observed_times, timestamp, period);
-            }
+            add_observed(&mut observed_times, timestamp, period);
             add_session_and_turn(
                 &mut selected_session_ids,
                 &mut selected_turns,
                 call.session_id.as_ref(),
                 call.turn_id.as_ref(),
             );
+        }
+    }
+    let directly_selected_call_indices = selected_call_indices.clone();
+    // ponytail: O(n²) pair scan; index by call_id if large histories make it measurable.
+    for (call_index, call) in data.tool_calls.iter().enumerate() {
+        for (result_index, result) in data.tool_results.iter().enumerate() {
+            if !call_matches_result(data, call, result) {
+                continue;
+            }
+            if directly_selected_result_indices.contains(&result_index) {
+                selected_call_indices.insert(call_index);
+            }
+            if directly_selected_call_indices.contains(&call_index) {
+                selected_result_indices.insert(result_index);
+            }
         }
     }
     let tool_calls = data
@@ -1022,6 +1028,75 @@ mod tests {
         no_id_data.tool_results[0].call_id = None;
         let no_id_selected = select_report_data(&no_id_data, period.as_ref());
         assert_eq!(no_id_selected.data.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn keeps_in_range_call_with_boundary_result_for_correlation() {
+        let call = ToolCall {
+            id: None,
+            call_id: Some("call".to_owned()),
+            session_id: Some("session".to_owned()),
+            turn_id: Some("turn".to_owned()),
+            tool_name: Some("exec_command".to_owned()),
+            input_summary: None,
+            command: Some("cargo test".to_owned()),
+            cwd: None,
+            status: None,
+            provenance: source(1),
+        };
+        let result = ToolResult {
+            id: None,
+            call_id: Some("call".to_owned()),
+            session_id: Some("session".to_owned()),
+            turn_id: Some("turn".to_owned()),
+            command: Some("cargo test".to_owned()),
+            cwd: None,
+            stdout: Some("synthetic success".to_owned()),
+            stderr: None,
+            duration_ms: None,
+            exit_code: Some(0),
+            status: Some("completed".to_owned()),
+            outcome: crate::model::ToolOutcome::Succeeded,
+            outcome_source: crate::model::OutcomeSource::ExitCode,
+            matched_call: true,
+            deduplication_key: None,
+            equivalent_to: None,
+            is_duplicate: false,
+            provenance: source(2),
+        };
+        let data = CanonicalData {
+            records: vec![
+                record(1, Some("2026-01-03T00:00:00Z")),
+                record(2, Some("2026-01-04T00:00:00Z")),
+            ],
+            tool_calls: vec![call],
+            tool_results: vec![result],
+            ..CanonicalData::default()
+        };
+        let period = ReportingPeriod::from_bounds(
+            Some("2026-01-03T00:00:00Z"),
+            Some("2026-01-04T00:00:00Z"),
+        )
+        .unwrap();
+
+        let selected = select_report_data(&data, period.as_ref());
+
+        assert_eq!(selected.data.records.len(), 1);
+        assert_eq!(selected.data.tool_calls.len(), 1);
+        assert_eq!(selected.data.tool_results.len(), 1);
+        assert_eq!(selected.coverage.excluded_records, 1);
+
+        let unfiltered = select_report_data(&data, None);
+        assert_eq!(unfiltered.data.records.len(), 2);
+        assert_eq!(unfiltered.data.tool_calls.len(), 1);
+        assert_eq!(unfiltered.data.tool_results.len(), 1);
+
+        let mut no_id_data = data;
+        no_id_data.tool_calls[0].call_id = None;
+        no_id_data.tool_results[0].call_id = None;
+        let no_id_selected = select_report_data(&no_id_data, period.as_ref());
+        assert_eq!(no_id_selected.data.tool_calls.len(), 1);
+        assert_eq!(no_id_selected.data.tool_results.len(), 1);
     }
 
     #[test]
