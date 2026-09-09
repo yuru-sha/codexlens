@@ -1845,7 +1845,9 @@ fn finding_pilot_authorization_binds_and_validates_period_bounds() {
         "validator rejected valid bounds: {valid:?}"
     );
     assert_eq!(
-        String::from_utf8(valid.stdout).unwrap(),
+        String::from_utf8(valid.stdout)
+            .unwrap()
+            .replace("\r\n", "\n"),
         format!("{since}\t{until}\n")
     );
 
