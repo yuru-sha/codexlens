@@ -22,6 +22,8 @@ decision is recorded as two separate fields:
 | source scope | One explicitly named local source |
 | project scope | One explicitly named project boundary |
 | observation period | Start and end, including timezone and whether archives are included |
+| period start (`period_since`) | Owner-authorized complete RFC3339 start bound |
+| period end (`period_until`) | Owner-authorized complete RFC3339 end bound |
 | archive inclusion | Yes or no, with the reason |
 | storage location | A local path outside this repository for raw inputs, the derived store, and private notes |
 | retention/deletion policy | Who may retain the material, for how long, and how it will be deleted |
@@ -33,14 +35,20 @@ fixtures, or committed evaluation artifacts.
 
 Create the private JSON authorization record before running the commands below.
 It must contain non-empty string values for `source_scope`, `project_scope`,
-`observation_period`, `archive_inclusion`, `storage_location`,
-`retention_deletion_policy`, and `owner_authorization`.
+`observation_period`, `period_since`, `period_until`, `archive_inclusion`,
+`storage_location`, `retention_deletion_policy`, and `owner_authorization`.
+`period_since` and `period_until` are the canonical bounds used by the
+commands below; `observation_period` is the human-readable record of the same
+selection.
 
 The pilot depends on the reporting coverage and period contracts in [#82](https://github.com/yuru-sha/codexlens/issues/82)
-and [#83](https://github.com/yuru-sha/codexlens/issues/83). Until those
-contracts are available, run only synthetic validation or label a real run as
-an unfiltered selected-store observation with its coverage limitations; do not
-present it as a comparable before-and-after period.
+and [#83](https://github.com/yuru-sha/codexlens/issues/83), which are available
+on current `main`. For a comparable before-and-after evaluation, choose
+owner-authorized absolute RFC3339 bounds and pass both `--since` and `--until`
+to every read-only report. A one-window observation must still record its
+explicit requested interval; if it cannot use a complete comparable window,
+label it as a single-window selected-store observation with its coverage
+limitations and do not present it as a before-and-after comparison.
 
 ## 2. Freeze and record the candidate
 
@@ -55,39 +63,24 @@ PILOT_STORE="$PILOT_DIR/store.sqlite"
 AUTHORIZED_CODEX_HOME=/path/owner-approved/codex-home
 SELECTED_PROJECT=/path/owner-approved/project
 AUTHORIZATION_RECORD="$PILOT_DIR/authorization.json"
+PYTHON_BIN=${PYTHON:-python3}
 
 mkdir -p "$PILOT_DIR"
 
-python3 - "$AUTHORIZATION_RECORD" <<'PY'
-import json
-import sys
-
-required = (
-    "source_scope",
-    "project_scope",
-    "observation_period",
-    "archive_inclusion",
-    "storage_location",
-    "retention_deletion_policy",
-    "owner_authorization",
-)
-try:
-    with open(sys.argv[1], encoding="utf-8") as stream:
-        record = json.load(stream)
-except (OSError, ValueError):
-    raise SystemExit("authorization gate incomplete")
-if not isinstance(record, dict) or any(
-    not isinstance(record.get(field), str) or not record[field].strip()
-    for field in required
-):
-    raise SystemExit("authorization gate incomplete")
-PY
+if ! IFS=$'\t' read -r PERIOD_SINCE PERIOD_UNTIL < <(
+  "$PYTHON_BIN" -B scripts/validate_pilot_authorization.py "$AUTHORIZATION_RECORD"
+); then
+    echo "authorization gate incomplete" >&2
+    exit 1
+fi
+PERIOD_ARGS=(--since "$PERIOD_SINCE" --until "$PERIOD_UNTIL")
 
 cargo run -- refresh \
   --codex-home "$AUTHORIZED_CODEX_HOME" \
   --store "$PILOT_STORE"
 test -f "$PILOT_STORE"
 cargo run -- sessions --frozen --format json --store "$PILOT_STORE" \
+  "${PERIOD_ARGS[@]}" \
   > "$PILOT_DIR/sessions.json"
 python3 - "$PILOT_DIR/sessions.json" "$SELECTED_PROJECT" <<'PY'
 import json
@@ -100,12 +93,15 @@ if not sessions or any(session.get("project") != selected for session in session
     raise SystemExit("project scope check failed")
 PY
 cargo run -- doctor --frozen --format json --store "$PILOT_STORE" \
+  "${PERIOD_ARGS[@]}" \
   > "$PILOT_DIR/doctor.json"
 cargo run -- optimize --diff --frozen --format json --store "$PILOT_STORE" \
+  "${PERIOD_ARGS[@]}" \
   > "$PILOT_DIR/optimize-diff.json"
 ```
 
-Add `--include-archived` only when it was selected at the authorization gate.
+Use the same `PERIOD_ARGS` for every focused lens report. Add
+`--include-archived` only when it was selected at the authorization gate.
 Never use `optimize --apply` for this pilot: optimize --apply requires separate review and authorization.
 
 Project scope check: inspect `sessions.json` locally and continue only when
@@ -119,8 +115,7 @@ Record, without copying raw report content:
 
 - the exact code version (`git rev-parse HEAD`);
 - relevant settings and whether archives were included;
-- the requested period and the resolved interval, when the period-filter
-  contract is available;
+- the owner-authorized requested period and the resolved interval;
 - observed coverage and sample counts, including their counting semantics;
 - store freshness, including the latest recorded ingestion time; and
 - the fact that the store was explicitly refreshed before frozen reporting.
@@ -130,9 +125,9 @@ limitation. Never substitute ingestion time for unknown activity time.
 
 ## 3. Review a bounded finding sample
 
-Run the focused JSON reports for each lens, not only `doctor`, and preserve the
-same store, code version, settings, and interval for every lens. For each lens
-and severity bucket:
+Run the focused JSON reports for each lens, not only `doctor`, with the same
+`PERIOD_ARGS`, store, code version, and settings. For each lens and severity
+bucket:
 
 1. record the population count before sampling;
 2. select at most three findings in the report's deterministic order;
@@ -167,8 +162,9 @@ review artifact; applying any change needs separate review and authorization.
 
 ## 5. Compare periods only when comparable
 
-For a before-and-after comparison, use comparable windows with the explicit intervals, timezone rules,
-membership semantics, and resolved timestamps documented by #83. Keep the
+For a before-and-after comparison, use both explicit `--since` and `--until`
+comparable windows with the timezone rules, membership semantics, and resolved
+timestamps documented by #83. Keep the
 code version, settings, source/project scope, archive choice, and sampling
 method comparable. Report normalized quantities such as findings per session
 and actionable findings per reviewed finding, with every denominator shown.
