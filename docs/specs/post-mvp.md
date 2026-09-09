@@ -712,9 +712,10 @@ write set must not become implicit.
   remain available as boundary context. The observed period is derived from
   valid selected timestamps, not from store freshness.
 - A selected user message retains its immediately preceding assistant message
-  in the same session as context. A selected tool result retains its matching
-  call for correlation even when the call is outside the interval; a call
-  retained only for that purpose is not itself an observed verification event.
+  in the same session as context. A selected tool call or result retains its
+  matching counterpart for correlation even when the counterpart is outside
+  the interval; a counterpart retained only for that purpose is not itself an
+  observed verification event.
   Turn completion and lifecycle events outside the interval are removed from a
   filtered turn.
 - File operations and token usage use their own event timestamp or canonical

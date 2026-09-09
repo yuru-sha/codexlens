@@ -259,6 +259,7 @@ pub struct SelectedData {
 
 type SourceKey = (PathBuf, Option<usize>);
 type TurnKey = (String, String);
+type ToolContextKey<'a> = (Option<&'a str>, Option<&'a str>);
 
 pub fn select_report_data(data: &CanonicalData, period: Option<&ReportingPeriod>) -> SelectedData {
     let record_times = data
@@ -385,6 +386,7 @@ pub fn select_report_data(data: &CanonicalData, period: Option<&ReportingPeriod>
             );
         }
     }
+    let directly_selected_result_indices = selected_result_indices.clone();
     let mut selected_call_indices = HashSet::new();
     for (index, call) in data.tool_calls.iter().enumerate() {
         let timestamp = source_timestamp_with_unknown(
@@ -394,25 +396,95 @@ pub fn select_report_data(data: &CanonicalData, period: Option<&ReportingPeriod>
         );
         let own_event_selected =
             period.is_none_or(|period| timestamp.is_some_and(|value| period.contains(value)));
-        let paired_result_selected =
-            data.tool_results
-                .iter()
-                .enumerate()
-                .any(|(result_index, result)| {
-                    selected_result_indices.contains(&result_index)
-                        && call_matches_result(data, call, result)
-                });
-        if own_event_selected || paired_result_selected {
+        if own_event_selected {
             selected_call_indices.insert(index);
-            if own_event_selected {
-                add_observed(&mut observed_times, timestamp, period);
-            }
+            add_observed(&mut observed_times, timestamp, period);
             add_session_and_turn(
                 &mut selected_session_ids,
                 &mut selected_turns,
                 call.session_id.as_ref(),
                 call.turn_id.as_ref(),
             );
+        }
+    }
+    let directly_selected_call_indices = selected_call_indices.clone();
+    let mut call_indices_by_id: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut call_indices_by_context: HashMap<ToolContextKey<'_>, Vec<usize>> = HashMap::new();
+    for (index, call) in data.tool_calls.iter().enumerate() {
+        if let Some(call_id) = call.call_id.as_deref() {
+            call_indices_by_id.entry(call_id).or_default().push(index);
+        } else {
+            call_indices_by_context
+                .entry((call.session_id.as_deref(), call.turn_id.as_deref()))
+                .or_default()
+                .push(index);
+        }
+    }
+    let mut result_indices_by_id: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut result_indices_by_context: HashMap<ToolContextKey<'_>, Vec<usize>> = HashMap::new();
+    let mut non_duplicate_result_counts: HashMap<ToolContextKey<'_>, usize> = HashMap::new();
+    for (index, result) in data.tool_results.iter().enumerate() {
+        if let Some(call_id) = result.call_id.as_deref() {
+            result_indices_by_id.entry(call_id).or_default().push(index);
+        } else {
+            let context = (result.session_id.as_deref(), result.turn_id.as_deref());
+            result_indices_by_context
+                .entry(context)
+                .or_default()
+                .push(index);
+            if !result.is_duplicate {
+                *non_duplicate_result_counts.entry(context).or_default() += 1;
+            }
+        }
+    }
+    for result_index in directly_selected_result_indices {
+        let result = &data.tool_results[result_index];
+        if let Some(call_id) = result.call_id.as_deref() {
+            for call_index in call_indices_by_id
+                .get(call_id)
+                .into_iter()
+                .flatten()
+                .filter(|call_index| {
+                    compatible_call_result_context(&data.tool_calls[**call_index], result)
+                })
+            {
+                selected_call_indices.insert(*call_index);
+            }
+        } else {
+            let context = (result.session_id.as_deref(), result.turn_id.as_deref());
+            if call_indices_by_context
+                .get(&context)
+                .is_some_and(|indices| indices.len() == 1)
+                && non_duplicate_result_counts.get(&context).copied() == Some(1)
+            {
+                selected_call_indices.insert(call_indices_by_context[&context][0]);
+            }
+        }
+    }
+    for call_index in directly_selected_call_indices {
+        let call = &data.tool_calls[call_index];
+        if let Some(call_id) = call.call_id.as_deref() {
+            for result_index in result_indices_by_id
+                .get(call_id)
+                .into_iter()
+                .flatten()
+                .filter(|result_index| {
+                    compatible_call_result_context(call, &data.tool_results[**result_index])
+                })
+            {
+                selected_result_indices.insert(*result_index);
+            }
+        } else {
+            let context = (call.session_id.as_deref(), call.turn_id.as_deref());
+            if call_indices_by_context
+                .get(&context)
+                .is_some_and(|indices| indices.len() == 1)
+                && non_duplicate_result_counts.get(&context).copied() == Some(1)
+            {
+                if let Some(result_indices) = result_indices_by_context.get(&context) {
+                    selected_result_indices.extend(result_indices.iter().copied());
+                }
+            }
         }
     }
     let tool_calls = data
@@ -790,35 +862,9 @@ fn turn_key(turn: &Turn) -> Option<TurnKey> {
     Some((turn.session_id.clone()?, turn.id.clone()))
 }
 
-fn call_matches_result(data: &CanonicalData, call: &ToolCall, result: &ToolResult) -> bool {
-    if call.call_id.is_some() || result.call_id.is_some() {
-        return call.call_id == result.call_id
-            && compatible_context(call.session_id.as_ref(), result.session_id.as_ref())
-            && compatible_context(call.turn_id.as_ref(), result.turn_id.as_ref());
-    }
-    call.session_id == result.session_id
-        && call.turn_id == result.turn_id
-        && data
-            .tool_calls
-            .iter()
-            .filter(|candidate| {
-                candidate.call_id.is_none()
-                    && candidate.session_id == call.session_id
-                    && candidate.turn_id == call.turn_id
-            })
-            .count()
-            == 1
-        && data
-            .tool_results
-            .iter()
-            .filter(|candidate| {
-                candidate.call_id.is_none()
-                    && !candidate.is_duplicate
-                    && candidate.session_id == result.session_id
-                    && candidate.turn_id == result.turn_id
-            })
-            .count()
-            == 1
+fn compatible_call_result_context(call: &ToolCall, result: &ToolResult) -> bool {
+    compatible_context(call.session_id.as_ref(), result.session_id.as_ref())
+        && compatible_context(call.turn_id.as_ref(), result.turn_id.as_ref())
 }
 
 fn compatible_context(left: Option<&String>, right: Option<&String>) -> bool {
@@ -1038,6 +1084,75 @@ mod tests {
         no_id_data.tool_results[0].call_id = None;
         let no_id_selected = select_report_data(&no_id_data, period.as_ref());
         assert_eq!(no_id_selected.data.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn keeps_in_range_call_with_boundary_result_for_correlation() {
+        let call = ToolCall {
+            id: None,
+            call_id: Some("call".to_owned()),
+            session_id: Some("session".to_owned()),
+            turn_id: Some("turn".to_owned()),
+            tool_name: Some("exec_command".to_owned()),
+            input_summary: None,
+            command: Some("cargo test".to_owned()),
+            cwd: None,
+            status: None,
+            provenance: source(1),
+        };
+        let result = ToolResult {
+            id: None,
+            call_id: Some("call".to_owned()),
+            session_id: Some("session".to_owned()),
+            turn_id: Some("turn".to_owned()),
+            command: Some("cargo test".to_owned()),
+            cwd: None,
+            stdout: Some("synthetic success".to_owned()),
+            stderr: None,
+            duration_ms: None,
+            exit_code: Some(0),
+            status: Some("completed".to_owned()),
+            outcome: crate::model::ToolOutcome::Succeeded,
+            outcome_source: crate::model::OutcomeSource::ExitCode,
+            matched_call: true,
+            deduplication_key: None,
+            equivalent_to: None,
+            is_duplicate: false,
+            provenance: source(2),
+        };
+        let data = CanonicalData {
+            records: vec![
+                record(1, Some("2026-01-03T00:00:00Z")),
+                record(2, Some("2026-01-04T00:00:00Z")),
+            ],
+            tool_calls: vec![call],
+            tool_results: vec![result],
+            ..CanonicalData::default()
+        };
+        let period = ReportingPeriod::from_bounds(
+            Some("2026-01-03T00:00:00Z"),
+            Some("2026-01-04T00:00:00Z"),
+        )
+        .unwrap();
+
+        let selected = select_report_data(&data, period.as_ref());
+
+        assert_eq!(selected.data.records.len(), 1);
+        assert_eq!(selected.data.tool_calls.len(), 1);
+        assert_eq!(selected.data.tool_results.len(), 1);
+        assert_eq!(selected.coverage.excluded_records, 1);
+
+        let unfiltered = select_report_data(&data, None);
+        assert_eq!(unfiltered.data.records.len(), 2);
+        assert_eq!(unfiltered.data.tool_calls.len(), 1);
+        assert_eq!(unfiltered.data.tool_results.len(), 1);
+
+        let mut no_id_data = data;
+        no_id_data.tool_calls[0].call_id = None;
+        no_id_data.tool_results[0].call_id = None;
+        let no_id_selected = select_report_data(&no_id_data, period.as_ref());
+        assert_eq!(no_id_selected.data.tool_calls.len(), 1);
+        assert_eq!(no_id_selected.data.tool_results.len(), 1);
     }
 
     #[test]
