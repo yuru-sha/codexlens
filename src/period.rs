@@ -14,13 +14,13 @@ use crate::model::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Timestamp {
+pub(crate) struct Timestamp {
     seconds: i64,
     nanos: u32,
 }
 
 impl Timestamp {
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         if value.len() < 20
             || value.as_bytes().get(4) != Some(&b'-')
             || value.as_bytes().get(7) != Some(&b'-')
@@ -85,7 +85,7 @@ impl Timestamp {
         })
     }
 
-    fn format(self) -> String {
+    pub(crate) fn format(self) -> String {
         let days = self.seconds.div_euclid(86_400);
         let remainder = self.seconds.rem_euclid(86_400);
         let (year, month, day) = civil_from_days(days);
@@ -99,6 +99,14 @@ impl Timestamp {
             format!(".{}", value.trim_end_matches('0'))
         };
         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}{fraction}Z")
+    }
+
+    pub(crate) fn within_seconds(self, start: Self, max_seconds: i64) -> bool {
+        if max_seconds < 0 || self < start {
+            return false;
+        }
+        let seconds = self.seconds - start.seconds;
+        seconds < max_seconds || seconds == max_seconds && self.nanos <= start.nanos
     }
 }
 
@@ -183,13 +191,9 @@ impl ReportingPeriod {
         Ok(Some(Self { start, end }))
     }
 
-    fn contains(self, timestamp: Timestamp) -> bool {
+    pub(crate) fn contains(self, timestamp: Timestamp) -> bool {
         self.start.is_none_or(|start| timestamp >= start)
             && self.end.is_none_or(|end| timestamp < end)
-    }
-
-    pub(crate) fn contains_text(self, value: &str) -> bool {
-        Timestamp::parse(value).is_some_and(|timestamp| self.contains(timestamp))
     }
 
     fn overlaps(self, start: Timestamp, end: Timestamp) -> bool {
@@ -923,6 +927,14 @@ mod tests {
             ReportingPeriod::from_bounds(Some("2026-01-03T00:00:00"), None),
             Err(PeriodError::InvalidTimestamp { bound: "since" })
         ));
+        assert!(ReportingPeriod::from_bounds(Some("2026-01-03T00:00:00.1Z"), None,).is_ok());
+        assert!(
+            ReportingPeriod::from_bounds(Some("2026-01-03T00:00:00.123456789Z"), None,).is_ok()
+        );
+        assert!(
+            ReportingPeriod::from_bounds(Some("2026-01-03T00:00:00.1234567890Z"), None,).is_err()
+        );
+        assert!(ReportingPeriod::from_bounds(Some("2026-01-03T00:00:60Z"), None).is_err());
         assert!(ReportingPeriod::from_bounds(Some("+026-01-03T00:00:00Z"), None,).is_err());
         assert!(ReportingPeriod::from_bounds(Some(" 2026-01-03T00:00:00Z"), None,).is_err());
     }
