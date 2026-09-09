@@ -85,7 +85,7 @@ impl Timestamp {
         })
     }
 
-    pub(crate) fn format(self) -> String {
+    fn format(self) -> String {
         let days = self.seconds.div_euclid(86_400);
         let remainder = self.seconds.rem_euclid(86_400);
         let (year, month, day) = civil_from_days(days);

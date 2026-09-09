@@ -975,9 +975,9 @@ mod tests {
     use crate::store::StoreFreshness;
     use std::path::PathBuf;
 
-    fn record_with_timestamp(timestamp: Option<&str>) -> Record {
+    fn record_with_timestamp(session_id: &str, timestamp: Option<&str>) -> Record {
         Record {
-            session_id: Some("session".to_owned()),
+            session_id: Some(session_id.to_owned()),
             turn_id: None,
             timestamp: timestamp.map(str::to_owned),
             sequence: 0,
@@ -1048,19 +1048,6 @@ mod tests {
             reasoning_effort: None,
             provenance: crate::advisor::test_support::source(1),
         };
-        let record = |timestamp: Option<&str>| Record {
-            session_id: Some("session-a".to_owned()),
-            turn_id: None,
-            timestamp: timestamp.map(str::to_owned),
-            sequence: 0,
-            original_record_type: None,
-            original_nested_type: None,
-            error_category: None,
-            is_error: false,
-            is_terminal: false,
-            kind: RecordKind::ResponseItem,
-            provenance: crate::advisor::test_support::source(1),
-        };
         let data = CanonicalData {
             sessions: vec![
                 session("session-a", Some("2026-01-02T00:00:00Z"), None),
@@ -1071,9 +1058,9 @@ mod tests {
                 ),
             ],
             records: vec![
-                record(Some("2026-01-01T00:00:00Z")),
-                record(None),
-                record(Some("also-not-a-timestamp")),
+                record_with_timestamp("session-a", Some("2026-01-01T00:00:00Z")),
+                record_with_timestamp("session-a", None),
+                record_with_timestamp("session-a", Some("also-not-a-timestamp")),
             ],
             ..CanonicalData::default()
         };
@@ -1096,7 +1083,10 @@ mod tests {
         assert_eq!(coverage.record_count, 3);
 
         let record_only = CanonicalData {
-            records: vec![record(Some("2026-01-01T00:00:00Z"))],
+            records: vec![record_with_timestamp(
+                "session-a",
+                Some("2026-01-01T00:00:00Z"),
+            )],
             ..CanonicalData::default()
         };
         let summaries = report_sessions(&record_only);
@@ -1109,8 +1099,8 @@ mod tests {
     fn coverage_orders_timestamps_by_full_precision_and_offset() {
         let data = CanonicalData {
             records: vec![
-                record_with_timestamp(Some("2026-01-01T00:00:00.900Z")),
-                record_with_timestamp(Some("2026-01-01T01:00:00.100+01:00")),
+                record_with_timestamp("session", Some("2026-01-01T00:00:00.900Z")),
+                record_with_timestamp("session", Some("2026-01-01T01:00:00.100+01:00")),
             ],
             ..CanonicalData::default()
         };
@@ -1142,7 +1132,7 @@ mod tests {
             "2026-01-01T00:00:00.1234567890Z",
         ] {
             let data = CanonicalData {
-                records: vec![record_with_timestamp(Some(timestamp))],
+                records: vec![record_with_timestamp("session", Some(timestamp))],
                 ..CanonicalData::default()
             };
 
@@ -1169,8 +1159,8 @@ mod tests {
         .unwrap();
         let data = CanonicalData {
             records: vec![
-                record_with_timestamp(Some("2026-01-01T00:00:00.100Z")),
-                record_with_timestamp(Some("2026-01-01T01:00:00.100+01:00")),
+                record_with_timestamp("session", Some("2026-01-01T00:00:00.100Z")),
+                record_with_timestamp("session", Some("2026-01-01T01:00:00.100+01:00")),
             ],
             ..CanonicalData::default()
         };
