@@ -1851,9 +1851,21 @@ fn finding_pilot_authorization_binds_and_validates_period_bounds() {
         format!("{since}\t{until}\n")
     );
 
+    let nanos_since = "2026-01-01T00:00:00.123456000Z";
+    let nanos_until = "2026-01-01T00:00:00.123456001Z";
+    let nanos = run(nanos_since, nanos_until);
+    assert!(
+        nanos.status.success(),
+        "validator rejected a one-nanosecond interval: {nanos:?}"
+    );
+
     for (invalid_since, invalid_until) in [
         ("2026-01-01T00:00Z", until),
         ("2026-01-02T00:00:00Z", "2026-01-01T00:00:00Z"),
+        (
+            "2026-01-01T00:00:00.123456001Z",
+            "2026-01-01T00:00:00.123456000Z",
+        ),
         ("2026-01-01T00:00:00+00:00:00", until),
     ] {
         let invalid = run(invalid_since, invalid_until);
