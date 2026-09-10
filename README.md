@@ -1,5 +1,7 @@
 # codexlens
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/yuru-sha/codexlens)
+
 Analyze Codex sessions and turn recurring friction into actionable
 `AGENTS.md` improvements.
 
