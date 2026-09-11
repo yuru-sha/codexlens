@@ -1189,6 +1189,37 @@ fn filtered_coverage_resolves_missing_event_timestamps_from_source_records() {
 }
 
 #[test]
+fn filtered_coverage_preserves_invalid_event_timestamps() {
+    let store = coverage_timestamp_fallback_store();
+    Store::open(&store)
+        .unwrap()
+        .connection()
+        .execute(
+            "UPDATE messages SET timestamp = 'invalid-event-timestamp' WHERE timestamp IS NULL",
+            [],
+        )
+        .unwrap();
+
+    let json_args = [
+        "analyze",
+        "--format",
+        "json",
+        "--since",
+        "2026-01-03T00:00:00Z",
+        "--until",
+        "2026-01-04T00:00:00Z",
+    ];
+    let document = parse_json_report(&run_args(&json_args, &store), "analyze");
+    let coverage = &document["data"]["coverage"];
+    assert_eq!(coverage["status"], "partial");
+    assert_eq!(coverage["state"], "partial");
+    assert_eq!(coverage["missing_activity_timestamps"], 0);
+    assert!(coverage["invalid_activity_timestamps"].as_u64().unwrap() > 0);
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
 fn all_read_only_reports_share_period_selection_and_json_coverage() {
     let store = fixture_store();
     let flags = [
