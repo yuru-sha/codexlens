@@ -1036,6 +1036,22 @@ fn empty_reporting_period_has_no_selected_activity() {
 }
 
 #[test]
+fn monitor_help_omits_reporting_period_filters() {
+    let output = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["monitor", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("--since"), "{stdout}");
+    assert!(!stdout.contains("--until"), "{stdout}");
+}
+
+#[test]
 fn reporting_period_rejects_invalid_and_reversed_bounds() {
     let store = empty_store();
     for args in [
@@ -1069,7 +1085,12 @@ fn reporting_period_rejects_invalid_and_reversed_bounds() {
         &store,
     );
     assert!(!monitor.status.success());
-    assert!(String::from_utf8_lossy(&monitor.stderr).contains("monitor"));
+    let monitor_stderr = String::from_utf8_lossy(&monitor.stderr);
+    assert!(
+        monitor_stderr
+            .contains("--since and --until are reporting filters; monitor does not accept them"),
+        "{monitor_stderr}"
+    );
     let _ = fs::remove_file(store);
 }
 
