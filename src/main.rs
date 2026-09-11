@@ -99,7 +99,7 @@ enum Command {
     },
     Monitor {
         #[command(flatten)]
-        store: StoreOptions,
+        store: MonitorStoreOptions,
         #[arg(long, value_name = "PATH")]
         source: PathBuf,
         #[arg(long, value_enum, default_value_t = MonitorKind::Rollout)]
@@ -138,6 +138,28 @@ struct StoreOptions {
     #[arg(long, value_name = "RFC3339")]
     since: Option<String>,
     #[arg(long, value_name = "RFC3339")]
+    until: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct MonitorStoreOptions {
+    #[arg(
+        long,
+        short = 's',
+        default_value = ".codexlens.sqlite",
+        value_name = "PATH"
+    )]
+    store: PathBuf,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+    #[arg(
+        long,
+        help = "Read exactly this derived store without refreshing raw inputs"
+    )]
+    frozen: bool,
+    #[arg(long, hide = true, value_name = "RFC3339")]
+    since: Option<String>,
+    #[arg(long, hide = true, value_name = "RFC3339")]
     until: Option<String>,
 }
 
@@ -453,7 +475,7 @@ fn main() -> Result<()> {
 }
 
 fn run_monitor(
-    store_options: &StoreOptions,
+    store_options: &MonitorStoreOptions,
     source: &Path,
     kind: MonitorKind,
     max_polls: Option<usize>,
