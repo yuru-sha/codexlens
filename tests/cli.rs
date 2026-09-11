@@ -299,6 +299,24 @@ fn fixture_store() -> PathBuf {
     path
 }
 
+fn coverage_timestamp_fallback_store() -> PathBuf {
+    let path = temp_store_path("coverage-timestamp-fallback");
+    let mut store = Store::open(&path).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rollout/coverage-timestamp-fallback.jsonl");
+    store
+        .ingest_rollout_file(&fixture, &RolloutParseOptions::default())
+        .unwrap();
+    for table in ["messages", "file_operations", "token_usage"] {
+        let changed = store
+            .connection()
+            .execute(&format!("UPDATE {table} SET timestamp = NULL"), [])
+            .unwrap();
+        assert!(changed > 0, "fixture did not create {table} rows");
+    }
+    path
+}
+
 fn boundary_turn_coverage_store() -> PathBuf {
     let path = temp_store_path("boundary-turn-coverage");
     let mut store = Store::open(&path).unwrap();
@@ -1131,6 +1149,72 @@ fn reporting_coverage_marks_unknown_event_timestamps_as_partial() {
     assert_eq!(coverage["state"], "partial");
     assert!(coverage["observed_start"].is_string());
     assert!(coverage["observed_end"].is_string());
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn filtered_coverage_resolves_missing_event_timestamps_from_source_records() {
+    let store = coverage_timestamp_fallback_store();
+    let flags = [
+        "--since",
+        "2026-01-03T00:00:00Z",
+        "--until",
+        "2026-01-04T00:00:00Z",
+    ];
+
+    let human = run_args_with_flags(&["analyze"], &flags, &store);
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        human_stdout.contains("Activity timestamps: 14 valid, 0 missing, 0 invalid"),
+        "{human_stdout}"
+    );
+
+    let mut json_args = vec!["analyze", "--format", "json"];
+    json_args.extend(flags);
+    let document = parse_json_report(&run_args(&json_args, &store), "analyze");
+    let coverage = &document["data"]["coverage"];
+    assert_eq!(coverage["status"], "observed");
+    assert_eq!(coverage["state"], "complete");
+    assert_eq!(coverage["missing_activity_timestamps"], 0);
+    assert_eq!(coverage["invalid_activity_timestamps"], 0);
+    assert_eq!(coverage["unknown_timestamp_events"], 0);
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn filtered_coverage_preserves_invalid_event_timestamps() {
+    let store = coverage_timestamp_fallback_store();
+    Store::open(&store)
+        .unwrap()
+        .connection()
+        .execute(
+            "UPDATE messages SET timestamp = 'invalid-event-timestamp' WHERE timestamp IS NULL",
+            [],
+        )
+        .unwrap();
+
+    let json_args = [
+        "analyze",
+        "--format",
+        "json",
+        "--since",
+        "2026-01-03T00:00:00Z",
+        "--until",
+        "2026-01-04T00:00:00Z",
+    ];
+    let document = parse_json_report(&run_args(&json_args, &store), "analyze");
+    let coverage = &document["data"]["coverage"];
+    assert_eq!(coverage["status"], "partial");
+    assert_eq!(coverage["state"], "partial");
+    assert_eq!(coverage["missing_activity_timestamps"], 0);
+    assert!(coverage["invalid_activity_timestamps"].as_u64().unwrap() > 0);
 
     let _ = fs::remove_file(store);
 }

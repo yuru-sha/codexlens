@@ -1,0 +1,6 @@
+{"timestamp":"2026-01-03T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-coverage-fallback-session","cwd":"/fixture/coverage","project":"/fixture/coverage","updated_at":"2026-01-03T00:10:00.000Z"}}
+{"timestamp":"2026-01-03T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"fixture-coverage-fallback-turn","cwd":"/fixture/coverage","user_instructions":"Synthetic coverage fallback fixture."}}
+{"timestamp":"2026-01-03T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Synthetic fallback message."}]}}
+{"timestamp":"2026-01-03T00:00:03.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-coverage-fallback-call","name":"fixture_tool","input":"{\"patch\":\"*** Update File: src/fallback.rs\\n@@\\n-old\\n+new\\n\"}"}}
+{"timestamp":"2026-01-03T00:00:04.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":2}}}}
+{"timestamp":"2026-01-03T00:00:05.000Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"fixture-coverage-fallback-turn"}}
