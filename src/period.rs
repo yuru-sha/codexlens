@@ -85,7 +85,7 @@ impl Timestamp {
         })
     }
 
-    fn format(self) -> String {
+    pub(crate) fn format(self) -> String {
         let days = self.seconds.div_euclid(86_400);
         let remainder = self.seconds.rem_euclid(86_400);
         let (year, month, day) = civil_from_days(days);
@@ -257,13 +257,12 @@ pub struct SelectedData {
     pub coverage: PeriodCoverage,
 }
 
-type SourceKey = (PathBuf, Option<usize>);
+pub(crate) type SourceKey = (PathBuf, Option<usize>);
 type TurnKey = (String, String);
 type ToolContextKey<'a> = (Option<&'a str>, Option<&'a str>);
 
-pub fn select_report_data(data: &CanonicalData, period: Option<&ReportingPeriod>) -> SelectedData {
-    let record_times = data
-        .records
+pub(crate) fn record_timestamps(data: &CanonicalData) -> HashMap<SourceKey, Option<Timestamp>> {
+    data.records
         .iter()
         .map(|record| {
             (
@@ -271,7 +270,11 @@ pub fn select_report_data(data: &CanonicalData, period: Option<&ReportingPeriod>
                 record.timestamp.as_deref().and_then(Timestamp::parse),
             )
         })
-        .collect::<HashMap<_, _>>();
+        .collect()
+}
+
+pub fn select_report_data(data: &CanonicalData, period: Option<&ReportingPeriod>) -> SelectedData {
+    let record_times = record_timestamps(data);
     let mut observed_times = Vec::new();
     let mut selected_session_ids = HashSet::new();
     let mut selected_turns = HashSet::new();
@@ -679,7 +682,7 @@ fn source_timestamp_with_unknown(
     timestamp
 }
 
-fn event_timestamp(
+pub(crate) fn event_timestamp(
     value: Option<&str>,
     source: &SourceRef,
     record_times: &HashMap<SourceKey, Option<Timestamp>>,
