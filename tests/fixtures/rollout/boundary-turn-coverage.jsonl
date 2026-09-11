@@ -1,0 +1,5 @@
+{"timestamp":"2026-01-03T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-boundary-coverage-session","cwd":"/fixture/boundary-coverage","project":"/fixture/boundary-coverage","updated_at":"2026-01-03T00:00:03.000Z"}}
+{"timestamp":"2026-01-03T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"fixture-boundary-coverage-turn","cwd":"/fixture/boundary-coverage","user_instructions":"Synthetic boundary coverage fixture."}}
+{"timestamp":"2026-01-02T23:59:59.000Z","type":"event_msg","payload":{"type":"turn_started","turn_id":"fixture-boundary-coverage-turn"}}
+{"timestamp":"2026-01-03T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Synthetic selected child."}]}}
+{"timestamp":"2026-01-04T00:00:01.000Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"fixture-boundary-coverage-turn"}}

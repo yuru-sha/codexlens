@@ -25,7 +25,7 @@ use codexlens::discovery::{
 use codexlens::instructions::InstructionCaptureOptions;
 use codexlens::model::CanonicalData;
 use codexlens::normalize::normalize_rollout;
-use codexlens::period::{PeriodCoverage, ReportingPeriod, select_report_data};
+use codexlens::period::{PeriodCoverage, PeriodCoverageState, ReportingPeriod, select_report_data};
 use codexlens::rollout::{RolloutParseOptions, parse_rollout};
 use codexlens::state::read_state_database;
 use codexlens::store::{IngestOptions, SCHEMA_VERSION, Store, StoreFreshness};
@@ -299,7 +299,7 @@ fn main() -> Result<()> {
         Command::Sessions { store } => {
             let (data, freshness, selection) = load_reporting(&store)?;
             if let Some(selection) = selection.as_ref() {
-                let coverage = report_coverage_with_period(&data, &selection.period);
+                let coverage = selection.report_coverage.clone();
                 store.format.write_report(
                     || {
                         (
@@ -399,7 +399,7 @@ fn main() -> Result<()> {
             if diff {
                 let batch = proposal_batch(&proposal_plan);
                 if let Some(selection) = selection.as_ref() {
-                    let coverage = report_coverage_with_period(&data, &selection.period);
+                    let coverage = selection.report_coverage.clone();
                     store.format.write_report(
                         || {
                             render_optimize_human_with_period(
@@ -887,8 +887,8 @@ fn load_analysis(
 
 #[derive(Debug, Clone)]
 struct ReportingSelection {
-    period: ReportingPeriod,
     coverage: PeriodCoverage,
+    report_coverage: ReportCoverage,
 }
 
 fn report_coverage_for_selection(
@@ -897,7 +897,7 @@ fn report_coverage_for_selection(
 ) -> ReportCoverage {
     selection.map_or_else(
         || report_coverage(data),
-        |selection| report_coverage_with_period(data, &selection.period),
+        |selection| selection.report_coverage.clone(),
     )
 }
 
@@ -910,13 +910,23 @@ fn load_reporting(
     let Some(period) = period else {
         return Ok((data, freshness, None));
     };
+    // Inspect source timestamps before boundary projection turns intentional trims into None.
+    let mut report_coverage = report_coverage_with_period(&data, &period);
     let selected = select_report_data(&data, Some(&period));
+    report_coverage.session_count = selected.coverage.included_sessions;
+    report_coverage.record_count = selected.coverage.included_records;
+    report_coverage.status = match selected.coverage.state {
+        PeriodCoverageState::Empty => "empty",
+        PeriodCoverageState::Complete => "observed",
+        PeriodCoverageState::Partial => "partial",
+    }
+    .to_owned();
     Ok((
         selected.data,
         freshness,
         Some(ReportingSelection {
-            period,
             coverage: selected.coverage,
+            report_coverage,
         }),
     ))
 }
