@@ -335,6 +335,11 @@ field observations, not distinct instants: they include session
 the canonical record, message, file-operation, and token-usage timestamps.
 Missing fields increment `missing_activity_timestamps`; present values that do
 not pass the existing timestamp parser increment `invalid_activity_timestamps`.
+For messages, lifecycle events, file operations, and token usage, a missing
+event timestamp resolves from its canonical source-record timestamp when that
+record timestamp is valid. A resolved fallback is counted as a valid activity
+timestamp; a present but invalid event timestamp remains invalid and is not
+replaced by the source record.
 `activity_start` and `activity_end` use only valid observed activity times and
 are `null` when none exist. The latest recorded ingestion time remains only in
 `freshness.latest_ingested_at`; it is never substituted for an unknown activity
@@ -721,9 +726,11 @@ write set must not become implicit.
   observed verification event.
   Turn completion and lifecycle events outside the interval are removed from a
   filtered turn.
-- File operations and token usage use their own event timestamp or canonical
-  source-record timestamp. Instruction snapshots use the same rule, and
-  instruction joins follow selected sessions.
+- Messages, lifecycle events, file operations, and token usage use their own
+  valid event timestamp or, when missing, the canonical source-record
+  timestamp. A present but invalid event timestamp remains unknown. Instruction
+  snapshots use the same source-record rule, and instruction joins follow
+  selected sessions.
 - Every lens and `optimize --diff` receives the selected canonical data. No
   report aggregates the unfiltered store and applies a display-only filter.
 

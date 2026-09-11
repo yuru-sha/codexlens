@@ -1,6 +1,6 @@
 //! Doctor report and proposal summary presentation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +9,9 @@ use crate::analysis::{
     sort_findings,
 };
 use crate::model::{CanonicalData, SourceKind, SourceRef};
-use crate::period::{PeriodCoverage, ReportingPeriod, Timestamp};
+use crate::period::{
+    PeriodCoverage, ReportingPeriod, SourceKey, Timestamp, event_timestamp, record_timestamps,
+};
 use crate::store::{FreshnessState, StoreFreshness};
 
 use super::diff::{DiffBatch, RenderedDiff, SkippedProposal};
@@ -560,6 +562,7 @@ fn report_coverage_filtered(
     data: &CanonicalData,
     period: Option<&ReportingPeriod>,
 ) -> ReportCoverage {
+    let record_times = record_timestamps(data);
     let mut timestamps = Vec::<(Timestamp, String)>::new();
     let mut missing_activity_timestamps = 0;
     let mut invalid_activity_timestamps = 0;
@@ -586,8 +589,10 @@ fn report_coverage_filtered(
             );
         }
         for event in &turn.lifecycle {
-            observe_timestamp(
+            observe_event_timestamp(
                 event.timestamp.as_deref(),
+                &event.provenance,
+                &record_times,
                 &mut timestamps,
                 &mut missing_activity_timestamps,
                 &mut invalid_activity_timestamps,
@@ -595,28 +600,42 @@ fn report_coverage_filtered(
             );
         }
     }
-    for timestamp in data
-        .records
-        .iter()
-        .map(|record| record.timestamp.as_deref())
-        .chain(
-            data.messages
-                .iter()
-                .map(|message| message.timestamp.as_deref()),
-        )
-        .chain(
-            data.file_operations
-                .iter()
-                .map(|operation| operation.timestamp.as_deref()),
-        )
-        .chain(
-            data.token_usage
-                .iter()
-                .map(|usage| usage.timestamp.as_deref()),
-        )
-    {
+    for record in &data.records {
         observe_timestamp(
-            timestamp,
+            record.timestamp.as_deref(),
+            &mut timestamps,
+            &mut missing_activity_timestamps,
+            &mut invalid_activity_timestamps,
+            period,
+        );
+    }
+    for message in &data.messages {
+        observe_event_timestamp(
+            message.timestamp.as_deref(),
+            &message.provenance,
+            &record_times,
+            &mut timestamps,
+            &mut missing_activity_timestamps,
+            &mut invalid_activity_timestamps,
+            period,
+        );
+    }
+    for operation in &data.file_operations {
+        observe_event_timestamp(
+            operation.timestamp.as_deref(),
+            &operation.provenance,
+            &record_times,
+            &mut timestamps,
+            &mut missing_activity_timestamps,
+            &mut invalid_activity_timestamps,
+            period,
+        );
+    }
+    for usage in &data.token_usage {
+        observe_event_timestamp(
+            usage.timestamp.as_deref(),
+            &usage.provenance,
+            &record_times,
             &mut timestamps,
             &mut missing_activity_timestamps,
             &mut invalid_activity_timestamps,
@@ -680,6 +699,25 @@ fn observe_timestamp(
         return;
     }
     valid.push((parsed, timestamp.to_owned()));
+}
+
+fn observe_event_timestamp(
+    value: Option<&str>,
+    source: &SourceRef,
+    record_times: &HashMap<SourceKey, Option<Timestamp>>,
+    valid: &mut Vec<(Timestamp, String)>,
+    missing: &mut usize,
+    invalid: &mut usize,
+    period: Option<&ReportingPeriod>,
+) {
+    if let Some(value) = value {
+        observe_timestamp(Some(value), valid, missing, invalid, period);
+    } else if let Some(timestamp) = event_timestamp(None, source, record_times) {
+        let formatted = timestamp.format();
+        observe_timestamp(Some(&formatted), valid, missing, invalid, period);
+    } else {
+        observe_timestamp(None, valid, missing, invalid, period);
+    }
 }
 
 fn session_count(data: &CanonicalData) -> usize {
