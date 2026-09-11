@@ -299,6 +299,17 @@ fn fixture_store() -> PathBuf {
     path
 }
 
+fn boundary_turn_coverage_store() -> PathBuf {
+    let path = temp_store_path("boundary-turn-coverage");
+    let mut store = Store::open(&path).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rollout/boundary-turn-coverage.jsonl");
+    store
+        .ingest_rollout_file(&fixture, &RolloutParseOptions::default())
+        .unwrap();
+    path
+}
+
 fn empty_store() -> PathBuf {
     let path = temp_store_path("empty");
     Store::open(&path).unwrap();
@@ -895,6 +906,57 @@ fn reporting_period_filter_is_half_open_and_visible_in_human_and_json() {
 }
 
 #[test]
+fn filtered_coverage_excludes_trimmed_boundary_turn_timestamps() {
+    let store = boundary_turn_coverage_store();
+    let flags = [
+        "--since",
+        "2026-01-03T00:00:00Z",
+        "--until",
+        "2026-01-04T00:00:00Z",
+    ];
+
+    let human = run_args_with_flags(&["sessions"], &flags, &store);
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        stdout
+            .contains("Observed records: 3 (excluded: 2, unknown timestamps: 0 records, 0 events)")
+    );
+    assert!(stdout.contains("Coverage: complete"));
+    assert!(stdout.contains("Coverage: selected store (observed;"));
+    assert!(stdout.contains("Activity timestamps: 6 valid, 0 missing, 0 invalid"));
+    assert!(stdout.contains("Sessions: 1"));
+    assert!(stdout.contains("Records: 3"));
+
+    for args in REPORTING_COMMANDS {
+        let mut json_args = args.to_vec();
+        json_args.extend(["--format", "json"]);
+        let command = match args[0] {
+            "optimize" => "optimize_diff",
+            "stuck" => "rework",
+            "rediscovery" => "knowledge",
+            command => command,
+        };
+        let document = parse_json_report(&run_args_with_flags(&json_args, &flags, &store), command);
+        let coverage = &document["data"]["coverage"];
+        assert_eq!(coverage["status"], "observed", "{args:?}");
+        assert_eq!(coverage["state"], "complete", "{args:?}");
+        assert_eq!(coverage["missing_activity_timestamps"], 0, "{args:?}");
+        assert_eq!(coverage["invalid_activity_timestamps"], 0, "{args:?}");
+        assert_eq!(coverage["valid_activity_timestamps"], 6, "{args:?}");
+        assert_eq!(coverage["unknown_timestamp_events"], 0, "{args:?}");
+        assert_eq!(coverage["included_sessions"], 1, "{args:?}");
+        assert_eq!(coverage["included_records"], 3, "{args:?}");
+    }
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
 fn empty_reporting_period_has_no_selected_activity() {
     let store = fixture_store();
     let output = run_args(
@@ -988,6 +1050,9 @@ fn reporting_coverage_marks_unknown_event_timestamps_as_partial() {
     let coverage = &document["data"]["coverage"];
     assert_eq!(coverage["unknown_timestamp_records"], 1);
     assert!(coverage["unknown_timestamp_events"].as_u64().unwrap() > 0);
+    assert!(coverage["missing_activity_timestamps"].as_u64().unwrap() > 0);
+    assert!(coverage["invalid_activity_timestamps"].as_u64().unwrap() > 0);
+    assert_eq!(coverage["status"], "partial");
     assert_eq!(coverage["state"], "partial");
     assert!(coverage["observed_start"].is_string());
     assert!(coverage["observed_end"].is_string());
