@@ -1,0 +1,15 @@
+{"timestamp":"2026-01-03T00:00:00Z","type":"session_meta","payload":{"id":"timestamp-session-a","cwd":"/fixture/project","project":"/fixture/project"}}
+{"timestamp":"2026-01-03T00:00:01Z","type":"turn_context","payload":{"turn_id":"timestamp-turn-a","cwd":"/fixture/project"}}
+{"timestamp":"2026-01-03T00:00:05Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Please use the documented command."}]}}
+{"timestamp":"2026-01-03T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic action"}]}}
+{"timestamp":"2026-01-03T00:00:06Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"timestamp-turn-a"}}
+{"timestamp":"2026-01-03T01:00:00Z","type":"session_meta","payload":{"id":"timestamp-session-b","cwd":"/fixture/project","project":"/fixture/project"}}
+{"timestamp":"2026-01-03T01:00:01Z","type":"turn_context","payload":{"turn_id":"timestamp-turn-b","cwd":"/fixture/project"}}
+{"timestamp":"2026-01-03T01:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic action"}]}}
+{"timestamp":"2026-01-03T01:00:03Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Please use the documented command."}]}}
+{"timestamp":"2026-01-03T01:00:04Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"timestamp-turn-b"}}
+{"timestamp":"2026-01-03T02:00:00Z","type":"session_meta","payload":{"id":"timestamp-session-c","cwd":"/fixture/project","project":"/fixture/project"}}
+{"timestamp":"2026-01-03T02:00:01Z","type":"turn_context","payload":{"turn_id":"timestamp-turn-c","cwd":"/fixture/project"}}
+{"timestamp":"2026-01-03T02:00:02Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"timestamp-patch-c1","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/lib.rs\\n@@\\n-old\\n+new\\n\"}"}}
+{"timestamp":"2026-01-03T02:00:30Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"timestamp-patch-c2","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/lib.rs\\n@@\\n-old\\n+newer\\n\"}"}}
+{"timestamp":"2026-01-03T02:00:31Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"timestamp-turn-c"}}

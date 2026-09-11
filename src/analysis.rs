@@ -188,9 +188,10 @@ impl<'a> AnalysisContext<'a> {
             .record_positions
             .get(&(source.path.as_path(), source.line));
         Position {
-            timestamp: timestamp
-                .and_then(Timestamp::parse)
-                .or_else(|| record.and_then(|(timestamp, _)| *timestamp)),
+            timestamp: match timestamp {
+                Some(timestamp) => Timestamp::parse(timestamp),
+                None => record.and_then(|(timestamp, _)| *timestamp),
+            },
             sequence: record.map(|(_, sequence)| *sequence),
             source: source.clone(),
         }
@@ -1452,6 +1453,104 @@ mod tests {
             ))),
         );
         normalize_rollout(&parsed)
+    }
+
+    fn timestamp_fixture_data() -> CanonicalData {
+        let parsed = parse_rollout_reader(
+            Path::new("fixture-timestamp-fallback.jsonl"),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../tests/fixtures/analysis/timestamp-fallback.jsonl"
+            ))),
+        );
+        normalize_rollout(&parsed)
+    }
+
+    fn correction_timestamp_data(timestamp: Option<&str>) -> CanonicalData {
+        let mut data = timestamp_fixture_data();
+        let message = data
+            .messages
+            .iter_mut()
+            .find(|message| {
+                message.session_id.as_deref() == Some("timestamp-session-a")
+                    && message.content.as_deref() == Some("Please use the documented command.")
+            })
+            .expect("fixture correction message exists");
+        message.timestamp = timestamp.map(str::to_owned);
+        data
+    }
+
+    fn rework_timestamp_data(timestamp: Option<&str>) -> CanonicalData {
+        let mut data = timestamp_fixture_data();
+        let operation = data
+            .file_operations
+            .iter_mut()
+            .find(|operation| {
+                operation.session_id.as_deref() == Some("timestamp-session-c")
+                    && operation.provenance.line == Some(13)
+            })
+            .expect("fixture rework operation exists");
+        operation.timestamp = timestamp.map(str::to_owned);
+        data
+    }
+
+    #[test]
+    fn invalid_message_timestamp_does_not_reorder_correction_events() {
+        let invalid = analyze_corrections(
+            &correction_timestamp_data(Some("not-a-timestamp")),
+            &AnalysisOptions::default(),
+        );
+        assert!(invalid.is_empty());
+
+        let missing = analyze_corrections(
+            &correction_timestamp_data(None),
+            &AnalysisOptions::default(),
+        );
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].kind, FindingType::Correction);
+        assert_eq!(
+            missing[0].scope,
+            FindingScope::Project(PathBuf::from("/fixture/project"))
+        );
+        assert_eq!(missing[0].occurrences, 2);
+        assert_eq!(missing[0].distinct_sessions, 2);
+        assert_eq!(missing[0].confidence, FindingConfidence::Medium);
+        assert!(missing[0].evidence.iter().any(|evidence| {
+            evidence.source.path == Path::new("fixture-timestamp-fallback.jsonl")
+                && evidence.source.line == Some(3)
+        }));
+    }
+
+    #[test]
+    fn invalid_file_operation_timestamp_does_not_join_rework_window() {
+        let invalid = analyze_rework(
+            &rework_timestamp_data(Some("not-a-timestamp")),
+            &AnalysisOptions {
+                rework_window_seconds: 60,
+                ..AnalysisOptions::default()
+            },
+        );
+        assert!(invalid.is_empty());
+
+        let missing = analyze_rework(
+            &rework_timestamp_data(None),
+            &AnalysisOptions {
+                rework_window_seconds: 60,
+                ..AnalysisOptions::default()
+            },
+        );
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].kind, FindingType::Rework);
+        assert_eq!(
+            missing[0].scope,
+            FindingScope::Project(PathBuf::from("/fixture/project"))
+        );
+        assert_eq!(missing[0].occurrences, 2);
+        assert_eq!(missing[0].distinct_sessions, 1);
+        assert_eq!(missing[0].confidence, FindingConfidence::High);
+        assert!(missing[0].evidence.iter().any(|evidence| {
+            evidence.source.path == Path::new("fixture-timestamp-fallback.jsonl")
+                && evidence.source.line == Some(13)
+        }));
     }
 
     #[test]
