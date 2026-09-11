@@ -460,6 +460,7 @@ pub fn doctor(
     freshness: StoreFreshness,
     options: &DoctorOptions,
 ) -> DoctorReport {
+    let coverage = report_coverage(data);
     let mut ranked = findings.to_vec();
     sort_findings(&mut ranked);
     let mut finding_counts = BTreeMap::new();
@@ -494,8 +495,8 @@ pub fn doctor(
     }
 
     DoctorReport {
-        period_start: period(data).0,
-        period_end: period(data).1,
+        period_start: coverage.activity_start,
+        period_end: coverage.activity_end,
         session_count: session_count(data),
         freshness,
         finding_counts,
@@ -716,33 +717,6 @@ fn session_ids(data: &CanonicalData) -> BTreeSet<String> {
             .map(|join| join.session_id.clone()),
     );
     sessions
-}
-
-fn period(data: &CanonicalData) -> (Option<String>, Option<String>) {
-    let mut values = Vec::new();
-    values.extend(data.sessions.iter().flat_map(|session| {
-        [session.created_at.as_ref(), session.updated_at.as_ref()]
-            .into_iter()
-            .flatten()
-            .cloned()
-    }));
-    values.extend(
-        data.records
-            .iter()
-            .filter_map(|record| record.timestamp.clone()),
-    );
-    values.extend(
-        data.messages
-            .iter()
-            .filter_map(|message| message.timestamp.clone()),
-    );
-    values.extend(
-        data.file_operations
-            .iter()
-            .filter_map(|operation| operation.timestamp.clone()),
-    );
-    values.sort();
-    (values.first().cloned(), values.last().cloned())
 }
 
 fn scope_rank(scope: &FindingScope) -> u8 {
@@ -1240,11 +1214,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_period_fields_remain_separate_from_valid_activity_coverage() {
+    fn doctor_period_fields_match_valid_activity_coverage() {
         let data = CanonicalData {
             sessions: vec![Session {
                 id: "session".to_owned(),
-                created_at: Some("2026-01-01T00:00:00+09:00".to_owned()),
+                created_at: Some("2026-01-03T09:00:00+09:00".to_owned()),
                 updated_at: None,
                 cwd: None,
                 project: None,
@@ -1263,19 +1237,10 @@ mod tests {
                 reasoning_effort: None,
                 provenance: crate::advisor::test_support::source(1),
             }],
-            records: vec![Record {
-                session_id: Some("session".to_owned()),
-                turn_id: None,
-                timestamp: Some("2025-12-31T20:00:00Z".to_owned()),
-                sequence: 0,
-                original_record_type: None,
-                original_nested_type: None,
-                error_category: None,
-                is_error: false,
-                is_terminal: false,
-                kind: RecordKind::ResponseItem,
-                provenance: crate::advisor::test_support::source(1),
-            }],
+            records: vec![
+                record_with_timestamp("session", Some("2026-01-03T00:30:00.123456789Z")),
+                record_with_timestamp("session", Some("not-a-timestamp")),
+            ],
             ..CanonicalData::default()
         };
 
@@ -1286,20 +1251,17 @@ mod tests {
             &DoctorOptions::default(),
         );
 
-        assert_eq!(report.period_start.as_deref(), Some("2025-12-31T20:00:00Z"));
-        assert_eq!(
-            report.period_end.as_deref(),
-            Some("2026-01-01T00:00:00+09:00")
-        );
         let coverage = report_coverage(&data);
         assert_eq!(
             coverage.activity_start.as_deref(),
-            Some("2026-01-01T00:00:00+09:00")
+            Some("2026-01-03T09:00:00+09:00")
         );
         assert_eq!(
             coverage.activity_end.as_deref(),
-            Some("2025-12-31T20:00:00Z")
+            Some("2026-01-03T00:30:00.123456789Z")
         );
+        assert_eq!(report.period_start, coverage.activity_start);
+        assert_eq!(report.period_end, coverage.activity_end);
     }
 
     #[test]
