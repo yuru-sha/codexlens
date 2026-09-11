@@ -933,6 +933,25 @@ fn filtered_coverage_excludes_trimmed_boundary_turn_timestamps() {
     assert!(stdout.contains("Records: 3"));
 
     for args in REPORTING_COMMANDS {
+        let output = run_args_with_flags(args, &flags, &store);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Coverage: complete"), "{args:?}: {stdout}");
+        assert!(
+            stdout.contains("Coverage: selected store (observed;"),
+            "{args:?}: {stdout}"
+        );
+        assert!(
+            stdout.contains("Activity timestamps: 6 valid, 0 missing, 0 invalid"),
+            "{args:?}: {stdout}"
+        );
+        assert!(stdout.contains("Sessions: 1"), "{args:?}: {stdout}");
+        assert!(stdout.contains("Records: 3"), "{args:?}: {stdout}");
+
         let mut json_args = args.to_vec();
         json_args.extend(["--format", "json"]);
         let command = match args[0] {
