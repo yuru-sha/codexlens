@@ -1919,6 +1919,8 @@ fn finding_evaluation_plan_is_bounded_human_reviewed_and_private() {
             "privacy boundary is missing: {forbidden}"
         );
     }
+    assert!(plan.contains("\"$PYTHON_BIN\" - \"$PILOT_DIR/sessions.json\" \"$SELECTED_PROJECT\""));
+    assert!(!plan.contains("python3 - \"$PILOT_DIR/sessions.json\" \"$SELECTED_PROJECT\""));
 }
 
 #[test]
