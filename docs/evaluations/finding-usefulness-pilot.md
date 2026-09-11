@@ -82,7 +82,7 @@ test -f "$PILOT_STORE"
 cargo run -- sessions --frozen --format json --store "$PILOT_STORE" \
   "${PERIOD_ARGS[@]}" \
   > "$PILOT_DIR/sessions.json"
-python3 - "$PILOT_DIR/sessions.json" "$SELECTED_PROJECT" <<'PY'
+"$PYTHON_BIN" - "$PILOT_DIR/sessions.json" "$SELECTED_PROJECT" <<'PY'
 import json
 import sys
 
