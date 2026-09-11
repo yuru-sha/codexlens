@@ -318,6 +318,41 @@ fn minimal_store() -> PathBuf {
     path
 }
 
+fn chronological_period_store() -> PathBuf {
+    let path = temp_store_path("chronological-period");
+    let store = Store::open(&path).unwrap();
+    store
+        .connection()
+        .execute(
+            "INSERT INTO sessions (session_id, source_identity, source_path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                "synthetic-period-session",
+                "synthetic-period-source",
+                "synthetic.jsonl",
+                "2026-01-03T09:00:00+09:00",
+                "2026-01-03T00:30:00.123456789Z",
+            ],
+        )
+        .unwrap();
+    store
+        .connection()
+        .execute(
+            "INSERT INTO records (record_key, source_identity, source_path, source_line, session_id, timestamp, sequence, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                "synthetic-period-record",
+                "synthetic-period-source",
+                "synthetic.jsonl",
+                3,
+                "synthetic-period-session",
+                "not-a-timestamp",
+                0,
+                "response_item",
+            ],
+        )
+        .unwrap();
+    path
+}
+
 fn run_args(args: &[&str], store: &Path) -> Output {
     run_args_with_flags(args, &[], store)
 }
@@ -2567,6 +2602,41 @@ fn reporting_metadata_exposes_store_coverage_and_separates_ingestion_time() {
         "sessions",
     );
     assert_eq!(sessions["data"]["coverage"], coverage.clone());
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn unfiltered_reports_share_chronological_valid_activity_period() {
+    let store = chronological_period_store();
+    let expected_start = "2026-01-03T09:00:00+09:00";
+    let expected_end = "2026-01-03T00:30:00.123456789Z";
+
+    for command in ["analyze", "doctor"] {
+        let human = run_args(&[command], &store);
+        assert!(human.status.success(), "{command}: human report failed");
+        let stdout = String::from_utf8_lossy(&human.stdout);
+        assert!(
+            stdout.contains(&format!(
+                "Analyzed period: {expected_start} .. {expected_end}"
+            )),
+            "{command}: {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("Activity: {expected_start} .. {expected_end}")),
+            "{command}: {stdout}"
+        );
+        assert!(stdout.contains("Activity timestamps: 2 valid, 0 missing, 1 invalid"));
+
+        let document =
+            parse_json_report(&run_args(&[command, "--format", "json"], &store), command);
+        let data = &document["data"];
+        assert_eq!(data["period_start"], expected_start);
+        assert_eq!(data["period_end"], expected_end);
+        assert_eq!(data["coverage"]["activity_start"], data["period_start"]);
+        assert_eq!(data["coverage"]["activity_end"], data["period_end"]);
+        assert_eq!(data["coverage"]["invalid_activity_timestamps"], 1);
+    }
+
     let _ = fs::remove_file(store);
 }
 
