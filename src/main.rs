@@ -8,12 +8,13 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use codexlens::advisor::{
-    ApplyPlan, ApplyReport, DiffBatch, DoctorOptions, doctor, prepare_apply_proposals,
-    proposals_for_findings, render_diffs, render_doctor_with_coverage, render_doctor_with_period,
-    render_json_diff, render_json_diff_with_period, render_json_finding_report_with_coverage,
-    render_json_finding_report_with_period, render_json_sessions, render_json_sessions_with_period,
-    render_proposal_summary, render_report_metadata, render_report_metadata_with_period,
-    report_coverage, report_coverage_with_period, report_sessions,
+    ApplyPlan, ApplyReport, DiffBatch, DoctorOptions, ReportCoverage, doctor_with_coverage,
+    prepare_apply_proposals, proposals_for_findings, render_diffs, render_doctor_with_coverage,
+    render_doctor_with_period, render_json_diff, render_json_diff_with_period,
+    render_json_finding_report_with_coverage, render_json_finding_report_with_period,
+    render_json_sessions, render_json_sessions_with_period, render_proposal_summary,
+    render_report_metadata, render_report_metadata_with_period, report_coverage,
+    report_coverage_with_period, report_sessions,
 };
 use codexlens::analysis::{
     Finding, analyze_default, corrections, failures, instructions, knowledge, rework, verification,
@@ -335,7 +336,8 @@ fn main() -> Result<()> {
         Command::Instructions { store } => run_finding_report(&store, instructions, "instructions"),
         Command::Doctor { store, limit } => {
             let (data, findings, freshness, selection) = load_analysis(&store)?;
-            let mut report = doctor(
+            let coverage = report_coverage_for_selection(&data, selection.as_ref());
+            let mut report = doctor_with_coverage(
                 &data,
                 &findings,
                 freshness,
@@ -343,15 +345,12 @@ fn main() -> Result<()> {
                     max_findings_per_scope: limit,
                     ..DoctorOptions::default()
                 },
+                &coverage,
             );
             if let Some(selection) = selection.as_ref() {
                 report.period_start = selection.coverage.observed_start.clone();
                 report.period_end = selection.coverage.observed_end.clone();
             }
-            let coverage = selection.as_ref().map_or_else(
-                || report_coverage(&data),
-                |selection| report_coverage_with_period(&data, &selection.period),
-            );
             if let Some(selection) = selection.as_ref() {
                 store.format.write_report(
                     || {
@@ -892,6 +891,16 @@ struct ReportingSelection {
     coverage: PeriodCoverage,
 }
 
+fn report_coverage_for_selection(
+    data: &CanonicalData,
+    selection: Option<&ReportingSelection>,
+) -> ReportCoverage {
+    selection.map_or_else(
+        || report_coverage(data),
+        |selection| report_coverage_with_period(data, &selection.period),
+    )
+}
+
 fn load_reporting(
     options: &StoreOptions,
 ) -> Result<(CanonicalData, StoreFreshness, Option<ReportingSelection>)> {
@@ -968,15 +977,18 @@ fn run_finding_report(
     command: &str,
 ) -> Result<()> {
     let (data, freshness, selection) = load_reporting(options)?;
-    let mut report = doctor(&data, &lens(&data), freshness, &DoctorOptions::default());
+    let coverage = report_coverage_for_selection(&data, selection.as_ref());
+    let mut report = doctor_with_coverage(
+        &data,
+        &lens(&data),
+        freshness,
+        &DoctorOptions::default(),
+        &coverage,
+    );
     if let Some(selection) = selection.as_ref() {
         report.period_start = selection.coverage.observed_start.clone();
         report.period_end = selection.coverage.observed_end.clone();
     }
-    let coverage = selection.as_ref().map_or_else(
-        || report_coverage(&data),
-        |selection| report_coverage_with_period(&data, &selection.period),
-    );
     if let Some(selection) = selection.as_ref() {
         options.format.write_report(
             || {

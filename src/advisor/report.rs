@@ -461,6 +461,20 @@ pub fn doctor(
     options: &DoctorOptions,
 ) -> DoctorReport {
     let coverage = report_coverage(data);
+    doctor_with_coverage(data, findings, freshness, options, &coverage)
+}
+
+/// Build a doctor report from coverage computed by the caller.
+///
+/// Reusing this coverage keeps the report period and rendered coverage aligned
+/// without scanning the canonical data a second time.
+pub fn doctor_with_coverage(
+    data: &CanonicalData,
+    findings: &[Finding],
+    freshness: StoreFreshness,
+    options: &DoctorOptions,
+    coverage: &ReportCoverage,
+) -> DoctorReport {
     let mut ranked = findings.to_vec();
     sort_findings(&mut ranked);
     let mut finding_counts = BTreeMap::new();
@@ -495,8 +509,8 @@ pub fn doctor(
     }
 
     DoctorReport {
-        period_start: coverage.activity_start,
-        period_end: coverage.activity_end,
+        period_start: coverage.activity_start.clone(),
+        period_end: coverage.activity_end.clone(),
         session_count: session_count(data),
         freshness,
         finding_counts,
@@ -997,6 +1011,32 @@ mod tests {
         );
         assert!(render_doctor(&report).contains("heuristic: repeated failed tool outcome"));
         assert_eq!(report.freshness.source_count, 2);
+    }
+
+    #[test]
+    fn doctor_with_coverage_uses_precomputed_coverage() {
+        let coverage = ReportCoverage {
+            scope: "selected_store".to_owned(),
+            status: "observed".to_owned(),
+            activity_start: Some("precomputed-start".to_owned()),
+            activity_end: Some("precomputed-end".to_owned()),
+            valid_activity_timestamps: 2,
+            missing_activity_timestamps: 0,
+            invalid_activity_timestamps: 0,
+            session_count: 1,
+            record_count: 2,
+        };
+
+        let report = doctor_with_coverage(
+            &CanonicalData::default(),
+            &[],
+            StoreFreshness::recorded(1, None),
+            &DoctorOptions::default(),
+            &coverage,
+        );
+
+        assert_eq!(report.period_start.as_deref(), Some("precomputed-start"));
+        assert_eq!(report.period_end.as_deref(), Some("precomputed-end"));
     }
 
     #[test]
