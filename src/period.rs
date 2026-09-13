@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -265,12 +265,17 @@ pub struct SelectedData {
     pub coverage: PeriodCoverage,
 }
 
+/// Default number of days in the implicit session-selection window.
 pub const DEFAULT_SESSION_DAYS: u64 = 30;
 
+/// Filters used when selecting sessions for a report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionSelectionOptions {
+    /// Length of the implicit window, in days.
     pub days: u64,
+    /// Include sessions discovered under `archived_sessions`.
     pub include_archived: bool,
+    /// Include sessions with a parent session.
     pub include_subagents: bool,
 }
 
@@ -284,6 +289,8 @@ impl Default for SessionSelectionOptions {
     }
 }
 
+/// Select eligible sessions whose latest observed event is in the implicit window.
+/// Returns no sessions when no valid event timestamp establishes that window.
 pub fn select_session_ids(
     data: &CanonicalData,
     options: &SessionSelectionOptions,
@@ -301,41 +308,74 @@ pub fn select_session_ids(
             .and_modify(|latest: &mut Timestamp| *latest = (*latest).max(timestamp))
             .or_insert(timestamp);
     }
-
     let Some(latest) = data
-        .sessions
+        .records
         .iter()
-        .filter(|session| session_is_eligible(session, options))
-        .filter_map(|session| latest_by_session.get(&session.id).copied())
+        .filter_map(|record| record.timestamp.as_deref().and_then(Timestamp::parse))
         .max()
     else {
         return BTreeSet::new();
     };
     let start = latest.subtract_days(options.days);
+    let eligible_ids = eligible_session_ids(data, options);
 
-    data.sessions
-        .iter()
-        .filter(|session| session_is_eligible(session, options))
-        .filter(|session| {
-            latest_by_session
-                .get(&session.id)
-                .is_some_and(|timestamp| *timestamp >= start && *timestamp <= latest)
-        })
-        .map(|session| session.id.clone())
+    latest_by_session
+        .into_iter()
+        .filter(|(_, timestamp)| *timestamp >= start && *timestamp <= latest)
+        .filter(|(session_id, _)| eligible_ids.contains(session_id.as_str()))
+        .map(|(session_id, _)| session_id.clone())
         .collect()
 }
 
+fn eligible_session_ids(
+    data: &CanonicalData,
+    options: &SessionSelectionOptions,
+) -> BTreeSet<String> {
+    let known_ids = data
+        .sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut eligible = data
+        .sessions
+        .iter()
+        .filter(|session| session_is_eligible(session, options))
+        .map(|session| session.id.clone())
+        .collect::<BTreeSet<_>>();
+    eligible.extend(data.records.iter().filter_map(|record| {
+        let session_id = record.session_id.as_ref()?;
+        if known_ids.contains(session_id.as_str())
+            || (!options.include_archived && source_is_archived(&record.provenance.path))
+        {
+            None
+        } else {
+            Some(session_id.clone())
+        }
+    }));
+    eligible
+}
+
+fn source_is_archived(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == "archived_sessions")
+}
+
+/// Return canonical data for sessions allowed by archive and sub-agent options.
+pub fn select_eligible_session_data(
+    data: &CanonicalData,
+    options: &SessionSelectionOptions,
+) -> CanonicalData {
+    data_for_sessions(data, &eligible_session_ids(data, options))
+}
+
+/// Select report data using explicit period bounds or the default session window.
 pub fn select_report_data_with_options(
     data: &CanonicalData,
     period: Option<&ReportingPeriod>,
     options: &SessionSelectionOptions,
 ) -> SelectedData {
     let selected_ids = if period.is_some() {
-        data.sessions
-            .iter()
-            .filter(|session| session_is_eligible(session, options))
-            .map(|session| session.id.clone())
-            .collect()
+        eligible_session_ids(data, options)
     } else {
         select_session_ids(data, options)
     };
@@ -1516,6 +1556,90 @@ mod tests {
                 .records
                 .iter()
                 .all(|record| record.session_id.as_deref() == Some("main-recent"))
+        );
+    }
+
+    #[test]
+    fn session_window_uses_latest_event_even_when_it_is_a_child_session() {
+        let parsed = parse_rollout_reader(
+            PathBuf::from("session-selection-boundary.jsonl").as_path(),
+            PlainJsonlReader::new(Cursor::new(
+                br#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"main-old"}}
+{"timestamp":"2026-03-15T00:00:00Z","type":"session_meta","payload":{"id":"child-latest","parent_id":"main-old"}}"#,
+            )),
+        );
+        let data = normalize_rollout(&parsed);
+
+        assert!(select_session_ids(&data, &SessionSelectionOptions::default()).is_empty());
+        assert_eq!(
+            select_session_ids(
+                &data,
+                &SessionSelectionOptions {
+                    include_subagents: true,
+                    ..SessionSelectionOptions::default()
+                },
+            )
+            .into_iter()
+            .collect::<Vec<_>>(),
+            ["child-latest"]
+        );
+    }
+
+    #[test]
+    fn session_window_requires_a_valid_event_timestamp() {
+        let parsed = parse_rollout_reader(
+            PathBuf::from("session-selection-unknown.jsonl").as_path(),
+            PlainJsonlReader::new(Cursor::new(
+                br#"{"type":"session_meta","payload":{"id":"unknown-timestamp"}}"#,
+            )),
+        );
+        let data = normalize_rollout(&parsed);
+
+        assert!(select_session_ids(&data, &SessionSelectionOptions::default()).is_empty());
+    }
+
+    #[test]
+    fn session_window_keeps_sessions_inferred_from_records() {
+        let data = CanonicalData {
+            records: vec![Record {
+                session_id: Some("inferred-session".to_owned()),
+                ..record(1, Some("2026-01-03T00:00:00Z"))
+            }],
+            ..CanonicalData::default()
+        };
+
+        assert_eq!(
+            select_session_ids(&data, &SessionSelectionOptions::default())
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["inferred-session"]
+        );
+    }
+
+    #[test]
+    fn archived_record_only_sessions_are_opt_in() {
+        let mut archived_record = Record {
+            session_id: Some("archived-inferred-session".to_owned()),
+            ..record(1, Some("2026-01-03T00:00:00Z"))
+        };
+        archived_record.provenance.path = PathBuf::from("archived_sessions/2026/session.jsonl");
+        let data = CanonicalData {
+            records: vec![archived_record],
+            ..CanonicalData::default()
+        };
+
+        assert!(select_session_ids(&data, &SessionSelectionOptions::default()).is_empty());
+        assert_eq!(
+            select_session_ids(
+                &data,
+                &SessionSelectionOptions {
+                    include_archived: true,
+                    ..SessionSelectionOptions::default()
+                },
+            )
+            .into_iter()
+            .collect::<Vec<_>>(),
+            ["archived-inferred-session"]
         );
     }
 

@@ -797,30 +797,8 @@ fn structured_input_command(payload: &Map<String, Value>) -> Option<String> {
         .and_then(structured_command_value)
 }
 
-fn explicit_command_value(value: &Value) -> Option<String> {
-    let command = match value {
-        Value::String(value) => value.clone(),
-        _ => structured_command_value(value)?,
-    };
-    let command = bounded_to(&command, MAX_TOOL_SUMMARY_BYTES);
-    (!command.trim().is_empty() && !is_wrapper_artifact(&command)).then_some(command)
-}
-
 fn result_command_value(value: &Value) -> Option<String> {
-    if let Value::Object(object) = value {
-        return [
-            "argv",
-            "cmd",
-            "command",
-            "patch",
-            "path",
-            "file_path",
-            "filename",
-        ]
-        .iter()
-        .find_map(|key| object.get(*key).and_then(result_command_value));
-    }
-    explicit_command_value(value)
+    structured_command_value(value)
 }
 
 fn valid_tool_name(value: String) -> Option<String> {
@@ -1233,7 +1211,7 @@ fn tool_call_from_payload(
             .or_else(|| payload.get("filename"))
             .and_then(input_summary_value),
         command: structured_input_command(payload)
-            .or_else(|| payload.get("command").and_then(explicit_command_value)),
+            .or_else(|| payload.get("command").and_then(structured_command_value)),
         cwd: string_field(payload, &["cwd"]),
         status: string_field(payload, &["status"]),
         provenance,
@@ -1285,13 +1263,7 @@ fn tool_result_from_payload(
         call_id: string_field(payload, &["call_id"]),
         session_id,
         turn_id,
-        command: payload
-            .get("command")
-            .or_else(|| payload.get("patch"))
-            .or_else(|| payload.get("path"))
-            .or_else(|| payload.get("file_path"))
-            .or_else(|| payload.get("filename"))
-            .and_then(result_command_value),
+        command: payload.get("command").and_then(result_command_value),
         cwd: string_field(payload, &["cwd"]),
         stdout,
         stderr,
@@ -2117,6 +2089,7 @@ mod tests {
 {"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"fixture-failed-patch-call","patch":"*** Update File: src/lib.rs\n@@\n-old\n+new\n","exit_code":1,"status":"failed"}}"#,
         );
         assert!(failed.file_operations.is_empty());
+        assert_eq!(failed.tool_results[0].command, None);
     }
 
     #[test]
