@@ -16,6 +16,11 @@ Analyze Codex sessions and turn recurring friction into actionable
 
 `codexlens` is a local, rule-based Codex harness optimizer:
 
+The product contract is [`docs/specs/product.md`](docs/specs/product.md):
+codexlens is intended to be the Codex counterpart of `cclens`, with a bounded
+health check plus the corresponding inventory, overhead, usage, waste,
+failures, stuck, prompts, query, and optimize views.
+
 ```text
 Codex local state + project instructions
         ↓
