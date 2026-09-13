@@ -135,6 +135,7 @@ struct KnownSessionsData {
     freshness: KnownFreshness,
     coverage: KnownCoverage,
     sessions: Vec<KnownSession>,
+    omitted_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -299,6 +300,29 @@ fn fixture_store() -> PathBuf {
     path
 }
 
+fn session_selection_store() -> PathBuf {
+    let path = temp_store_path("session-selection");
+    let mut store = Store::open(&path).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rollout/session-selection.jsonl");
+    store
+        .ingest_rollout_file(&fixture, &RolloutParseOptions::default())
+        .unwrap();
+    let archived_fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rollout/archived-selection.jsonl");
+    store
+        .ingest_rollout_file(&archived_fixture, &RolloutParseOptions::default())
+        .unwrap();
+    store
+        .connection()
+        .execute(
+            "UPDATE sessions SET archive_state = 1 WHERE session_id = 'archived-recent'",
+            [],
+        )
+        .unwrap();
+    path
+}
+
 fn coverage_timestamp_fallback_store() -> PathBuf {
     let path = temp_store_path("coverage-timestamp-fallback");
     let mut store = Store::open(&path).unwrap();
@@ -375,6 +399,22 @@ fn chronological_period_store() -> PathBuf {
                 "synthetic-period-session",
                 "not-a-timestamp",
                 0,
+                "response_item",
+            ],
+        )
+        .unwrap();
+    store
+        .connection()
+        .execute(
+            "INSERT INTO records (record_key, source_identity, source_path, source_line, session_id, timestamp, sequence, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                "synthetic-period-record-valid",
+                "synthetic-period-source",
+                "synthetic.jsonl",
+                4,
+                "synthetic-period-session",
+                "2026-01-03T00:30:00.123456789Z",
+                1,
                 "response_item",
             ],
         )
@@ -652,7 +692,6 @@ fn rendered_diff_store_with_content(content: &str) -> (PathBuf, PathBuf, PathBuf
     data.tool_results
         .retain(|result| result.exit_code == Some(1) && !result.is_duplicate);
     data.turns.clear();
-    data.records.clear();
     data.messages.clear();
     data.tool_calls.clear();
     data.file_operations.clear();
@@ -891,6 +930,174 @@ fn reporting_commands_render_local_store_data() {
     assert!(corrections.contains("correction="));
 
     let _ = std::fs::remove_file(store);
+}
+
+#[test]
+fn sessions_report_applies_default_window_and_subagent_opt_in() {
+    let store = session_selection_store();
+
+    let default = run_args(&["sessions"], &store);
+    assert!(default.status.success());
+    let default_stdout = String::from_utf8_lossy(&default.stdout);
+    assert!(default_stdout.contains("main-recent"));
+    assert!(!default_stdout.contains("child-recent"));
+    assert!(!default_stdout.contains("main-old"));
+    assert!(default_stdout.contains("Omitted sessions: 0"));
+
+    let with_children = run_args_with_flags(&["sessions"], &["--include-subagents"], &store);
+    assert!(with_children.status.success());
+    let with_children_stdout = String::from_utf8_lossy(&with_children.stdout);
+    assert!(with_children_stdout.contains("main-recent"));
+    assert!(with_children_stdout.contains("child-recent"));
+    assert!(!with_children_stdout.contains("archived-recent"));
+    assert!(!with_children_stdout.contains("main-old"));
+
+    let with_archived = run_args_with_flags(&["sessions"], &["--include-archived"], &store);
+    assert!(with_archived.status.success());
+    let with_archived_stdout = String::from_utf8_lossy(&with_archived.stdout);
+    assert!(with_archived_stdout.contains("main-recent"));
+    assert!(with_archived_stdout.contains("archived-recent"));
+    assert!(!with_archived_stdout.contains("child-recent"));
+
+    let with_all = run_args_with_flags(
+        &["sessions"],
+        &["--include-subagents", "--include-archived"],
+        &store,
+    );
+    assert!(with_all.status.success());
+    let with_all_stdout = String::from_utf8_lossy(&with_all.stdout);
+    assert!(with_all_stdout.contains("main-recent"));
+    assert!(with_all_stdout.contains("child-recent"));
+    assert!(with_all_stdout.contains("archived-recent"));
+
+    {
+        let store_with_older_session = Store::open(&store).unwrap();
+        store_with_older_session
+            .connection()
+            .execute(
+                "INSERT INTO sessions (session_id, source_identity, source_path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "days-only-old",
+                    "synthetic-days-source",
+                    "days.jsonl",
+                    "2026-01-10T00:00:00Z",
+                    "2026-01-10T00:00:00Z",
+                ],
+            )
+            .unwrap();
+    }
+    let with_days = run_args_with_flags(
+        &["sessions"],
+        &["--days", "7", "--include-subagents", "--include-archived"],
+        &store,
+    );
+    assert!(with_days.status.success());
+    let with_days_stdout = String::from_utf8_lossy(&with_days.stdout);
+    assert!(with_days_stdout.contains("main-recent"));
+    assert!(with_days_stdout.contains("child-recent"));
+    assert!(with_days_stdout.contains("archived-recent"));
+    assert!(!with_days_stdout.contains("days-only-old"));
+
+    {
+        let store_with_archived_session = Store::open(&store).unwrap();
+        store_with_archived_session
+            .connection()
+            .execute(
+                "INSERT INTO sessions (session_id, source_identity, source_path, created_at, updated_at, archive_state) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+                params![
+                    "archived-only-period",
+                    "synthetic-archived-period-source",
+                    "archived-period.jsonl",
+                    "2026-02-01T00:00:00Z",
+                    "2026-02-01T00:00:00Z",
+                ],
+            )
+            .unwrap();
+    }
+    let explicit_period = parse_json_report(
+        &run_args(
+            &[
+                "sessions",
+                "--format",
+                "json",
+                "--since",
+                "2026-02-01T00:00:00Z",
+                "--until",
+                "2026-02-02T00:00:00Z",
+            ],
+            &store,
+        ),
+        "sessions",
+    );
+    assert_eq!(explicit_period["data"]["coverage"]["session_count"], 0);
+    assert!(explicit_period["data"]["coverage"]["activity_start"].is_null());
+    assert!(explicit_period["data"]["coverage"]["activity_end"].is_null());
+
+    let conflicting = run_args_with_flags(
+        &["sessions", "--since", "2026-01-01T00:00:00Z"],
+        &["--days", "7"],
+        &store,
+    );
+    assert!(!conflicting.status.success());
+    assert!(
+        String::from_utf8_lossy(&conflicting.stderr)
+            .contains("--days cannot be combined with --since or --until")
+    );
+
+    let bounded_store = session_selection_store();
+    {
+        let bounded = Store::open(&bounded_store).unwrap();
+        for index in 0..51 {
+            let id = format!("bounded-{index:02}");
+            bounded
+                .connection()
+                .execute(
+                    "INSERT INTO sessions (session_id, source_identity, source_path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        id,
+                        "synthetic-bounded-source",
+                        "bounded.jsonl",
+                        "2026-01-30T00:00:00Z",
+                        "2026-01-30T00:00:00Z",
+                    ],
+                )
+                .unwrap();
+            bounded
+                .connection()
+                .execute(
+                    "INSERT INTO records (record_key, source_identity, source_path, source_line, session_id, timestamp, sequence, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        format!("bounded-record-{index:02}"),
+                        "synthetic-bounded-source",
+                        "bounded.jsonl",
+                        index + 1,
+                        id,
+                        "2026-01-30T00:00:00Z",
+                        index,
+                        "response_item",
+                    ],
+                )
+                .unwrap();
+        }
+    }
+    let bounded = run_args_with_flags(
+        &["sessions"],
+        &["--days", "1", "--include-subagents", "--include-archived"],
+        &bounded_store,
+    );
+    assert!(bounded.status.success());
+    let bounded_stdout = String::from_utf8_lossy(&bounded.stdout);
+    assert_eq!(
+        bounded_stdout
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .count(),
+        50
+    );
+    assert!(bounded_stdout.contains("Omitted sessions: 3"));
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(bounded_store);
 }
 
 #[test]
@@ -1370,7 +1577,7 @@ fn monitor_command_updates_a_local_store_and_honors_max_polls() {
 fn reporting_commands_cover_empty_and_minimal_stores() {
     for (store, expected_sessions) in [
         (empty_store(), "Sessions: 0"),
-        (minimal_store(), "Sessions: 1"),
+        (minimal_store(), "Sessions: 0"),
     ] {
         for args in REPORTING_COMMANDS {
             let output = run_args(args, &store);
@@ -2816,7 +3023,7 @@ fn unfiltered_reports_share_chronological_valid_activity_period() {
             stdout.contains(&format!("Activity: {expected_start} .. {expected_end}")),
             "{command}: {stdout}"
         );
-        assert!(stdout.contains("Activity timestamps: 2 valid, 0 missing, 1 invalid"));
+        assert!(stdout.contains("Activity timestamps: 3 valid, 0 missing, 1 invalid"));
 
         let document =
             parse_json_report(&run_args(&[command, "--format", "json"], &store), command);
@@ -3176,6 +3383,7 @@ fn json_schema_readers_cover_sessions_and_optimize_shapes() {
     assert_known_coverage(&sessions.data.coverage);
     assert!(sessions.data.coverage.session_count > 0);
     assert!(sessions.data.coverage.record_count > 0);
+    assert_eq!(sessions.data.omitted_count, 0);
     assert!(!sessions.data.sessions.is_empty());
     for session in &sessions.data.sessions {
         let _ = (
@@ -3269,7 +3477,10 @@ fn empty_json_reports_keep_nullable_fields_and_empty_arrays() {
                 assert!(data["freshness"]["latest_ingested_at"].is_null());
                 assert_eq!(data["groups"], Value::Array(Vec::new()));
             }
-            "sessions" => assert_eq!(data["sessions"], Value::Array(Vec::new())),
+            "sessions" => {
+                assert_eq!(data["sessions"], Value::Array(Vec::new()));
+                assert_eq!(data["omitted_count"], 0);
+            }
             "optimize" => {
                 assert_eq!(data["rendered"], Value::Array(Vec::new()));
                 assert_eq!(data["skipped"], Value::Array(Vec::new()));

@@ -104,7 +104,7 @@ fn synthetic_data() -> CanonicalData {
         data.records.push(Record {
             session_id: Some(format!("synthetic-session-{session}")),
             turn_id,
-            timestamp: None,
+            timestamp: (line == 1).then(|| "2026-01-01T00:00:00Z".to_owned()),
             sequence: index,
             original_record_type: Some("event_msg".to_owned()),
             original_nested_type: Some("synthetic".to_owned()),
