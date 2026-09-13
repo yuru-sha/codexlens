@@ -23,6 +23,7 @@ mod instructions;
 mod knowledge;
 mod rework;
 mod verification;
+pub mod views;
 
 pub const DEFAULT_REWORK_WINDOW_SECONDS: i64 = 10 * 60;
 pub const DEFAULT_EXCERPT_BYTES: usize = 512;

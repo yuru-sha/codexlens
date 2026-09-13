@@ -1012,7 +1012,7 @@ fn session_matches_scope(surface: &Surface, session_id: &str, sessions: &[&Sessi
         .any(|path| path.starts_with(scope_path))
 }
 
-fn tool_matches_surface(kind: SurfaceKind, tool_name: &str, surface_name: &str) -> bool {
+pub(crate) fn tool_matches_surface(kind: SurfaceKind, tool_name: &str, surface_name: &str) -> bool {
     match kind {
         SurfaceKind::Skill => {
             normalized_identifier(tool_name) == normalized_identifier(surface_name)
