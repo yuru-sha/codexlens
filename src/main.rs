@@ -170,7 +170,7 @@ impl FromStr for ScopeFilter {
                     return Err("project scope requires a path".to_owned());
                 }
                 let path = PathBuf::from(value);
-                let path = if path.is_absolute() {
+                let path = if path.is_absolute() || path.has_root() {
                     path
                 } else {
                     std::env::current_dir()

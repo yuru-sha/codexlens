@@ -610,9 +610,10 @@ fn main() {
     let started = Instant::now();
     let output = Command::new(&binary)
         .args([
-            "doctor",
+            "analyze",
             "--format",
             "json",
+            "--frozen",
             "--store",
             store_path.to_str().expect("synthetic store path is UTF-8"),
         ])
@@ -639,7 +640,7 @@ fn main() {
     }
     assert!(json.len() <= MAX_DOCTOR_JSON_BYTES);
     assert!(json.ends_with('\n'));
-    assert_reporting_target("doctor", elapsed_ms);
+    assert_reporting_target("analyze", elapsed_ms);
 
     let mut command_timings = Vec::new();
     for command in REPORTING_COMMANDS {
@@ -649,6 +650,7 @@ fn main() {
                 *command,
                 "--format",
                 "json",
+                "--frozen",
                 "--store",
                 store_path.to_str().expect("synthetic store path is UTF-8"),
             ])
@@ -679,6 +681,7 @@ fn main() {
             "--diff",
             "--format",
             "json",
+            "--frozen",
             "--store",
             store_path.to_str().expect("synthetic store path is UTF-8"),
         ])
