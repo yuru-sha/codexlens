@@ -8,13 +8,13 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use codexlens::advisor::{
-    ApplyPlan, ApplyReport, DiffBatch, DoctorOptions, ReportCoverage, doctor_with_coverage,
-    prepare_apply_proposals, proposals_for_findings, render_diffs, render_doctor_with_coverage,
-    render_doctor_with_period, render_json_diff, render_json_diff_with_period,
-    render_json_finding_report_with_coverage, render_json_finding_report_with_period,
-    render_json_sessions, render_json_sessions_with_period, render_proposal_summary,
-    render_report_metadata, render_report_metadata_with_period, report_coverage,
-    report_coverage_with_period, report_sessions,
+    ApplyPlan, ApplyReport, DEFAULT_SESSION_LIMIT, DiffBatch, DoctorOptions, ReportCoverage,
+    doctor_with_coverage, prepare_apply_proposals, proposals_for_findings, render_diffs,
+    render_doctor_with_coverage, render_doctor_with_period, render_json_diff,
+    render_json_diff_with_period, render_json_finding_report_with_coverage,
+    render_json_finding_report_with_period, render_json_sessions, render_json_sessions_with_period,
+    render_proposal_summary, render_report_metadata, render_report_metadata_with_period,
+    report_coverage, report_coverage_with_period, report_sessions_with_limit,
 };
 use codexlens::analysis::{
     Finding, analyze_default, corrections, failures, instructions, knowledge, rework, verification,
@@ -25,7 +25,10 @@ use codexlens::discovery::{
 use codexlens::instructions::InstructionCaptureOptions;
 use codexlens::model::CanonicalData;
 use codexlens::normalize::normalize_rollout;
-use codexlens::period::{PeriodCoverage, PeriodCoverageState, ReportingPeriod, select_report_data};
+use codexlens::period::{
+    DEFAULT_SESSION_DAYS, PeriodCoverage, PeriodCoverageState, ReportingPeriod,
+    SessionSelectionOptions, select_eligible_session_data, select_report_data_with_options,
+};
 use codexlens::rollout::{RolloutParseOptions, parse_rollout};
 use codexlens::state::read_state_database;
 use codexlens::store::{IngestOptions, SCHEMA_VERSION, Store, StoreFreshness};
@@ -130,6 +133,12 @@ struct StoreOptions {
     store: PathBuf,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
+    #[arg(long)]
+    include_archived: bool,
+    #[arg(long)]
+    include_subagents: bool,
+    #[arg(long, value_name = "DAYS")]
+    days: Option<u64>,
     #[arg(
         long,
         help = "Read exactly this derived store without refreshing raw inputs"
@@ -928,13 +937,14 @@ fn load_reporting(
 ) -> Result<(CanonicalData, StoreFreshness, Option<ReportingSelection>)> {
     let period = ReportingPeriod::from_bounds(options.since.as_deref(), options.until.as_deref())
         .map_err(anyhow::Error::new)?;
+    let selection_options = session_selection_options(options)?;
     let (data, freshness) = load_store(options)?;
+    let selected = select_report_data_with_options(&data, period.as_ref(), &selection_options);
     let Some(period) = period else {
-        return Ok((data, freshness, None));
+        return Ok((selected.data, freshness, None));
     };
-    // Inspect source timestamps before boundary projection turns intentional trims into None.
-    let mut report_coverage = report_coverage_with_period(&data, &period);
-    let selected = select_report_data(&data, Some(&period));
+    let eligible_data = select_eligible_session_data(&data, &selection_options);
+    let mut report_coverage = report_coverage_with_period(&eligible_data, &period);
     report_coverage.session_count = selected.coverage.included_sessions;
     report_coverage.record_count = selected.coverage.included_records;
     report_coverage.status = match selected.coverage.state {
@@ -951,6 +961,17 @@ fn load_reporting(
             report_coverage,
         }),
     ))
+}
+
+fn session_selection_options(options: &StoreOptions) -> Result<SessionSelectionOptions> {
+    if options.days.is_some() && (options.since.is_some() || options.until.is_some()) {
+        bail!("--days cannot be combined with --since or --until");
+    }
+    Ok(SessionSelectionOptions {
+        days: options.days.unwrap_or(DEFAULT_SESSION_DAYS),
+        include_archived: options.include_archived,
+        include_subagents: options.include_subagents,
+    })
 }
 
 fn load_store(options: &StoreOptions) -> Result<(CanonicalData, StoreFreshness)> {
@@ -1102,7 +1123,8 @@ fn render_sessions_with_period(
 }
 
 fn append_sessions(output: &mut String, data: &CanonicalData) {
-    for session in report_sessions(data) {
+    let (sessions, omitted_count) = report_sessions_with_limit(data, DEFAULT_SESSION_LIMIT);
+    for session in sessions {
         output.push_str("- ");
         output.push_str(&session.id);
         output.push('\n');
@@ -1119,11 +1141,12 @@ fn append_sessions(output: &mut String, data: &CanonicalData) {
         output.push_str(session.project.as_deref().unwrap_or("unknown"));
         output.push('\n');
     }
+    output.push_str(&format!("Omitted sessions: {omitted_count}\n"));
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, OutputFormat};
+    use super::{Cli, Command, OutputFormat, session_selection_options};
     use clap::Parser;
 
     #[test]
@@ -1179,6 +1202,40 @@ mod tests {
             Cli::try_parse_from(args).unwrap();
         }
         Cli::try_parse_from(["codexlens", "doctor", "--frozen"]).unwrap();
+    }
+
+    #[test]
+    fn reporting_commands_accept_session_selection_options() {
+        let Command::Sessions { store } = Cli::try_parse_from([
+            "codexlens",
+            "sessions",
+            "--include-archived",
+            "--include-subagents",
+            "--days",
+            "7",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected sessions command");
+        };
+        assert!(store.include_archived);
+        assert!(store.include_subagents);
+        assert_eq!(store.days, Some(7));
+        let Command::Sessions { store } = Cli::try_parse_from([
+            "codexlens",
+            "sessions",
+            "--days",
+            "7",
+            "--since",
+            "2026-01-01T00:00:00Z",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected sessions command");
+        };
+        assert!(session_selection_options(&store).is_err());
     }
 
     #[test]
