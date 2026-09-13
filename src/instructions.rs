@@ -38,6 +38,10 @@ impl InstructionCaptureOptions {
         resolver.config_diagnostics = self.config_diagnostics.clone();
         resolver
     }
+
+    pub fn codex_home(&self) -> Option<&Path> {
+        self.codex_home.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -635,6 +635,114 @@ pub struct InstructionJoin {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SurfaceKind {
+    Instruction,
+    Rule,
+    Skill,
+    Config,
+    McpServer,
+    Plugin,
+    Hook,
+}
+
+impl SurfaceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Instruction => "instruction",
+            Self::Rule => "rule",
+            Self::Skill => "skill",
+            Self::Config => "config",
+            Self::McpServer => "mcp_server",
+            Self::Plugin => "plugin",
+            Self::Hook => "hook",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SurfaceScope {
+    Global,
+    Project(PathBuf),
+    Nested(PathBuf),
+}
+
+impl SurfaceScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Project(_) => "project",
+            Self::Nested(_) => "nested",
+        }
+    }
+
+    pub fn path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Global => None,
+            Self::Project(path) | Self::Nested(path) => Some(path),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SurfaceLoadMode {
+    StartupFull,
+    StartupDescription,
+    PathConditional,
+    OnDemand,
+    ToolSchema,
+    Unknown,
+}
+
+impl SurfaceLoadMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StartupFull => "startup_full",
+            Self::StartupDescription => "startup_description",
+            Self::PathConditional => "path_conditional",
+            Self::OnDemand => "on_demand",
+            Self::ToolSchema => "tool_schema",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SurfaceUsageState {
+    Unused,
+    Rare,
+    Used,
+    Unknown,
+}
+
+impl SurfaceUsageState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unused => "unused",
+            Self::Rare => "rare",
+            Self::Used => "used",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Surface {
+    pub id: String,
+    pub kind: SurfaceKind,
+    pub name: String,
+    pub path: Option<PathBuf>,
+    pub scope: SurfaceScope,
+    pub enabled: Option<bool>,
+    pub load_mode: SurfaceLoadMode,
+    pub static_bytes: Option<usize>,
+    pub startup_bytes: Option<usize>,
+    pub observed_uses: usize,
+    pub observed_sessions: usize,
+    pub usage_state: SurfaceUsageState,
+    pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiagnosticKind {
     MalformedJson,
     OversizedLine,
@@ -679,4 +787,6 @@ pub struct CanonicalData {
     pub diagnostics: Vec<CanonicalDiagnostic>,
     pub instruction_snapshots: Vec<InstructionSnapshot>,
     pub instruction_joins: Vec<InstructionJoin>,
+    #[serde(default)]
+    pub surfaces: Vec<Surface>,
 }

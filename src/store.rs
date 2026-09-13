@@ -8,6 +8,7 @@ use anyhow::{Result, bail};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Statement, Transaction, params};
 use serde::{Deserialize, Serialize};
 
+use crate::config::{SurfaceInventoryOptions, discover_surfaces};
 use crate::discovery::{DiscoveredInput, InputKind, ReaderKind, codex_home_for_source};
 use crate::instructions::{
     InstructionCaptureOptions, InstructionResolver, join_sessions, snapshot_entries,
@@ -18,8 +19,9 @@ use crate::model::{
     InstructionDiagnostic, InstructionFile, InstructionFileKind, InstructionFileState,
     InstructionJoin, InstructionScope, InstructionSnapshot, InstructionSnapshotAccuracy,
     InstructionSnapshotEntry, InstructionSnapshotSource, Message, MessageRole, OutcomeSource,
-    ProjectRootStatus, Record, RecordKind, Session, SourceKind, SourceRef, TokenUsage, ToolCall,
-    ToolOutcome, ToolResult, Turn, TurnLifecycleEvent,
+    ProjectRootStatus, Record, RecordKind, Session, SourceKind, SourceRef, Surface, SurfaceKind,
+    SurfaceLoadMode, SurfaceScope, SurfaceUsageState, TokenUsage, ToolCall, ToolOutcome,
+    ToolResult, Turn, TurnLifecycleEvent,
 };
 use crate::normalize::{normalize_rollout, normalize_rollout_with_instructions};
 use crate::rollout::{
@@ -29,7 +31,7 @@ use crate::state::{
     StateDiagnostic, StateDiagnosticKind, StateReadResult, merge_state_results, read_state_database,
 };
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 const REPORTING_TABLES: &[&str] = &[
     "schema_versions",
@@ -47,6 +49,7 @@ const REPORTING_TABLES: &[&str] = &[
     "instruction_snapshots",
     "instruction_files",
     "instruction_joins",
+    "surfaces",
 ];
 
 const STATE_STORAGE_STANDALONE: &str = "standalone";
@@ -283,7 +286,8 @@ impl Store {
         inputs: &[DiscoveredInput],
         options: &IngestOptions,
     ) -> Result<IngestReport> {
-        self.ingest_inputs_with_resolver(inputs, options, &resolver_for_inputs(inputs))
+        let capture = capture_options_for_inputs(inputs);
+        self.ingest_inputs_with_instructions(inputs, options, &capture)
     }
 
     pub fn ingest_inputs_with_instructions(
@@ -293,7 +297,38 @@ impl Store {
         capture: &InstructionCaptureOptions,
     ) -> Result<IngestReport> {
         let resolver = capture.resolver();
-        self.ingest_inputs_with_resolver(inputs, options, &resolver)
+        let report = self.ingest_inputs_with_resolver(inputs, options, &resolver)?;
+        if let Some(codex_home) = capture.codex_home() {
+            let data = self.load_canonical()?;
+            let usage_evidence_complete = data.diagnostics.is_empty()
+                && !data
+                    .records
+                    .iter()
+                    .any(|record| matches!(record.kind, RecordKind::Unknown { .. }));
+            let surfaces = discover_surfaces(
+                codex_home,
+                &data,
+                &SurfaceInventoryOptions {
+                    usage_evidence_complete,
+                    ..SurfaceInventoryOptions::default()
+                },
+            );
+            self.replace_surfaces(&surfaces)?;
+        }
+        Ok(report)
+    }
+
+    pub fn replace_surfaces(&mut self, surfaces: &[Surface]) -> Result<()> {
+        if load_surfaces(&self.connection)? == surfaces {
+            return Ok(());
+        }
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM surfaces", [])?;
+        for surface in surfaces {
+            insert_surface(&transaction, surface)?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     fn ingest_inputs_with_resolver(
@@ -832,6 +867,7 @@ fn load_canonical(connection: &Connection) -> Result<CanonicalData> {
         file_operations: load_file_operations(connection)?,
         token_usage: load_token_usage(connection)?,
         diagnostics: load_diagnostics(connection)?,
+        surfaces: load_surfaces(connection)?,
         ..CanonicalData::default()
     };
 
@@ -1079,6 +1115,40 @@ fn load_diagnostics(connection: &Connection) -> Result<Vec<CanonicalDiagnostic>>
     })?)
 }
 
+fn load_surfaces(connection: &Connection) -> Result<Vec<Surface>> {
+    let mut statement = connection.prepare(
+        "SELECT surface_id, kind, name, path, scope, scope_path, enabled, load_mode,
+                static_bytes, startup_bytes, observed_uses, observed_sessions, usage_state,
+                limitations_json
+         FROM surfaces ORDER BY kind, scope, scope_path, name, path, surface_id",
+    )?;
+    Ok(load_rows(&mut statement, |row| {
+        let limitations =
+            serde_json::from_str::<Vec<String>>(&row.get::<_, String>(13)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    13,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+        Ok(Surface {
+            id: row.get(0)?,
+            kind: surface_kind_from_db(&row.get::<_, String>(1)?),
+            name: row.get(2)?,
+            path: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
+            scope: surface_scope_from_db(&row.get::<_, String>(4)?, row.get(5)?),
+            enabled: row.get::<_, Option<i64>>(6)?.map(|value| value != 0),
+            load_mode: surface_load_mode_from_db(&row.get::<_, String>(7)?),
+            static_bytes: optional_usize_from_i64(row.get(8)?, "surface static bytes")?,
+            startup_bytes: optional_usize_from_i64(row.get(9)?, "surface startup bytes")?,
+            observed_uses: usize_from_i64(row.get(10)?, "surface observed uses")?,
+            observed_sessions: usize_from_i64(row.get(11)?, "surface observed sessions")?,
+            usage_state: surface_usage_state_from_db(&row.get::<_, String>(12)?),
+            limitations,
+        })
+    })?)
+}
+
 fn load_rows<T, F>(statement: &mut Statement<'_>, mapper: F) -> rusqlite::Result<Vec<T>>
 where
     F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
@@ -1117,6 +1187,10 @@ fn usize_from_i64(value: i64, field: &str) -> rusqlite::Result<usize> {
             )),
         )
     })
+}
+
+fn optional_usize_from_i64(value: Option<i64>, field: &str) -> rusqlite::Result<Option<usize>> {
+    value.map(|value| usize_from_i64(value, field)).transpose()
 }
 
 fn source_kind_from_db(value: &str) -> SourceKind {
@@ -1182,6 +1256,46 @@ fn diagnostic_kind_from_db(value: &str) -> DiagnosticKind {
         "state_query" => DiagnosticKind::StateQuery,
         "metadata_conflict" => DiagnosticKind::MetadataConflict,
         _ => DiagnosticKind::UnsupportedReader,
+    }
+}
+
+fn surface_kind_from_db(value: &str) -> SurfaceKind {
+    match value {
+        "instruction" => SurfaceKind::Instruction,
+        "rule" => SurfaceKind::Rule,
+        "skill" => SurfaceKind::Skill,
+        "config" => SurfaceKind::Config,
+        "mcp_server" => SurfaceKind::McpServer,
+        "plugin" => SurfaceKind::Plugin,
+        _ => SurfaceKind::Hook,
+    }
+}
+
+fn surface_scope_from_db(value: &str, path: Option<String>) -> SurfaceScope {
+    match value {
+        "project" => SurfaceScope::Project(PathBuf::from(path.unwrap_or_default())),
+        "nested" => SurfaceScope::Nested(PathBuf::from(path.unwrap_or_default())),
+        _ => SurfaceScope::Global,
+    }
+}
+
+fn surface_load_mode_from_db(value: &str) -> SurfaceLoadMode {
+    match value {
+        "startup_full" => SurfaceLoadMode::StartupFull,
+        "startup_description" => SurfaceLoadMode::StartupDescription,
+        "path_conditional" => SurfaceLoadMode::PathConditional,
+        "on_demand" => SurfaceLoadMode::OnDemand,
+        "tool_schema" => SurfaceLoadMode::ToolSchema,
+        _ => SurfaceLoadMode::Unknown,
+    }
+}
+
+fn surface_usage_state_from_db(value: &str) -> SurfaceUsageState {
+    match value {
+        "unused" => SurfaceUsageState::Unused,
+        "rare" => SurfaceUsageState::Rare,
+        "used" => SurfaceUsageState::Used,
+        _ => SurfaceUsageState::Unknown,
     }
 }
 
@@ -1727,6 +1841,30 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         )?;
         transaction.execute_batch("PRAGMA user_version = 6;")?;
     }
+    if current < 7 {
+        transaction.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS surfaces (
+                surface_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT,
+                scope TEXT NOT NULL,
+                scope_path TEXT,
+                enabled INTEGER,
+                load_mode TEXT NOT NULL,
+                static_bytes INTEGER,
+                startup_bytes INTEGER,
+                observed_uses INTEGER NOT NULL,
+                observed_sessions INTEGER NOT NULL,
+                usage_state TEXT NOT NULL,
+                limitations_json TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO schema_versions (version) VALUES (7);
+            PRAGMA user_version = 7;
+            "#,
+        )?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -2052,6 +2190,40 @@ fn insert_data(
     for join in &data.instruction_joins {
         insert_instruction_join(transaction, identity, join)?;
     }
+    for surface in &data.surfaces {
+        insert_surface(transaction, surface)?;
+    }
+    Ok(())
+}
+
+fn insert_surface(transaction: &Transaction<'_>, surface: &Surface) -> Result<()> {
+    let (scope, scope_path) = match &surface.scope {
+        SurfaceScope::Global => (surface.scope.as_str(), None),
+        SurfaceScope::Project(path) | SurfaceScope::Nested(path) => (
+            surface.scope.as_str(),
+            Some(path.to_string_lossy().into_owned()),
+        ),
+    };
+    let limitations = serde_json::to_string(&surface.limitations)?;
+    transaction.execute(
+        "INSERT OR REPLACE INTO surfaces (surface_id, kind, name, path, scope, scope_path, enabled, load_mode, static_bytes, startup_bytes, observed_uses, observed_sessions, usage_state, limitations_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            surface.id,
+            surface.kind.as_str(),
+            surface.name,
+            surface.path.as_ref().map(|path| path.to_string_lossy().into_owned()),
+            scope,
+            scope_path,
+            surface.enabled.map(i64::from),
+            surface.load_mode.as_str(),
+            db_usize(surface.static_bytes),
+            db_usize(surface.startup_bytes),
+            db_usize(Some(surface.observed_uses)),
+            db_usize(Some(surface.observed_sessions)),
+            surface.usage_state.as_str(),
+            limitations,
+        ],
+    )?;
     Ok(())
 }
 
@@ -2613,6 +2785,10 @@ fn db_u64(value: Option<u64>) -> Option<i64> {
     value.and_then(|value| i64::try_from(value).ok())
 }
 
+fn db_usize(value: Option<usize>) -> Option<i64> {
+    value.and_then(|value| i64::try_from(value).ok())
+}
+
 fn capture_options_for_inputs(inputs: &[DiscoveredInput]) -> InstructionCaptureOptions {
     inputs
         .iter()
@@ -2628,10 +2804,6 @@ pub(crate) fn resolver_for_source(path: &Path) -> InstructionResolver {
             InstructionCaptureOptions::from_codex_home(&codex_home, None).0
         })
         .resolver()
-}
-
-fn resolver_for_inputs(inputs: &[DiscoveredInput]) -> InstructionResolver {
-    capture_options_for_inputs(inputs).resolver()
 }
 
 fn canonical_identity(path: &Path) -> Result<PathBuf> {
@@ -2737,6 +2909,7 @@ mod tests {
             "instruction_snapshots",
             "instruction_files",
             "instruction_joins",
+            "surfaces",
         ] {
             assert_eq!(
                 store
@@ -2759,6 +2932,117 @@ mod tests {
                 .unwrap(),
             SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn surface_inventory_round_trips_without_raw_configuration_values() {
+        let mut store = Store::in_memory().unwrap();
+        let surface = Surface {
+            id: "fixture-surface".to_owned(),
+            kind: SurfaceKind::McpServer,
+            name: "docs".to_owned(),
+            path: Some(PathBuf::from("/fixture/codex/config.toml")),
+            scope: SurfaceScope::Global,
+            enabled: Some(true),
+            load_mode: SurfaceLoadMode::ToolSchema,
+            static_bytes: None,
+            startup_bytes: None,
+            observed_uses: 1,
+            observed_sessions: 1,
+            usage_state: SurfaceUsageState::Rare,
+            limitations: vec!["schema unavailable".to_owned()],
+        };
+        store
+            .replace_surfaces(std::slice::from_ref(&surface))
+            .unwrap();
+
+        let loaded = store.load_canonical().unwrap();
+        assert_eq!(loaded.surfaces, vec![surface]);
+        let stored_columns: String = store
+            .connection()
+            .query_row(
+                "SELECT name || ':' || kind || ':' || usage_state || ':' || limitations_json FROM surfaces",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_columns,
+            "docs:mcp_server:rare:[\"schema unavailable\"]"
+        );
+    }
+
+    #[test]
+    fn input_refresh_replaces_surface_inventory_from_current_codex_home() {
+        let root = temp_path("surface-refresh");
+        let home = root.join("codex");
+        let project = root.join("project");
+        let source = home.join("sessions/2026/fixture.jsonl");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(home.join("skills/check")).unwrap();
+        fs::write(
+            home.join("config.toml"),
+            "[mcp_servers.docs]\nenabled = true\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join("skills/check/SKILL.md"),
+            "---\ndescription: check\n---\nRun checks",
+        )
+        .unwrap();
+        fs::write(
+            &source,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "fixture-surface-session",
+                        "cwd": project.to_string_lossy(),
+                        "project": project.to_string_lossy(),
+                    },
+                }),
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "mcp_tool_call",
+                        "name": "mcp__docs__search",
+                    },
+                }),
+            ),
+        )
+        .unwrap();
+
+        let input = DiscoveredInput {
+            path: source.clone(),
+            identity: fs::canonicalize(&source).unwrap(),
+            kind: InputKind::Rollout { archived: false },
+            reader: Some(ReaderKind::PlainJsonl),
+        };
+        let (capture, _) = InstructionCaptureOptions::from_codex_home(&home, None);
+        let mut store = Store::in_memory().unwrap();
+        store
+            .ingest_inputs_with_instructions(&[input], &IngestOptions::default(), &capture)
+            .unwrap();
+
+        let loaded = store.load_canonical().unwrap();
+        let mcp = loaded
+            .surfaces
+            .iter()
+            .find(|surface| surface.kind == SurfaceKind::McpServer)
+            .unwrap();
+        assert_eq!(mcp.name, "docs");
+        assert_eq!(mcp.observed_uses, 1);
+        assert_eq!(mcp.usage_state, SurfaceUsageState::Rare);
+        assert!(
+            loaded
+                .surfaces
+                .iter()
+                .any(|surface| surface.kind == SurfaceKind::Skill && surface.name == "check")
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
