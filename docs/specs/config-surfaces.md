@@ -12,6 +12,7 @@ Given `CODEX_HOME`, inspect only these roots:
 | global config | `$CODEX_HOME/config.toml` | global |
 | global instructions | `$CODEX_HOME/AGENTS.md`, `$CODEX_HOME/AGENTS.override.md` | global |
 | global rules | `$CODEX_HOME/rules/**/*.rules` | global |
+| project rules | `<project>/rules/**/*.rules`, `<project>/.codex/rules/**/*.rules` | project |
 | global skills | `$CODEX_HOME/skills/<name>/SKILL.md` | global |
 | project instructions | project root and ancestors: `AGENTS.md`, `AGENTS.override.md` | project/nested |
 | project skills | `<project>/.agents/skills/<name>/SKILL.md`, `<project>/.codex/skills/<name>/SKILL.md` | project |
