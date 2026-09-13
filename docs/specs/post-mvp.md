@@ -213,8 +213,10 @@ The top-level JSON contract is versioned and uses stable snake-case fields:
   `summary`, `evidence`, `occurrences`, `distinct_sessions`,
   `affected_paths`, `observed_commands`, `sequence`, `suggested_action`,
   `limitations`, and `verification_status`, plus `heuristic`.
-- `sessions` uses `{freshness, sessions}` with optional additive `coverage`,
-  where each session is `{id, created_at, updated_at, cwd, project}`.
+- `sessions` uses `{freshness, sessions, omitted_count}` with optional additive
+  `coverage`, where `omitted_count` is the number of selected rows beyond the
+  default 50-row bound and each session is
+  `{id, created_at, updated_at, cwd, project}`.
 - `optimize --diff` uses `{rendered, skipped}`, where `rendered` contains the
   typed proposal and unified `diff`, and `skipped` contains
   `{target_path, reason, proposal}`. `proposal` is the typed proposal when a
@@ -276,8 +278,9 @@ types named by their fields, and each array is present even when empty. Each
 `heuristic` and `diff` are required strings. The wrapper's `rendered` and
 `skipped` arrays are present even when empty.
 
-The `sessions` data object is `{freshness: Freshness, optional coverage:
-Coverage, sessions: Session[]}`;
+The `sessions` data object is
+`{freshness: Freshness, optional coverage: Coverage, sessions: Session[],
+omitted_count: non-negative integer}`;
 `Session` is `{id: string, created_at: string | null, updated_at: string | null,
 cwd: string | null, project: string | null}`. A `RenderedDiff` is
 `{proposal: Proposal, diff: string}`. A `Proposal` has required
@@ -383,8 +386,9 @@ The blank line and repeated evidence/limitation lines are omitted when their
 containing group or list is empty. Groups use global, project, instruction,
 then path order; findings use the existing deterministic order (severity,
 confidence, distinct sessions, normalized key, occurrences, kind/key, then
-scope). `sessions` uses `Store freshness`, `Sessions`, then one `- id` block
-with `created`, `updated`, `cwd`, and `project` lines. `optimize --diff` writes
+scope). `sessions` uses `Store freshness`, `Sessions`, one `- id` block with
+`created`, `updated`, `cwd`, and `project` lines, then `Omitted sessions`.
+`optimize --diff` writes
 each `Proposal ...` summary and unified diff to stdout and each `Skipped ...`
 line to stderr. The existing [`analysis.md`](analysis.md) and README command
 table remain authoritative for the current command list and examples.

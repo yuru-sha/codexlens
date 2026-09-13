@@ -416,11 +416,7 @@ fn verification_event_for_call(
     call: &ToolCall,
 ) -> Option<VerificationEvent> {
     let session_id = call.session_id.clone()?;
-    let command = call
-        .command
-        .as_deref()
-        .or(call.input_summary.as_deref())
-        .unwrap_or_default();
+    let command = call.command.as_deref().unwrap_or_default();
     let kind = classify_command(command)?;
     Some(VerificationEvent {
         session_id,

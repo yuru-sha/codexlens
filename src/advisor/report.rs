@@ -20,6 +20,8 @@ use super::proposal::{
 };
 
 const DEFAULT_REPORT_EXCERPT_BYTES: usize = 256;
+/// Default maximum number of session rows rendered by a report.
+pub const DEFAULT_SESSION_LIMIT: usize = 50;
 // ponytail: cap machine diffs at 16 KiB; add a streamed artifact only when consumers need full patches.
 const MAX_JSON_DIFF_BYTES: usize = 16 * 1024;
 
@@ -150,12 +152,13 @@ pub fn render_json_sessions(
     freshness: &StoreFreshness,
 ) -> Result<String, serde_json::Error> {
     let coverage = report_coverage(data);
+    let (sessions, omitted_count) = report_sessions_with_limit(data, DEFAULT_SESSION_LIMIT);
     json_document(
         "sessions",
         serde_json::json!({
             "freshness": freshness_json(freshness),
             "coverage": coverage_json(&coverage),
-            "sessions": report_sessions(data).into_iter().map(|session| {
+            "sessions": sessions.into_iter().map(|session| {
                 serde_json::json!({
                     "id": session.id,
                     "created_at": session.created_at,
@@ -164,6 +167,7 @@ pub fn render_json_sessions(
                     "project": session.project,
                 })
             }).collect::<Vec<_>>(),
+            "omitted_count": omitted_count,
         }),
     )
 }
@@ -174,12 +178,13 @@ pub fn render_json_sessions_with_period(
     coverage: &ReportCoverage,
     period: &PeriodCoverage,
 ) -> Result<String, serde_json::Error> {
+    let (sessions, omitted_count) = report_sessions_with_limit(data, DEFAULT_SESSION_LIMIT);
     json_document(
         "sessions",
         serde_json::json!({
             "freshness": freshness_json(freshness),
             "coverage": coverage_json_with_period(coverage, period),
-            "sessions": report_sessions(data).into_iter().map(|session| {
+            "sessions": sessions.into_iter().map(|session| {
                 serde_json::json!({
                     "id": session.id,
                     "created_at": session.created_at,
@@ -188,6 +193,7 @@ pub fn render_json_sessions_with_period(
                     "project": session.project,
                 })
             }).collect::<Vec<_>>(),
+            "omitted_count": omitted_count,
         }),
     )
 }
@@ -545,6 +551,16 @@ pub fn report_sessions(data: &CanonicalData) -> Vec<SessionSummary> {
             });
     }
     summaries.into_values().collect()
+}
+
+/// Return bounded session summaries and the number omitted by the bound.
+pub fn report_sessions_with_limit(
+    data: &CanonicalData,
+    limit: usize,
+) -> (Vec<SessionSummary>, usize) {
+    let summaries = report_sessions(data);
+    let omitted_count = summaries.len().saturating_sub(limit);
+    (summaries.into_iter().take(limit).collect(), omitted_count)
 }
 
 pub fn report_coverage(data: &CanonicalData) -> ReportCoverage {
@@ -1145,6 +1161,30 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, "session-a");
         assert!(summaries[0].created_at.is_none());
+
+        let bounded = CanonicalData {
+            records: (0..51)
+                .map(|index| {
+                    record_with_timestamp(
+                        &format!("session-{index:02}"),
+                        Some("2026-01-01T00:00:00Z"),
+                    )
+                })
+                .collect(),
+            ..CanonicalData::default()
+        };
+        let (sessions, omitted_count) = report_sessions_with_limit(&bounded, DEFAULT_SESSION_LIMIT);
+        assert_eq!(sessions.len(), DEFAULT_SESSION_LIMIT);
+        assert_eq!(omitted_count, 1);
+        let document: serde_json::Value = serde_json::from_str(
+            &render_json_sessions(&bounded, &StoreFreshness::recorded(51, None)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            document["data"]["sessions"].as_array().unwrap().len(),
+            DEFAULT_SESSION_LIMIT
+        );
+        assert_eq!(document["data"]["omitted_count"], 1);
     }
 
     #[test]
