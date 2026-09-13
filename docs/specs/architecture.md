@@ -1,5 +1,9 @@
 # Architecture specification
 
+The product-level contract is defined in [`product.md`](product.md). This
+document describes the internal data flow for that contract; it does not
+replace the cclens-compatible command and reporting requirements there.
+
 Status: current architecture for the `codexlens` MVP.
 
 ## 1. Product boundary
