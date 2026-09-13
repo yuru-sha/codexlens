@@ -296,6 +296,16 @@ impl Store {
         options: &IngestOptions,
         capture: &InstructionCaptureOptions,
     ) -> Result<IngestReport> {
+        self.ingest_inputs_with_instructions_and_subagents(inputs, options, capture, false)
+    }
+
+    pub fn ingest_inputs_with_instructions_and_subagents(
+        &mut self,
+        inputs: &[DiscoveredInput],
+        options: &IngestOptions,
+        capture: &InstructionCaptureOptions,
+        include_subagents: bool,
+    ) -> Result<IngestReport> {
         let resolver = capture.resolver();
         let report = self.ingest_inputs_with_resolver(inputs, options, &resolver)?;
         if let Some(codex_home) = capture.codex_home() {
@@ -309,8 +319,8 @@ impl Store {
                 codex_home,
                 &data,
                 &SurfaceInventoryOptions {
+                    include_subagents,
                     usage_evidence_complete,
-                    ..SurfaceInventoryOptions::default()
                 },
             );
             self.replace_surfaces(&surfaces)?;

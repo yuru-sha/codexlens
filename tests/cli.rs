@@ -9,7 +9,7 @@ use codexlens::advisor::DoctorReport;
 use codexlens::discovery::{DiscoveredInput, InputKind, ReaderKind};
 use codexlens::model::{
     DiagnosticKind, InstructionFile, InstructionFileKind, InstructionFileState, InstructionScope,
-    ProjectRootStatus,
+    ProjectRootStatus, Surface, SurfaceKind, SurfaceLoadMode, SurfaceScope, SurfaceUsageState,
 };
 use codexlens::rollout::RolloutParseOptions;
 use codexlens::store::{IngestInputKind, IngestOptions, SCHEMA_VERSION, Store};
@@ -132,9 +132,7 @@ struct KnownSession {
 
 #[derive(Debug, Deserialize)]
 struct KnownSessionsData {
-    freshness: KnownFreshness,
-    coverage: KnownCoverage,
-    sessions: Vec<KnownSession>,
+    rows: Vec<KnownSession>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -299,6 +297,46 @@ fn fixture_store() -> PathBuf {
     path
 }
 
+fn typed_view_store() -> PathBuf {
+    let path = fixture_store();
+    let mut store = Store::open(&path).unwrap();
+    store
+        .replace_surfaces(&[
+            Surface {
+                id: "global-unused-config".to_owned(),
+                kind: SurfaceKind::Config,
+                name: "global-config".to_owned(),
+                path: Some(PathBuf::from("/synthetic/codex/config.toml")),
+                scope: SurfaceScope::Global,
+                enabled: Some(true),
+                load_mode: SurfaceLoadMode::StartupFull,
+                static_bytes: Some(9000),
+                startup_bytes: Some(9000),
+                observed_uses: 0,
+                observed_sessions: 0,
+                usage_state: SurfaceUsageState::Unused,
+                limitations: Vec::new(),
+            },
+            Surface {
+                id: "project-used-instruction".to_owned(),
+                kind: SurfaceKind::Instruction,
+                name: "AGENTS.md".to_owned(),
+                path: Some(PathBuf::from("/fixture/project/AGENTS.md")),
+                scope: SurfaceScope::Project(PathBuf::from("/fixture/project")),
+                enabled: Some(true),
+                load_mode: SurfaceLoadMode::StartupFull,
+                static_bytes: Some(128),
+                startup_bytes: Some(128),
+                observed_uses: 4,
+                observed_sessions: 2,
+                usage_state: SurfaceUsageState::Used,
+                limitations: Vec::new(),
+            },
+        ])
+        .unwrap();
+    path
+}
+
 fn coverage_timestamp_fallback_store() -> PathBuf {
     let path = temp_store_path("coverage-timestamp-fallback");
     let mut store = Store::open(&path).unwrap();
@@ -387,11 +425,13 @@ fn run_args(args: &[&str], store: &Path) -> Output {
 }
 
 fn run_args_with_flags(args: &[&str], flags: &[&str], store: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_codexlens"))
-        .args(args)
-        .args(flags)
-        .arg("--store")
-        .arg(store)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codexlens"));
+    command.args(args).args(flags);
+    if !args.contains(&"--frozen") && !flags.contains(&"--frozen") {
+        command.arg("--frozen");
+    }
+    command
+        .args(["--store", store.to_str().unwrap()])
         .stdin(Stdio::null())
         .output()
         .unwrap()
@@ -485,12 +525,10 @@ fn assert_finding_report(
 }
 
 fn assert_doctor_report(stdout: &str) {
-    assert!(
-        stdout.contains("Analyzed period: 2026-01-03T00:00:00.000Z .. 2026-01-04T00:05:00.000Z")
-    );
-    assert!(stdout.contains("Sessions: 2"));
-    assert!(stdout.contains("Finding counts:"));
-    assert!(stdout.contains("  heuristic: "));
+    assert!(stdout.starts_with("WHAT TO FIX FIRST"));
+    assert!(stdout.contains("Scope: global + projects"));
+    assert!(stdout.contains("Coverage: partial (2 sessions)"));
+    assert!(stdout.contains("COST"));
     assert!(stdout.contains("  action: "));
     assert!(stdout.contains("  evidence: "));
     let evidence_lines: Vec<_> = stdout
@@ -534,105 +572,6 @@ fn parse_json_report(output: &Output, command: &str) -> Value {
     assert_eq!(document["command"], command);
     assert!(document["data"].is_object());
     document
-}
-
-fn human_finding_counts(stdout: &str) -> BTreeMap<String, usize> {
-    let Some(value) = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("Finding counts: "))
-    else {
-        panic!("human report has no finding counts: {stdout}");
-    };
-    if value == "none" {
-        return BTreeMap::new();
-    }
-    value
-        .split(", ")
-        .map(|entry| {
-            let (kind, count) = entry.split_once('=').unwrap();
-            (kind.to_owned(), count.parse().unwrap())
-        })
-        .collect()
-}
-
-fn human_finding_order(stdout: &str) -> Vec<String> {
-    let mut scope = String::new();
-    let mut findings = Vec::new();
-    for line in stdout.lines() {
-        if line.starts_with('[') {
-            scope = line.to_owned();
-        } else if let Some(finding) = line.strip_prefix("- ") {
-            let classification = finding.split_once(':').unwrap().0;
-            findings.push(format!("{scope}|{classification}"));
-        }
-    }
-    findings
-}
-
-fn human_evidence_refs(stdout: &str) -> Vec<String> {
-    stdout
-        .lines()
-        .filter_map(|line| line.strip_prefix("  evidence: "))
-        .map(|value| value.split_once(" — ").map_or(value, |(source, _)| source))
-        .map(str::to_owned)
-        .collect()
-}
-
-fn json_scope_label(scope: &Value) -> String {
-    let kind = scope["kind"].as_str().unwrap();
-    match scope.get("value").and_then(Value::as_str) {
-        Some(value) => format!("[{kind}:{value}]"),
-        None => format!("[{kind}]"),
-    }
-}
-
-fn json_finding_counts(document: &Value) -> BTreeMap<String, usize> {
-    document["data"]["finding_counts"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(kind, count)| (kind.clone(), count.as_u64().unwrap() as usize))
-        .collect()
-}
-
-fn json_finding_order(document: &Value) -> Vec<String> {
-    document["data"]["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|group| {
-            let scope = json_scope_label(&group["scope"]);
-            group["findings"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(move |finding| {
-                    format!(
-                        "{scope}|{} / {} / {}",
-                        finding["kind"].as_str().unwrap(),
-                        finding["severity"].as_str().unwrap(),
-                        finding["confidence"].as_str().unwrap()
-                    )
-                })
-        })
-        .collect()
-}
-
-fn json_evidence_refs(document: &Value) -> Vec<String> {
-    document["data"]["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|group| group["findings"].as_array().unwrap())
-        .flat_map(|finding| finding["evidence"].as_array().unwrap())
-        .map(|evidence| {
-            let source = &evidence["source"];
-            match source["line"].as_u64() {
-                Some(line) => format!("{}:{line}", source["path"].as_str().unwrap()),
-                None => source["path"].as_str().unwrap().to_owned(),
-            }
-        })
-        .collect()
 }
 
 fn rendered_diff_store() -> (PathBuf, PathBuf, PathBuf) {
@@ -836,7 +775,6 @@ fn reporting_commands_render_local_store_data() {
     }
 
     for (command, kind, severity, confidence, occurrences, sessions) in [
-        ("failures", "failure", "medium", "high", 2, 2),
         ("corrections", "correction", "medium", "medium", 2, 2),
         ("rework", "rework", "medium", "high", 2, 1),
         ("verification", "verification", "medium", "medium", 1, 1),
@@ -885,12 +823,203 @@ fn reporting_commands_render_local_store_data() {
     assert!(sessions.contains("fixture-analysis-session-a"));
     assert_eq!(sessions.matches("- fixture-analysis-session-a").count(), 1);
     let failures = String::from_utf8_lossy(&run_args(&["failures"], &store).stdout).into_owned();
-    assert!(failures.contains("failure="));
+    assert!(failures.starts_with("RECURRING FAILURES"));
+    assert!(failures.contains("exit_code_1 / unknown_tool / cargo test"));
+    assert!(failures.contains("action: "));
+    let stuck = String::from_utf8_lossy(&run_args(&["stuck"], &store).stdout).into_owned();
+    assert!(stuck.starts_with("STUCK WORK"));
+    assert!(stuck.contains("sequence: "));
     let corrections =
         String::from_utf8_lossy(&run_args(&["corrections"], &store).stdout).into_owned();
     assert!(corrections.contains("correction="));
 
     let _ = std::fs::remove_file(store);
+}
+
+#[test]
+fn typed_views_have_distinct_bounded_formats_and_json_envelopes() {
+    let store = typed_view_store();
+    for (command, heading, data_key) in [
+        ("inventory", "CONFIGURATION INVENTORY", "rows"),
+        ("overhead", "CONTEXT COST", "rows"),
+        ("usage", "WHERE EFFORT GOES", "rows"),
+        ("waste", "OPPORTUNITIES", "opportunities"),
+        ("failures", "RECURRING FAILURES", "rows"),
+        ("stuck", "STUCK WORK", "rows"),
+        ("prompts", "HOW YOU STEER CODEX", "rows"),
+    ] {
+        let human = run_args(&[command], &store);
+        assert!(human.status.success(), "{command}: {:?}", human);
+        let stdout = String::from_utf8_lossy(&human.stdout);
+        assert!(stdout.starts_with(heading), "{command}: {stdout}");
+        assert!(stdout.len() < 20_000, "{command} is unbounded");
+
+        let markdown = run_args(&[command, "--format", "markdown"], &store);
+        assert!(markdown.status.success(), "{command} markdown failed");
+        assert!(
+            String::from_utf8_lossy(&markdown.stdout).starts_with(&format!("# {heading}")),
+            "{command} markdown has no heading"
+        );
+
+        let machine = run_args(&[command, "--format", "json"], &store);
+        let document = parse_json_report(&machine, command);
+        assert_eq!(document["scope"]["kind"], "all");
+        assert!(document["coverage"].is_object());
+        assert!(document["freshness"].is_object());
+        assert!(
+            document["data"][data_key].is_array(),
+            "{command} data shape"
+        );
+    }
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn first_run_doctor_auto_analyzes_and_uses_a_private_default_store() {
+    let (home, _) = refresh_home();
+    fs::write(home.join("config.toml"), "model = \"synthetic-model\"\n").unwrap();
+    let state_home = temp_store_path("first-run-state").with_extension("state");
+    let expected_store = state_home.join("codexlens/codexlens.db");
+    let output = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["doctor", "--codex-home"])
+        .arg(&home)
+        .env("XDG_STATE_HOME", &state_home)
+        .env_remove("HOME")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("WHAT TO FIX FIRST"));
+    assert!(stdout.contains("COST"));
+    assert!(stdout.contains("CONFIG WORTH PRUNING"));
+    assert!(stderr.contains("Refreshed store:"));
+    assert!(expected_store.is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(expected_store.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    let machine = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["doctor", "--format", "json", "--frozen"])
+        .arg("--codex-home")
+        .arg(&home)
+        .env("XDG_STATE_HOME", &state_home)
+        .env_remove("HOME")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let document = parse_json_report(&machine, "doctor");
+    assert_eq!(document["data"]["looks_healthy"], false);
+    assert!(machine.stderr.is_empty());
+
+    let _ = fs::remove_dir_all(home);
+    let _ = fs::remove_dir_all(state_home);
+}
+
+#[test]
+fn typed_views_honor_scope_and_archive_subagent_selection() {
+    let store = typed_view_store();
+    let global = run_args(&["inventory", "--scope", "global"], &store);
+    assert!(global.status.success());
+    let global_stdout = String::from_utf8_lossy(&global.stdout);
+    assert!(global_stdout.contains("global-config"));
+    assert!(!global_stdout.contains("AGENTS.md"));
+
+    let project = run_args(
+        &["inventory", "--scope", "project:/fixture/project"],
+        &store,
+    );
+    assert!(project.status.success());
+    let project_stdout = String::from_utf8_lossy(&project.stdout);
+    assert!(project_stdout.contains("AGENTS.md"));
+    assert!(!project_stdout.contains("global-config"));
+
+    let selection_store = fixture_store();
+    {
+        let store_handle = Store::open(&selection_store).unwrap();
+        store_handle
+            .connection()
+            .execute(
+                "UPDATE sessions SET archive_state = 1 WHERE session_id = 'fixture-analysis-session-a'",
+                [],
+            )
+            .unwrap();
+        store_handle
+            .connection()
+            .execute(
+                "UPDATE sessions SET parent_id = 'fixture-analysis-session-a' WHERE session_id = 'fixture-analysis-session-b'",
+                [],
+            )
+            .unwrap();
+    }
+    let normal = run_args(&["sessions"], &selection_store);
+    assert!(normal.status.success());
+    assert!(String::from_utf8_lossy(&normal.stdout).contains("No selected sessions."));
+
+    let archived = run_args(&["sessions", "--include-archived"], &selection_store);
+    let archived_stdout = String::from_utf8_lossy(&archived.stdout);
+    assert!(archived.status.success());
+    assert!(archived_stdout.contains("fixture-analysis-session-a"));
+    assert!(!archived_stdout.contains("fixture-analysis-session-b"));
+
+    let subagents = run_args(&["sessions", "--include-subagents"], &selection_store);
+    let subagents_stdout = String::from_utf8_lossy(&subagents.stdout);
+    assert!(subagents.status.success());
+    assert!(!subagents_stdout.contains("fixture-analysis-session-a"));
+    assert!(subagents_stdout.contains("fixture-analysis-session-b"));
+
+    let both = run_args(
+        &["sessions", "--include-archived", "--include-subagents"],
+        &selection_store,
+    );
+    let both_stdout = String::from_utf8_lossy(&both.stdout);
+    assert!(both.status.success());
+    assert!(both_stdout.contains("fixture-analysis-session-a"));
+    assert!(both_stdout.contains("fixture-analysis-session-b"));
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(selection_store);
+}
+
+#[test]
+fn typed_views_report_missing_stores_and_reject_relative_codex_homes() {
+    let missing = temp_store_path("typed-missing");
+    for command in [
+        "inventory",
+        "overhead",
+        "usage",
+        "waste",
+        "failures",
+        "stuck",
+        "prompts",
+        "sessions",
+    ] {
+        let output = run_args(&[command], &missing);
+        assert!(!output.status.success(), "{command} unexpectedly succeeded");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("store does not exist"));
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["doctor", "--codex-home", "relative-codex-home"])
+        .arg("--store")
+        .arg(&missing)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must be an absolute directory"));
 }
 
 #[test]
@@ -915,7 +1044,10 @@ fn reporting_period_filter_is_half_open_and_visible_in_human_and_json() {
     assert!(
         stdout.contains("Requested period: [2026-01-03T00:00:00.000Z, 2026-01-04T00:00:00.000Z)")
     );
-    assert!(stdout.contains("Sessions: 1"), "{stdout}");
+    assert!(
+        stdout.contains("Coverage: partial (1 sessions)"),
+        "{stdout}"
+    );
     assert!(stdout.contains("fixture-analysis-session-a"), "{stdout}");
     assert!(!stdout.contains("fixture-analysis-session-b"), "{stdout}");
     assert!(stdout.contains("Observed records: "), "{stdout}");
@@ -979,11 +1111,9 @@ fn filtered_coverage_excludes_trimmed_boundary_turn_timestamps() {
         stdout
             .contains("Observed records: 3 (excluded: 2, unknown timestamps: 0 records, 0 events)")
     );
-    assert!(stdout.contains("Coverage: complete"));
-    assert!(stdout.contains("Coverage: selected store (observed;"));
-    assert!(stdout.contains("Activity timestamps: 6 valid, 0 missing, 0 invalid"));
-    assert!(stdout.contains("Sessions: 1"));
-    assert!(stdout.contains("Records: 3"));
+    assert!(stdout.contains("Period coverage: complete"));
+    assert!(stdout.contains("Observed records: 3 (excluded: 2"));
+    assert!(stdout.contains("Coverage: observed (1 sessions)"));
 
     for args in REPORTING_COMMANDS {
         let output = run_args_with_flags(args, &flags, &store);
@@ -993,36 +1123,57 @@ fn filtered_coverage_excludes_trimmed_boundary_turn_timestamps() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Coverage: complete"), "{args:?}: {stdout}");
-        assert!(
-            stdout.contains("Coverage: selected store (observed;"),
-            "{args:?}: {stdout}"
-        );
-        assert!(
-            stdout.contains("Activity timestamps: 6 valid, 0 missing, 0 invalid"),
-            "{args:?}: {stdout}"
-        );
-        assert!(stdout.contains("Sessions: 1"), "{args:?}: {stdout}");
-        assert!(stdout.contains("Records: 3"), "{args:?}: {stdout}");
+        if matches!(args[0], "sessions" | "failures" | "stuck" | "doctor") {
+            assert!(
+                stdout.contains("Period coverage: complete"),
+                "{args:?}: {stdout}"
+            );
+            assert!(
+                stdout.contains("Observed records: 3 (excluded: 2"),
+                "{args:?}: {stdout}"
+            );
+        } else {
+            assert!(stdout.contains("Coverage: complete"), "{args:?}: {stdout}");
+            assert!(
+                stdout.contains("Coverage: selected store (observed;"),
+                "{args:?}: {stdout}"
+            );
+            assert!(
+                stdout.contains("Activity timestamps: 6 valid, 0 missing, 0 invalid"),
+                "{args:?}: {stdout}"
+            );
+            assert!(stdout.contains("Sessions: 1"), "{args:?}: {stdout}");
+            assert!(stdout.contains("Records: 3"), "{args:?}: {stdout}");
+        }
 
         let mut json_args = args.to_vec();
         json_args.extend(["--format", "json"]);
         let command = match args[0] {
             "optimize" => "optimize_diff",
-            "stuck" => "rework",
             "rediscovery" => "knowledge",
             command => command,
         };
         let document = parse_json_report(&run_args_with_flags(&json_args, &flags, &store), command);
-        let coverage = &document["data"]["coverage"];
-        assert_eq!(coverage["status"], "observed", "{args:?}");
-        assert_eq!(coverage["state"], "complete", "{args:?}");
-        assert_eq!(coverage["missing_activity_timestamps"], 0, "{args:?}");
-        assert_eq!(coverage["invalid_activity_timestamps"], 0, "{args:?}");
-        assert_eq!(coverage["valid_activity_timestamps"], 6, "{args:?}");
-        assert_eq!(coverage["unknown_timestamp_events"], 0, "{args:?}");
-        assert_eq!(coverage["included_sessions"], 1, "{args:?}");
-        assert_eq!(coverage["included_records"], 3, "{args:?}");
+        let coverage = if matches!(args[0], "sessions" | "failures" | "stuck" | "doctor") {
+            &document["coverage"]
+        } else {
+            &document["data"]["coverage"]
+        };
+        if matches!(args[0], "sessions" | "failures" | "stuck" | "doctor") {
+            assert_eq!(coverage["status"], "observed", "{args:?}");
+            assert_eq!(coverage["period_status"], "complete", "{args:?}");
+            assert_eq!(coverage["included_records"], 3, "{args:?}");
+            assert_eq!(coverage["excluded_records"], 2, "{args:?}");
+        } else {
+            assert_eq!(coverage["status"], "observed", "{args:?}");
+            assert_eq!(coverage["state"], "complete", "{args:?}");
+            assert_eq!(coverage["missing_activity_timestamps"], 0, "{args:?}");
+            assert_eq!(coverage["invalid_activity_timestamps"], 0, "{args:?}");
+            assert_eq!(coverage["valid_activity_timestamps"], 6, "{args:?}");
+            assert_eq!(coverage["unknown_timestamp_events"], 0, "{args:?}");
+            assert_eq!(coverage["included_sessions"], 1, "{args:?}");
+            assert_eq!(coverage["included_records"], 3, "{args:?}");
+        }
     }
 
     let _ = fs::remove_file(store);
@@ -1047,7 +1198,7 @@ fn empty_reporting_period_has_no_selected_activity() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Sessions: 0"), "{stdout}");
+    assert!(stdout.contains("Coverage: empty (0 sessions)"), "{stdout}");
     assert!(!stdout.contains("fixture-analysis-session-"), "{stdout}");
     assert!(stdout.contains("Coverage: empty"), "{stdout}");
     let _ = fs::remove_file(store);
@@ -1140,15 +1291,14 @@ fn reporting_coverage_marks_unknown_event_timestamps_as_partial() {
         &store,
     );
     let document = parse_json_report(&output, "doctor");
-    let coverage = &document["data"]["coverage"];
+    let coverage = &document["coverage"];
     assert_eq!(coverage["unknown_timestamp_records"], 1);
     assert!(coverage["unknown_timestamp_events"].as_u64().unwrap() > 0);
     assert!(coverage["missing_activity_timestamps"].as_u64().unwrap() > 0);
     assert!(coverage["invalid_activity_timestamps"].as_u64().unwrap() > 0);
     assert_eq!(coverage["status"], "partial");
-    assert_eq!(coverage["state"], "partial");
-    assert!(coverage["observed_start"].is_string());
-    assert!(coverage["observed_end"].is_string());
+    assert!(coverage["activity_start"].is_string());
+    assert!(coverage["activity_end"].is_string());
 
     let _ = fs::remove_file(store);
 }
@@ -1241,23 +1391,39 @@ fn all_read_only_reports_share_period_selection_and_json_coverage() {
         );
     }
 
-    for command in [
-        "sessions",
-        "failures",
-        "corrections",
-        "rework",
-        "verification",
-        "knowledge",
-        "instructions",
-        "doctor",
+    for (command, typed) in [
+        ("sessions", true),
+        ("inventory", true),
+        ("overhead", true),
+        ("usage", true),
+        ("waste", true),
+        ("failures", true),
+        ("stuck", true),
+        ("prompts", true),
+        ("analyze", false),
+        ("corrections", false),
+        ("rework", false),
+        ("verification", false),
+        ("knowledge", false),
+        ("instructions", false),
+        ("doctor", true),
     ] {
         let mut args = vec![command, "--format", "json"];
         args.extend(flags);
         let document = parse_json_report(&run_args(&args, &store), command);
-        let coverage = &document["data"]["coverage"];
+        let coverage = if typed {
+            &document["coverage"]
+        } else {
+            &document["data"]["coverage"]
+        };
         assert_eq!(coverage["requested_start"], "2026-01-03T00:00:00.000Z");
         assert_eq!(coverage["requested_end"], "2026-01-04T00:00:00.000Z");
-        assert_eq!(coverage["included_sessions"], 1);
+        if typed {
+            assert!(coverage["period_status"].is_string());
+            assert!(coverage["included_records"].as_u64().unwrap() > 0);
+        } else {
+            assert_eq!(coverage["included_sessions"], 1);
+        }
     }
 
     let mut optimize_args = vec!["optimize", "--diff", "--format", "json"];
@@ -1369,8 +1535,8 @@ fn monitor_command_updates_a_local_store_and_honors_max_polls() {
 #[test]
 fn reporting_commands_cover_empty_and_minimal_stores() {
     for (store, expected_sessions) in [
-        (empty_store(), "Sessions: 0"),
-        (minimal_store(), "Sessions: 1"),
+        (empty_store(), "Coverage: empty (0 sessions)"),
+        (minimal_store(), "Coverage: partial (1 sessions)"),
     ] {
         for args in REPORTING_COMMANDS {
             let output = run_args(args, &store);
@@ -1388,8 +1554,22 @@ fn reporting_commands_cover_empty_and_minimal_stores() {
                     stdout.contains("Store freshness: empty"),
                     "{args:?}: {stdout}"
                 );
-                assert!(stdout.contains(expected_sessions), "{args:?}: {stdout}");
-                if args[0] != "sessions" {
+                if matches!(args[0], "sessions" | "failures" | "stuck" | "doctor") {
+                    assert!(stdout.contains(expected_sessions), "{args:?}: {stdout}");
+                    assert!(
+                        stdout.contains(match args[0] {
+                            "failures" => "RECURRING FAILURES",
+                            "stuck" => "STUCK WORK",
+                            "doctor" => "WHAT TO FIX FIRST",
+                            _ => "SESSIONS",
+                        }),
+                        "{args:?}: {stdout}"
+                    );
+                } else {
+                    assert!(
+                        stdout.contains("Coverage: selected store ("),
+                        "{args:?}: {stdout}"
+                    );
                     assert!(
                         stdout.contains("Finding counts: none"),
                         "{args:?}: {stdout}"
@@ -1465,8 +1645,8 @@ fn reporting_commands_are_deterministic_and_aliases_match() {
     let rework = run_args(&["rework"], &store);
     let stuck = run_args(&["stuck"], &store);
     assert_eq!(rework.status, stuck.status);
-    assert_eq!(rework.stdout, stuck.stdout);
-    assert_eq!(rework.stderr, stuck.stderr);
+    assert_ne!(rework.stdout, stuck.stdout);
+    assert!(String::from_utf8_lossy(&stuck.stdout).starts_with("STUCK WORK"));
 
     let knowledge = run_args(&["knowledge"], &store);
     let rediscovery = run_args(&["rediscovery"], &store);
@@ -1760,8 +1940,8 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
     let readme_lower = readme.to_ascii_lowercase();
 
     assert!(readme.contains("## CLI surface"));
-    assert!(readme.contains("explicit raw-input workflow"));
-    assert!(readme.contains("never refreshes implicitly"));
+    assert!(readme.contains("explicit refresh workflow"));
+    assert!(readme.contains("Read views analyze"));
     assert!(readme.contains("Phase 5 compressed rollout reader milestone"));
     assert!(readme.contains("Phase 5 safe optimize apply"));
     assert!(readme.contains("Phase 6"));
@@ -2640,7 +2820,7 @@ fn machine_readable_output_is_versioned_deterministic_and_canonical() {
         (&["failures", "--format", "json"][..], "failures"),
         (&["corrections", "--format", "json"][..], "corrections"),
         (&["rework", "--format", "json"][..], "rework"),
-        (&["stuck", "--format", "json"][..], "rework"),
+        (&["stuck", "--format", "json"][..], "stuck"),
         (&["verification", "--format", "json"][..], "verification"),
         (&["knowledge", "--format", "json"][..], "knowledge"),
         (&["rediscovery", "--format", "json"][..], "knowledge"),
@@ -2652,10 +2832,13 @@ fn machine_readable_output_is_versioned_deterministic_and_canonical() {
         assert_eq!(first.stdout, second.stdout, "{args:?} is not deterministic");
         let document = parse_json_report(&first, command);
         let data = document["data"].as_object().unwrap();
-        if command == "sessions" {
-            assert!(data["freshness"].is_object());
-            assert!(data["sessions"].is_array());
-            for session in data["sessions"].as_array().unwrap() {
+        if matches!(command, "sessions" | "failures" | "stuck") {
+            assert!(data["rows"].is_array());
+            for session in data["rows"].as_array().unwrap() {
+                if command != "sessions" {
+                    assert!(session["opportunity"].is_object());
+                    continue;
+                }
                 for field in ["id", "created_at", "updated_at", "cwd", "project"] {
                     assert!(
                         session.get(field).is_some(),
@@ -2663,6 +2846,11 @@ fn machine_readable_output_is_versioned_deterministic_and_canonical() {
                     );
                 }
             }
+        } else if command == "doctor" {
+            assert!(data["top_fixes"].is_array());
+            assert!(data["cost"].is_object());
+            assert!(data["config_pruning"].is_object());
+            assert!(data["looks_healthy"].is_boolean());
         } else {
             for field in [
                 "period_start",
@@ -2738,19 +2926,27 @@ fn json_doctor_matches_human_counts_scopes_evidence_and_order() {
     assert!(human.status.success());
     let human_stdout = String::from_utf8_lossy(&human.stdout);
     let document = parse_json_report(&machine, "doctor");
-
-    assert_eq!(
-        human_finding_counts(&human_stdout),
-        json_finding_counts(&document)
-    );
-    assert_eq!(
-        human_finding_order(&human_stdout),
-        json_finding_order(&document)
-    );
-    assert_eq!(
-        human_evidence_refs(&human_stdout),
-        json_evidence_refs(&document)
-    );
+    let top_fixes = document["data"]["top_fixes"].as_array().unwrap();
+    assert!(!top_fixes.is_empty());
+    for opportunity in top_fixes {
+        assert!(human_stdout.contains(opportunity["title"].as_str().unwrap()));
+        assert!(opportunity["evidence"].as_array().unwrap().len() <= 3);
+        for field in [
+            "id",
+            "title",
+            "scope",
+            "target",
+            "impact",
+            "confidence",
+            "occurrences",
+            "distinct_sessions",
+            "action",
+            "limitations",
+        ] {
+            assert!(opportunity.get(field).is_some(), "missing {field}");
+        }
+    }
+    assert_eq!(document["scope"]["kind"], "all");
     let _ = fs::remove_file(store);
 }
 
@@ -2760,21 +2956,12 @@ fn reporting_metadata_exposes_store_coverage_and_separates_ingestion_time() {
     let human = run_args(&["doctor"], &store);
     assert!(human.status.success());
     let human_stdout = String::from_utf8_lossy(&human.stdout);
-    assert!(human_stdout.contains(
-        "Coverage: selected store (partial; not necessarily all historical activity or current raw inputs; refresh explicitly, archives via --include-archived)"
-    ));
-    assert!(
-        human_stdout.contains("Activity: 2026-01-03T00:00:00.000Z .. 2026-01-04T00:05:00.000Z")
-    );
-    assert!(human_stdout.contains("Records: 16"), "{human_stdout}");
-    assert!(
-        human_stdout.contains("Latest ingestion: "),
-        "{human_stdout}"
-    );
+    assert!(human_stdout.starts_with("WHAT TO FIX FIRST"));
+    assert!(human_stdout.contains("Coverage: partial (2 sessions)"));
+    assert!(human_stdout.contains("Store freshness: recorded at "));
 
     let document = parse_json_report(&run_args(&["doctor", "--format", "json"], &store), "doctor");
-    let coverage = &document["data"]["coverage"];
-    assert_eq!(coverage["scope"], "selected_store");
+    let coverage = &document["coverage"];
     assert_eq!(coverage["status"], "partial");
     assert_eq!(coverage["activity_start"], "2026-01-03T00:00:00.000Z");
     assert_eq!(coverage["activity_end"], "2026-01-04T00:05:00.000Z");
@@ -2785,14 +2972,14 @@ fn reporting_metadata_exposes_store_coverage_and_separates_ingestion_time() {
     assert_eq!(coverage["invalid_activity_timestamps"], 0);
     assert_ne!(
         coverage["activity_end"],
-        document["data"]["freshness"]["latest_ingested_at"]
+        document["freshness"]["latest_ingested_at"]
     );
 
     let sessions = parse_json_report(
         &run_args(&["sessions", "--format", "json"], &store),
         "sessions",
     );
-    assert_eq!(sessions["data"]["coverage"], coverage.clone());
+    assert_eq!(sessions["coverage"], coverage.clone());
     let _ = fs::remove_file(store);
 }
 
@@ -2802,7 +2989,8 @@ fn unfiltered_reports_share_chronological_valid_activity_period() {
     let expected_start = "2026-01-03T09:00:00+09:00";
     let expected_end = "2026-01-03T00:30:00.123456789Z";
 
-    for command in ["analyze", "doctor"] {
+    {
+        let command = "analyze";
         let human = run_args(&[command], &store);
         assert!(human.status.success(), "{command}: human report failed");
         let stdout = String::from_utf8_lossy(&human.stdout);
@@ -2828,6 +3016,23 @@ fn unfiltered_reports_share_chronological_valid_activity_period() {
         assert_eq!(data["coverage"]["invalid_activity_timestamps"], 1);
     }
 
+    let doctor = run_args(&["doctor"], &store);
+    assert!(doctor.status.success(), "doctor: human report failed");
+    let doctor_stdout = String::from_utf8_lossy(&doctor.stdout);
+    assert!(doctor_stdout.starts_with("WHAT TO FIX FIRST"));
+    assert!(doctor_stdout.contains("Coverage: partial (1 sessions)"));
+    let doctor_document =
+        parse_json_report(&run_args(&["doctor", "--format", "json"], &store), "doctor");
+    assert_eq!(
+        doctor_document["coverage"]["activity_start"],
+        expected_start
+    );
+    assert_eq!(doctor_document["coverage"]["activity_end"], expected_end);
+    assert_eq!(
+        doctor_document["coverage"]["invalid_activity_timestamps"],
+        1
+    );
+
     let _ = fs::remove_file(store);
 }
 
@@ -2845,21 +3050,17 @@ fn empty_reporting_store_marks_activity_unknown_without_using_ingestion_time() {
         if args.contains(&"--format") {
             let command = args[0];
             let document = parse_json_report(&output, command);
-            let coverage = &document["data"]["coverage"];
+            let coverage = &document["coverage"];
             assert_eq!(coverage["status"], "empty", "{args:?}");
             assert!(coverage["activity_start"].is_null(), "{args:?}");
             assert!(coverage["activity_end"].is_null(), "{args:?}");
             assert_eq!(coverage["session_count"], 0, "{args:?}");
             assert_eq!(coverage["record_count"], 0, "{args:?}");
-            assert!(document["data"]["freshness"]["latest_ingested_at"].is_null());
+            assert!(document["freshness"]["latest_ingested_at"].is_null());
         } else {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                stdout.contains("Coverage: selected store (empty;"),
-                "{stdout}"
-            );
-            assert!(stdout.contains("Activity: unknown"), "{stdout}");
-            assert!(stdout.contains("Latest ingestion: unknown"), "{stdout}");
+            assert!(stdout.contains("Coverage: empty (0 sessions)"), "{stdout}");
+            assert!(stdout.contains("Store freshness: empty"), "{stdout}");
         }
     }
     let _ = fs::remove_file(store);
@@ -3167,17 +3368,12 @@ fn json_schema_readers_cover_sessions_and_optimize_shapes() {
     );
     sessions_document["future_optional"] = json!(true);
     sessions_document["data"]["future_optional"] = json!("ignored");
-    sessions_document["data"]["freshness"]["future_optional"] = json!(1);
-    sessions_document["data"]["sessions"][0]["future_optional"] = json!(false);
+    sessions_document["data"]["rows"][0]["future_optional"] = json!(false);
     let sessions: KnownSessionsDocument = serde_json::from_value(sessions_document).unwrap();
     assert_eq!(sessions.schema_version, 1);
     assert_eq!(sessions.command, "sessions");
-    assert_eq!(sessions.data.freshness.state, "recorded");
-    assert_known_coverage(&sessions.data.coverage);
-    assert!(sessions.data.coverage.session_count > 0);
-    assert!(sessions.data.coverage.record_count > 0);
-    assert!(!sessions.data.sessions.is_empty());
-    for session in &sessions.data.sessions {
+    assert!(!sessions.data.rows.is_empty());
+    for session in &sessions.data.rows {
         let _ = (
             &session.id,
             &session.created_at,
@@ -3269,7 +3465,7 @@ fn empty_json_reports_keep_nullable_fields_and_empty_arrays() {
                 assert!(data["freshness"]["latest_ingested_at"].is_null());
                 assert_eq!(data["groups"], Value::Array(Vec::new()));
             }
-            "sessions" => assert_eq!(data["sessions"], Value::Array(Vec::new())),
+            "sessions" => assert_eq!(data["rows"], Value::Array(Vec::new())),
             "optimize" => {
                 assert_eq!(data["rendered"], Value::Array(Vec::new()));
                 assert_eq!(data["skipped"], Value::Array(Vec::new()));
