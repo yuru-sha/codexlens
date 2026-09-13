@@ -1,7 +1,7 @@
 //! Explicit, read-only reporting-period selection.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::{
-    CanonicalData, FileOperation, Message, MessageRole, SourceRef, TokenUsage, ToolCall,
+    CanonicalData, FileOperation, Message, MessageRole, Session, SourceRef, TokenUsage, ToolCall,
     ToolResult, Turn,
 };
 
@@ -107,6 +107,14 @@ impl Timestamp {
         }
         let seconds = self.seconds - start.seconds;
         seconds < max_seconds || seconds == max_seconds && self.nanos <= start.nanos
+    }
+
+    fn subtract_days(self, days: u64) -> Self {
+        let seconds = days.saturating_mul(86_400).min(i64::MAX as u64) as i64;
+        Self {
+            seconds: self.seconds.saturating_sub(seconds),
+            nanos: self.nanos,
+        }
     }
 }
 
@@ -255,6 +263,145 @@ pub struct PeriodCoverage {
 pub struct SelectedData {
     pub data: CanonicalData,
     pub coverage: PeriodCoverage,
+}
+
+pub const DEFAULT_SESSION_DAYS: u64 = 30;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionSelectionOptions {
+    pub days: u64,
+    pub include_archived: bool,
+    pub include_subagents: bool,
+}
+
+impl Default for SessionSelectionOptions {
+    fn default() -> Self {
+        Self {
+            days: DEFAULT_SESSION_DAYS,
+            include_archived: false,
+            include_subagents: false,
+        }
+    }
+}
+
+pub fn select_session_ids(
+    data: &CanonicalData,
+    options: &SessionSelectionOptions,
+) -> BTreeSet<String> {
+    let mut latest_by_session = HashMap::new();
+    for record in &data.records {
+        let Some(session_id) = record.session_id.as_ref() else {
+            continue;
+        };
+        let Some(timestamp) = record.timestamp.as_deref().and_then(Timestamp::parse) else {
+            continue;
+        };
+        latest_by_session
+            .entry(session_id)
+            .and_modify(|latest: &mut Timestamp| *latest = (*latest).max(timestamp))
+            .or_insert(timestamp);
+    }
+
+    let Some(latest) = data
+        .sessions
+        .iter()
+        .filter(|session| session_is_eligible(session, options))
+        .filter_map(|session| latest_by_session.get(&session.id).copied())
+        .max()
+    else {
+        return BTreeSet::new();
+    };
+    let start = latest.subtract_days(options.days);
+
+    data.sessions
+        .iter()
+        .filter(|session| session_is_eligible(session, options))
+        .filter(|session| {
+            latest_by_session
+                .get(&session.id)
+                .is_some_and(|timestamp| *timestamp >= start && *timestamp <= latest)
+        })
+        .map(|session| session.id.clone())
+        .collect()
+}
+
+pub fn select_report_data_with_options(
+    data: &CanonicalData,
+    period: Option<&ReportingPeriod>,
+    options: &SessionSelectionOptions,
+) -> SelectedData {
+    let selected_ids = if period.is_some() {
+        data.sessions
+            .iter()
+            .filter(|session| session_is_eligible(session, options))
+            .map(|session| session.id.clone())
+            .collect()
+    } else {
+        select_session_ids(data, options)
+    };
+    select_report_data(&data_for_sessions(data, &selected_ids), period)
+}
+
+fn session_is_eligible(session: &Session, options: &SessionSelectionOptions) -> bool {
+    (options.include_archived || session.archive_state != Some(true))
+        && (options.include_subagents || session.parent_id.is_none())
+}
+
+fn data_for_sessions(data: &CanonicalData, selected_ids: &BTreeSet<String>) -> CanonicalData {
+    let mut filtered = data.clone();
+    filtered
+        .sessions
+        .retain(|session| selected_ids.contains(&session.id));
+    filtered.turns.retain(|turn| {
+        turn.session_id
+            .as_ref()
+            .is_some_and(|id| selected_ids.contains(id))
+    });
+    filtered.records.retain(|record| {
+        record
+            .session_id
+            .as_ref()
+            .is_some_and(|id| selected_ids.contains(id))
+    });
+    filtered.messages.retain(|message| {
+        message
+            .session_id
+            .as_ref()
+            .is_some_and(|id| selected_ids.contains(id))
+    });
+    filtered.tool_calls.retain(|call| {
+        call.session_id
+            .as_ref()
+            .is_some_and(|id| selected_ids.contains(id))
+    });
+    filtered.tool_results.retain(|result| {
+        result
+            .session_id
+            .as_ref()
+            .is_some_and(|id| selected_ids.contains(id))
+    });
+    filtered.file_operations.retain(|operation| {
+        operation
+            .session_id
+            .as_ref()
+            .is_some_and(|id| selected_ids.contains(id))
+    });
+    filtered.token_usage.retain(|usage| {
+        usage
+            .session_id
+            .as_ref()
+            .is_some_and(|id| selected_ids.contains(id))
+    });
+    filtered.instruction_snapshots.retain(|snapshot| {
+        snapshot
+            .session_id
+            .as_ref()
+            .is_some_and(|id| selected_ids.contains(id))
+    });
+    filtered
+        .instruction_joins
+        .retain(|join| selected_ids.contains(&join.session_id));
+    filtered
 }
 
 pub(crate) type SourceKey = (PathBuf, Option<usize>);
@@ -915,6 +1062,9 @@ mod tests {
         FileOperation, Message, MessageRole, Record, RecordKind, SourceKind, TokenUsage,
         TurnLifecycleEvent,
     };
+    use crate::normalize::normalize_rollout;
+    use crate::rollout::{PlainJsonlReader, parse_rollout_reader};
+    use std::io::Cursor;
 
     fn source(line: usize) -> SourceRef {
         SourceRef {
@@ -1322,5 +1472,74 @@ mod tests {
         assert!(selected.data.file_operations.is_empty());
         assert!(selected.data.token_usage.is_empty());
         assert_eq!(selected.coverage.unknown_timestamp_events, 3);
+    }
+
+    #[test]
+    fn selects_recent_main_sessions_and_optionally_children_without_duplication() {
+        let parsed = parse_rollout_reader(
+            PathBuf::from("session-selection.jsonl").as_path(),
+            PlainJsonlReader::new(Cursor::new(
+                include_str!("../tests/fixtures/rollout/session-selection.jsonl").as_bytes(),
+            )),
+        );
+        let data = normalize_rollout(&parsed);
+
+        let main_only = select_session_ids(&data, &SessionSelectionOptions::default());
+        assert_eq!(main_only.into_iter().collect::<Vec<_>>(), ["main-recent"]);
+
+        let with_children = select_session_ids(
+            &data,
+            &SessionSelectionOptions {
+                include_subagents: true,
+                ..SessionSelectionOptions::default()
+            },
+        );
+        assert_eq!(
+            with_children.into_iter().collect::<Vec<_>>(),
+            ["child-recent", "main-recent"]
+        );
+
+        let default_report =
+            select_report_data_with_options(&data, None, &SessionSelectionOptions::default());
+        assert_eq!(
+            default_report
+                .data
+                .sessions
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["main-recent"]
+        );
+        assert!(
+            default_report
+                .data
+                .records
+                .iter()
+                .all(|record| record.session_id.as_deref() == Some("main-recent"))
+        );
+    }
+
+    #[test]
+    fn archived_sessions_are_opt_in() {
+        let parsed = parse_rollout_reader(
+            PathBuf::from("archived_sessions/2026/archived.jsonl").as_path(),
+            PlainJsonlReader::new(Cursor::new(
+                include_str!("../tests/fixtures/rollout/archived-selection.jsonl").as_bytes(),
+            )),
+        );
+        let data = normalize_rollout(&parsed);
+
+        assert!(select_session_ids(&data, &SessionSelectionOptions::default()).is_empty());
+        let selected = select_session_ids(
+            &data,
+            &SessionSelectionOptions {
+                include_archived: true,
+                ..SessionSelectionOptions::default()
+            },
+        );
+        assert_eq!(
+            selected.into_iter().collect::<Vec<_>>(),
+            ["archived-recent"]
+        );
     }
 }

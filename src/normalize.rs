@@ -767,6 +767,77 @@ fn canonical_command_value(value: &Value) -> String {
     bounded_to(&command, MAX_TOOL_SUMMARY_BYTES)
 }
 
+fn input_summary_value(value: &Value) -> Option<String> {
+    let summary = canonical_command_value(value);
+    (!summary.trim().is_empty() && !is_wrapper_artifact(&summary)).then_some(summary)
+}
+
+fn structured_command_value(value: &Value) -> Option<String> {
+    let command = match value {
+        Value::String(value) => value.clone(),
+        Value::Array(values) => values
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<Vec<_>>>()?
+            .join(" "),
+        Value::Object(object) => ["argv", "cmd", "command"]
+            .iter()
+            .find_map(|key| object.get(*key).and_then(structured_command_value))?,
+        _ => return None,
+    };
+    let command = bounded_to(&command, MAX_TOOL_SUMMARY_BYTES);
+    (!command.trim().is_empty() && !is_wrapper_artifact(&command)).then_some(command)
+}
+
+fn structured_input_command(payload: &Map<String, Value>) -> Option<String> {
+    payload
+        .get("input")
+        .or_else(|| payload.get("arguments"))
+        .filter(|value| value.is_object() || value.is_array())
+        .and_then(structured_command_value)
+}
+
+fn explicit_command_value(value: &Value) -> Option<String> {
+    let command = match value {
+        Value::String(value) => value.clone(),
+        _ => structured_command_value(value)?,
+    };
+    let command = bounded_to(&command, MAX_TOOL_SUMMARY_BYTES);
+    (!command.trim().is_empty() && !is_wrapper_artifact(&command)).then_some(command)
+}
+
+fn result_command_value(value: &Value) -> Option<String> {
+    if let Value::Object(object) = value {
+        return [
+            "argv",
+            "cmd",
+            "command",
+            "patch",
+            "path",
+            "file_path",
+            "filename",
+        ]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(result_command_value));
+    }
+    explicit_command_value(value)
+}
+
+fn valid_tool_name(value: String) -> Option<String> {
+    let value = normalize_token(&value);
+    if value.is_empty() || value.split_whitespace().count() != 1 || is_wrapper_artifact(&value) {
+        return None;
+    }
+    Some(bounded_to(&value, MAX_TOOL_SUMMARY_BYTES))
+}
+
+fn is_wrapper_artifact(value: &str) -> bool {
+    let value = normalize_token(value).to_ascii_lowercase();
+    value.starts_with("exec_command const")
+        || value.starts_with("exec_command s:")
+        || (value.starts_with("s:") && value.ends_with("});"))
+}
+
 fn command_payload_text(command: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(command) else {
         return command.to_owned();
@@ -783,9 +854,9 @@ fn command_payload_text(command: &str) -> String {
     }
     if let Some(object) = value.as_object() {
         for key in [
+            "argv",
             "cmd",
             "command",
-            "argv",
             "args",
             "patch",
             "path",
@@ -903,6 +974,11 @@ fn matching_state_session<'a>(
     })
 }
 
+fn source_is_archived(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == "archived_sessions")
+}
+
 fn same_path(left: &Path, right: &Path) -> bool {
     left == right
         || (left.is_absolute()
@@ -998,7 +1074,12 @@ fn session_from_payload(
         source: string_field(payload, &["source"]),
         thread_source: string_field(payload, &["thread_source"]),
         rollout_path: Some(source.path.to_string_lossy().into_owned()),
-        archive_state: None,
+        archive_state: payload
+            .get("archived")
+            .or_else(|| payload.get("is_archived"))
+            .or_else(|| payload.get("archive_state"))
+            .and_then(Value::as_bool)
+            .or_else(|| source_is_archived(&source.path).then_some(true)),
         title: string_field(payload, &["title"]),
         preview: string_field(payload, &["preview", "first_user_message"]),
         parent_id: string_field(payload, &["parent_thread_id", "parent_id"]),
@@ -1139,6 +1220,7 @@ fn tool_call_from_payload(
         session_id,
         turn_id,
         tool_name: string_field(payload, &["name", "tool_name"])
+            .and_then(valid_tool_name)
             .or_else(|| (nested_type == Some("exec_command")).then(|| "exec_command".to_owned())),
         input_summary: payload
             .get("input")
@@ -1149,8 +1231,9 @@ fn tool_call_from_payload(
             .or_else(|| payload.get("path"))
             .or_else(|| payload.get("file_path"))
             .or_else(|| payload.get("filename"))
-            .map(canonical_command_value),
-        command: payload.get("command").map(canonical_command_value),
+            .and_then(input_summary_value),
+        command: structured_input_command(payload)
+            .or_else(|| payload.get("command").and_then(explicit_command_value)),
         cwd: string_field(payload, &["cwd"]),
         status: string_field(payload, &["status"]),
         provenance,
@@ -1208,7 +1291,7 @@ fn tool_result_from_payload(
             .or_else(|| payload.get("path"))
             .or_else(|| payload.get("file_path"))
             .or_else(|| payload.get("filename"))
-            .map(canonical_command_value),
+            .and_then(result_command_value),
         cwd: string_field(payload, &["cwd"]),
         stdout,
         stderr,
@@ -2045,6 +2128,81 @@ mod tests {
         );
 
         assert!(data.file_operations.is_empty());
+    }
+
+    #[test]
+    fn tool_names_and_commands_only_use_valid_structured_values() {
+        let data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-tool-boundary-session"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-wrapper-name","name":"exec_command const","input":{"cmd":"cargo test"}}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-wrapper-name-short","name":"s:12000});","input":{"cmd":"cargo test"}}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-wrapper-input","name":"exec_command","input":"exec_command s:12000});"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-structured-input-array","name":"exec_command","input":["cargo","test"]}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-structured-command","name":"exec_command","input":{"argv":["cargo","test"]}}}
+{"type":"event_msg","payload":{"type":"exec_command_end","call_id":"fixture-unstructured-result","command":["cargo",{"renderer":"test"}],"exit_code":1}}"#,
+        );
+
+        let wrapper_name = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-wrapper-name"))
+            .unwrap();
+        assert_eq!(wrapper_name.tool_name, None);
+        assert_eq!(wrapper_name.command, Some("cargo test".to_owned()));
+
+        let wrapper_name_short = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-wrapper-name-short"))
+            .unwrap();
+        assert_eq!(wrapper_name_short.tool_name, None);
+
+        let wrapper_input = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-wrapper-input"))
+            .unwrap();
+        assert_eq!(wrapper_input.tool_name.as_deref(), Some("exec_command"));
+        assert_eq!(wrapper_input.command, None);
+
+        let structured_input_array = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-structured-input-array"))
+            .unwrap();
+        assert_eq!(
+            structured_input_array.command.as_deref(),
+            Some("cargo test")
+        );
+
+        let structured = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-structured-command"))
+            .unwrap();
+        assert_eq!(structured.tool_name.as_deref(), Some("exec_command"));
+        assert_eq!(structured.command.as_deref(), Some("cargo test"));
+
+        let unstructured_result = data
+            .tool_results
+            .iter()
+            .find(|result| result.call_id.as_deref() == Some("fixture-unstructured-result"))
+            .unwrap();
+        assert_eq!(unstructured_result.command, None);
+    }
+
+    #[test]
+    fn archived_rollout_source_sets_archive_state() {
+        let parsed = parse_rollout_reader(
+            Path::new("archived_sessions/2026/archived.jsonl"),
+            PlainJsonlReader::new(Cursor::new(
+                include_str!("../tests/fixtures/rollout/archived-selection.jsonl").as_bytes(),
+            )),
+        );
+
+        let data = normalize_rollout(&parsed);
+
+        assert_eq!(data.sessions[0].archive_state, Some(true));
     }
 
     #[test]
