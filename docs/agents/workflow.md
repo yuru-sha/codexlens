@@ -12,6 +12,8 @@ an implementation request authorizes scoped edits and their verification.
 | Input formats and discovery | `docs/specs/session-format.md` | `src/discovery.rs`, `src/rollout.rs`, `src/normalize.rs`, `src/state.rs` |
 | Findings and advice | `docs/specs/analysis.md` | `src/analysis/`, `src/advisor/` |
 | Product views and MVP UX | `docs/specs/product.md` | `src/main.rs`, `src/advisor/`, `src/analysis/` |
+| CLI contract | `docs/specs/cli.md` | `src/main.rs`, `tests/cli.rs` |
+| Configuration surfaces | `docs/specs/config-surfaces.md` | `src/config.rs`, `src/instructions.rs`, `src/store.rs` |
 | Refresh, frozen/JSON reports, monitor, apply | `docs/specs/post-mvp.md` | `src/main.rs`, `src/monitor.rs`, `src/advisor/apply.rs`, `tests/cli.rs`, `tests/monitor.rs` |
 | Setup and permissions | [environment.md](environment.md) | `.codex/config.toml`, `scripts/verify.sh`, CI |
 | Releases | [../release.md](../release.md) | `docs/readiness/` records historical candidate evidence |

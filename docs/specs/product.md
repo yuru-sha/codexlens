@@ -2,6 +2,10 @@
 
 Status: target MVP contract for a Codex counterpart to `cclens`.
 
+The implementable command and adapter contracts are [`cli.md`](cli.md) and
+[`config-surfaces.md`](config-surfaces.md). This document defines product
+intent; those documents define inputs, outputs, and edge cases.
+
 ## 1. Product promise
 
 `codexlens` is a local lens onto Codex usage. It reads Codex transcripts and

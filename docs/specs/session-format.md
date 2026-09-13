@@ -79,6 +79,31 @@ Shell-like completion records may expose fields such as `command`, `cwd`,
 An exit code is stronger evidence of failure than a text heuristic; the
 analysis layer must prefer it when available.
 
+### 3.1 Tool normalization rules
+
+The outer envelope type and nested payload type are never tool names or
+commands. For a `response_item`, use `payload.name` as the tool name and
+extract commands only from structured fields such as `payload.input.cmd` or
+`payload.input.command`. For an `event_msg`, use the event family only to
+select the adapter, then read the structured command fields.
+
+Command extraction is typed and ordered: join an argv array with one space;
+use a string under a command field; inspect a structured object for `argv`,
+`cmd`, then `command`; otherwise retain an unknown tool call with provenance.
+Arbitrary strings, serialized tool input, wrapper source, and renderer output
+are not commands. Values such as `exec_command const`, `exec_command s:`, and
+`s:12000});` are invalid canonical names and must be rejected before storage.
+
+### 3.2 Session selection
+
+A session is a main session when `parent_id` is absent and a sub-agent when
+`parent_id` is present. The default report includes main sessions in the
+latest 30-day window ending at the latest valid observed event timestamp.
+`--include-subagents` adds children without double-counting their records in
+the parent. `--include-archived` adds inputs under `archived_sessions`.
+`--days N` replaces the default window; `--since` and `--until` are absolute
+RFC3339 half-open bounds and cannot be combined with `--days`.
+
 ## 4. Session metadata
 
 `session_meta.payload` may provide:
