@@ -649,13 +649,13 @@ fn reject_monitor_cursor_path(cursor: &Path, source: &Path, store: &Path) -> Res
 }
 
 fn refresh_store(options: &RefreshOptions) -> Result<RefreshOutcome> {
-    if let Some(home) = options.codex_home.as_deref()
-        && !home.is_absolute()
-    {
-        bail!(
-            "--codex-home must be an absolute directory: {}",
-            bounded_display(home)
-        );
+    if let Some(home) = options.codex_home.as_deref() {
+        if !home.is_absolute() {
+            bail!(
+                "--codex-home must be an absolute directory: {}",
+                bounded_display(home)
+            );
+        }
     }
     let discovery = discover(&DiscoveryOptions {
         explicit_home: options.codex_home.clone(),
