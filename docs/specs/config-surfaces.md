@@ -3,6 +3,11 @@
 The adapter owns this upstream-format knowledge. Analysis and reports consume
 the normalized `Surface` record only.
 
+The adapter/store contract ends at discovery, normalization, usage evidence,
+and persistence. Heavy classification and exact-target `remove`/`slim`/
+`re-scope` recommendations are derived by the analysis views from these
+fields; they are not part of the `Surface` record or this adapter contract.
+
 ## Roots and discovery
 
 Given `CODEX_HOME`, inspect only these roots:
@@ -12,6 +17,7 @@ Given `CODEX_HOME`, inspect only these roots:
 | global config | `$CODEX_HOME/config.toml` | global |
 | global instructions | `$CODEX_HOME/AGENTS.md`, `$CODEX_HOME/AGENTS.override.md` | global |
 | global rules | `$CODEX_HOME/rules/**/*.rules` | global |
+| project rules | `<project>/rules/**/*.rules`, `<project>/.codex/rules/**/*.rules` | project |
 | global skills | `$CODEX_HOME/skills/<name>/SKILL.md` | global |
 | project instructions | project root and ancestors: `AGENTS.md`, `AGENTS.override.md` | project/nested |
 | project skills | `<project>/.agents/skills/<name>/SKILL.md`, `<project>/.codex/skills/<name>/SKILL.md` | project |
@@ -66,8 +72,9 @@ frontmatter `description` is `startup_description` and the remaining body is
 
 ## Inventory rules
 
-`unused` is actionable only when `observed_uses = 0` and the evidence window is
-complete. `rare` requires exactly one observed use across the window. A
+Analysis views apply these rules: `unused` is actionable only when
+`observed_uses = 0` and the evidence window is complete. `rare` requires
+exactly one observed use across the window. A
 `startup_full` surface is `heavy` when its startup byte estimate is above the
 90th percentile of startup surfaces, with a minimum of 4 KiB. Ties are broken
 by resolved path. No surface is recommended for removal solely from size.
@@ -76,6 +83,7 @@ by resolved path. No surface is recommended for removal solely from size.
 
 Never persist config values for secrets, environment variables, command args,
 or private keys. Persist names, paths, booleans, bounded size estimates, and
-hashes only. Fixtures must include one global Skill, one project rule, one MCP
-server, one unused surface, and one unreadable/missing surface; tests assert
-the exact inventory state and target-specific recommendations.
+hashes only. Adapter fixtures must include one global Skill, one project rule,
+one MCP server, one unused surface, and one unreadable/missing surface; adapter
+tests assert the exact inventory state, while analysis-view tests assert
+target-specific recommendations.

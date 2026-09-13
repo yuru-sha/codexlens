@@ -841,6 +841,7 @@ pub fn select_report_data(data: &CanonicalData, period: Option<&ReportingPeriod>
             diagnostics: data.diagnostics.clone(),
             instruction_snapshots,
             instruction_joins,
+            surfaces: data.surfaces.clone(),
         },
         coverage,
     }

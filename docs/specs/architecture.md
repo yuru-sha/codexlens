@@ -114,6 +114,7 @@ The adapter owns:
 - `state_*.sqlite` thread metadata;
 - rollout envelope and event-shape decoding;
 - `AGENTS.md`/override discovery;
+- configuration, rules, Skills, MCP, plugin, and hook surface discovery;
 - `config.toml` settings needed for instruction discovery;
 - source path and line provenance.
 
@@ -131,6 +132,8 @@ The domain model owns stable concepts:
 - `FileOperation`: normalized path and operation when observable;
 - `TokenUsage`: a snapshot, not a billing ledger;
 - `InstructionSnapshot`: the instruction chain observed or reconstructed;
+- `Surface`: a bounded global/project configuration target with load mode and
+  observed-use state;
 - `ParseDiagnostic`: source location and a bounded reason;
 - `UnknownRecord`: raw valid JSON plus source provenance.
 
@@ -151,6 +154,7 @@ contain these logical areas:
 | `token_usage` | deduplicated usage snapshots |
 | `instruction_files` | discovered instruction sources and scope |
 | `instruction_snapshots` | historical effective-chain content/hash |
+| `surfaces` | current normalized configuration inventory and usage state |
 | `corrections` | in-memory lens output for detected user corrections and evidence |
 | `findings` | in-memory lens output for reproducible analysis results |
 | `ingested_files` | incremental-ingest identity and diagnostics |
