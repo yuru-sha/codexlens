@@ -724,6 +724,22 @@ fn query_renders_table_markdown_and_json_from_an_existing_store() {
     assert!(table_stdout.contains("value"), "{table_stdout}");
     assert!(table_stdout.contains("1"), "{table_stdout}");
 
+    let pragma = run_query(&["PRAGMA user_version", "--format", "json"], &store, None);
+    let pragma_document = parse_json_report(&pragma, "query");
+    assert_eq!(pragma_document["data"]["columns"], json!(["user_version"]));
+    assert_eq!(pragma_document["data"]["rows"].as_array().unwrap().len(), 1);
+
+    let compile_options = run_query(
+        &["PRAGMA compile_options", "--format", "json"],
+        &store,
+        None,
+    );
+    let compile_options_document = parse_json_report(&compile_options, "query");
+    assert_eq!(
+        compile_options_document["data"]["columns"],
+        json!(["compile_options"])
+    );
+
     let markdown = run_query(&["SELECT 1 AS value", "--format", "markdown"], &store, None);
     assert!(
         markdown.status.success(),
@@ -780,7 +796,13 @@ fn query_rejects_writes_and_bounds_rows_without_creating_a_store() {
     assert!(String::from_utf8_lossy(&write.stderr).contains("read-only"));
     assert_eq!(fs::read(&store).unwrap(), before);
 
-    for sql in ["PRAGMA journal_mode=WAL", "SELECT 1; SELECT 2"] {
+    for sql in [
+        "PRAGMA journal_mode=WAL",
+        "PRAGMA query_only = OFF",
+        "PRAGMA query_only(OFF)",
+        "PRAGMA user_version = 42",
+        "SELECT 1; SELECT 2",
+    ] {
         let rejected = run_query(&[sql], &store, None);
         assert!(!rejected.status.success(), "{sql} unexpectedly succeeded");
         assert!(String::from_utf8_lossy(&rejected.stderr).contains("statement"));
