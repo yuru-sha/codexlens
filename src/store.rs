@@ -378,6 +378,7 @@ impl Store {
                         diagnostics: vec![StateDiagnostic {
                             source: SourceRef::state(input.path.clone()),
                             kind: StateDiagnosticKind::Unreadable,
+                            session_id: None,
                             message: bounded_message(&error.to_string()),
                         }],
                     };
@@ -657,6 +658,7 @@ impl Store {
             diagnostics: vec![CanonicalDiagnostic {
                 kind: DiagnosticKind::UnsupportedReader,
                 source: SourceRef::rollout(path.to_path_buf(), 1),
+                session_id: None,
                 message: message.to_owned(),
             }],
             ..CanonicalData::default()
@@ -1126,14 +1128,15 @@ fn load_token_usage(connection: &Connection) -> Result<Vec<TokenUsage>> {
 fn load_diagnostics(connection: &Connection) -> Result<Vec<CanonicalDiagnostic>> {
     let mut statement = connection.prepare(
         "SELECT source_path, source_line, source_kind, ingested_at, parser_schema_version,
-                kind, message
+                session_id, kind, message
          FROM diagnostics ORDER BY source_path, source_line, diagnostic_key",
     )?;
     Ok(load_rows(&mut statement, |row| {
         Ok(CanonicalDiagnostic {
             source: source_from_row(row, 0, 1, 2, 3, 4)?,
-            kind: diagnostic_kind_from_db(&row.get::<_, String>(5)?),
-            message: row.get(6)?,
+            session_id: row.get(5)?,
+            kind: diagnostic_kind_from_db(&row.get::<_, String>(6)?),
+            message: row.get(7)?,
         })
     })?)
 }
@@ -1703,6 +1706,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                 source_identity TEXT NOT NULL,
                 source_path TEXT NOT NULL,
                 source_line INTEGER,
+                session_id TEXT,
                 kind TEXT NOT NULL,
                 message TEXT NOT NULL
             );
@@ -1893,6 +1897,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         )?;
     }
     if current < 8 {
+        add_column_if_table_exists(&transaction, "diagnostics", "session_id TEXT")?;
         add_column_if_table_exists(&transaction, "sessions", "rollout_id TEXT")?;
         add_column_if_table_exists(&transaction, "sessions", "codex_session_id TEXT")?;
         add_column_if_table_exists(&transaction, "sessions", "thread_id TEXT")?;
@@ -2046,6 +2051,7 @@ fn unreadable_data(path: &Path, kind: SourceKind, message: &str) -> CanonicalDat
         diagnostics: vec![CanonicalDiagnostic {
             kind: DiagnosticKind::Unreadable,
             source,
+            session_id: None,
             message: bounded_message(message),
         }],
         ..CanonicalData::default()
@@ -2121,6 +2127,7 @@ fn canonical_state_diagnostic(diagnostic: &StateDiagnostic) -> CanonicalDiagnost
     CanonicalDiagnostic {
         kind: diagnostic.kind.canonical_kind(),
         source: diagnostic.source.clone(),
+        session_id: diagnostic.session_id.clone(),
         message: diagnostic.message.clone(),
     }
 }
@@ -2583,7 +2590,7 @@ fn insert_diagnostic(
         &format!("diagnostic:{index}:{}", diagnostic.kind.as_str()),
     );
     transaction.execute(
-        "INSERT OR REPLACE INTO diagnostics (diagnostic_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, kind, message) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT OR REPLACE INTO diagnostics (diagnostic_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, session_id, kind, message) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             key,
             identity,
@@ -2592,6 +2599,7 @@ fn insert_diagnostic(
             source_kind_name(diagnostic.source.kind),
             diagnostic.source.ingested_at,
             i64::from(diagnostic.source.parser_schema_version),
+            diagnostic.session_id,
             diagnostic.kind.as_str(),
             diagnostic.message,
         ],
@@ -3645,6 +3653,17 @@ mod tests {
                 )
                 .unwrap(),
             1
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT session_id FROM diagnostics WHERE kind = 'metadata_conflict'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "fixture-enrichment-session"
         );
 
         let first_connection = Connection::open(&first).unwrap();

@@ -18,12 +18,14 @@ pub use apply::{
 pub use diff::{DiffBatch, DiffError, RenderedDiff, SkippedProposal, render_diff, render_diffs};
 pub use proposal::{Proposal, ProposalAction, ProposalError, ProposalPlan, proposals_for_findings};
 pub use report::{
-    DEFAULT_SESSION_LIMIT, DoctorFinding, DoctorGroup, DoctorOptions, DoctorReport, ReportCoverage,
-    SessionSummary, doctor, doctor_with_coverage, render_doctor, render_doctor_with_coverage,
+    CoverageLimitation, DEFAULT_SESSION_LIMIT, DoctorFinding, DoctorGroup, DoctorOptions,
+    DoctorReport, ReportCoverage, SessionSummary, coverage_limitations_json, doctor,
+    doctor_with_coverage, render_coverage_limitations, render_doctor, render_doctor_with_coverage,
     render_doctor_with_period, render_json_diff, render_json_diff_with_period,
     render_json_finding_report, render_json_finding_report_with_coverage,
     render_json_finding_report_with_period, render_json_sessions, render_json_sessions_with_period,
     render_proposal_summary, render_report_metadata, render_report_metadata_with_period,
-    report_coverage, report_coverage_with_period, report_sessions, report_sessions_with_limit,
+    report_coverage, report_coverage_for_period_selection, report_coverage_with_period,
+    report_sessions, report_sessions_with_limit,
 };
 pub use scope::{ScopeRecommendation, recommend_scope};

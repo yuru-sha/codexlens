@@ -796,6 +796,8 @@ impl DiagnosticKind {
 pub struct CanonicalDiagnostic {
     pub kind: DiagnosticKind,
     pub source: SourceRef,
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub message: String,
 }
 
