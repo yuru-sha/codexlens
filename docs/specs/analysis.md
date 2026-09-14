@@ -141,6 +141,16 @@ twice within the short rework window is a rework candidate. Exclude generated
 or temporary paths only when the project has an explicit instruction or a
 known safe pattern; do not hard-code repository-specific exclusions.
 
+The adapter emits file-operation evidence only from recognized patch markers,
+typed patch/file tool payloads, or a canonical structured shell command. Shell
+redirection targets are not inferred from `input_summary`, wrapper or
+JavaScript text, nested or opaque serialized JSON, or patch text. A typed
+JSON-encoded `cmd`, `argv`, or `command` field is decoded once by the adapter
+and remains canonical command evidence. Quoted targets remain one path when
+the shell command boundary is known. Failed or ambiguous calls,
+empty or fragmented paths, file-descriptor targets, `/dev/null` and its
+descendants, and known parser artifacts are rejected before analysis.
+
 ### Stuck
 
 A file is stuck when the same short window contains a failure/edit loop or the
