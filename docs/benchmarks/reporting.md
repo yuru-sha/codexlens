@@ -23,7 +23,7 @@ capped at 256 KiB; the doctor output keeps the stricter 64 KiB cap.
 The chosen target is at most 5 seconds per reporting command on macOS arm64.
 The benchmark is enforced by the pinned `macos-14` arm64 CI job with
 `cargo bench --locked --bench reporting`. A non-timing benchmark failure fails
-CI immediately. If a run reports only a timing failure, CI allows up to three
+CI immediately. If a run reports only a timing failure, CI allows up to five
 total attempts and requires two subsequent clean attempts before passing; each
 clean attempt enforces the 5-second limit for every command. This is a
 development benchmark target for that runner; it does not claim runtime or

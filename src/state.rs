@@ -5,6 +5,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::model::{DiagnosticKind, Session, SourceRef, merge_session_fields};
+use crate::rollout::rollout_id_from_path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateDiagnosticKind {
@@ -41,7 +42,9 @@ pub struct StateReadResult {
 pub type StateMetadata = StateReadResult;
 
 const FIELD_ALIASES: &[(&str, &[&str])] = &[
-    ("id", &["id", "thread_id", "session_id"]),
+    ("thread_id", &["thread_id", "id"]),
+    ("session_id", &["session_id"]),
+    ("rollout_id", &["rollout_id"]),
     ("rollout_path", &["rollout_path", "rollout_file", "rollout"]),
     (
         "created_at",
@@ -209,7 +212,10 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
         }
     };
     let selected = selected_columns(&columns);
-    if !selected.iter().any(|column| column.key == "id") {
+    if !selected
+        .iter()
+        .any(|column| matches!(column.key, "thread_id" | "session_id" | "rollout_id"))
+    {
         return StateReadResult {
             sessions: Vec::new(),
             diagnostics: vec![StateDiagnostic {
@@ -231,7 +237,7 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
         quote_identifier(
             &selected
                 .iter()
-                .find(|column| column.key == "id")
+                .find(|column| { matches!(column.key, "thread_id" | "session_id" | "rollout_id") })
                 .expect("identity column was checked")
                 .name,
         ),
@@ -300,7 +306,24 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
             .enumerate()
             .map(|(index, value)| (selected[index].key, value))
             .collect::<HashMap<_, _>>();
-        let Some(id) = value_string(values.get("id")).filter(|id| !id.is_empty()) else {
+        let rollout_path =
+            value_string(values.get("rollout_path")).filter(|value| !value.is_empty());
+        let rollout_id = value_string(values.get("rollout_id"))
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                rollout_path
+                    .as_deref()
+                    .and_then(|path| rollout_id_from_path(Path::new(path)))
+            });
+        let thread_id = value_string(values.get("thread_id")).filter(|value| !value.is_empty());
+        let session_id = value_string(values.get("session_id")).filter(|value| !value.is_empty());
+        let Some(id) = thread_id
+            .as_ref()
+            .or(session_id.as_ref())
+            .or(rollout_id.as_ref())
+            .filter(|id| !id.is_empty())
+            .cloned()
+        else {
             result.diagnostics.push(StateDiagnostic {
                 source: source.clone(),
                 kind: StateDiagnosticKind::Query,
@@ -311,6 +334,9 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
 
         result.sessions.push(Session {
             id,
+            rollout_id,
+            session_id,
+            thread_id,
             created_at: value_string(values.get("created_at")),
             updated_at: value_string(values.get("updated_at")),
             cwd: value_string(values.get("cwd")),
@@ -319,7 +345,7 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
             provider: value_string(values.get("provider")),
             source: value_string(values.get("source")),
             thread_source: value_string(values.get("thread_source")),
-            rollout_path: value_string(values.get("rollout_path")),
+            rollout_path,
             archive_state: value_bool(values.get("archive_state")),
             title: value_string(values.get("title")),
             preview: value_string(values.get("preview")),
@@ -512,6 +538,63 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.kind == StateDiagnosticKind::MetadataConflict)
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn preserves_rollout_session_thread_and_parent_identities() {
+        let path = temporary_database("session-identities");
+        create_database(
+            &path,
+            include_str!("../tests/fixtures/state/session-identities.sql"),
+        );
+
+        let result = read_state_database(&path);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let main = result
+            .sessions
+            .iter()
+            .find(|session| session.id == "fixture-main-thread")
+            .unwrap();
+        assert_eq!(main.rollout_id.as_deref(), Some("fixture-rollout"));
+        assert_eq!(main.session_id.as_deref(), Some("fixture-session-tree"));
+        assert_eq!(main.thread_id.as_deref(), Some("fixture-main-thread"));
+        let child = result
+            .sessions
+            .iter()
+            .find(|session| session.id == "fixture-child-thread")
+            .unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some("fixture-main-thread"));
+        assert_eq!(
+            result
+                .sessions
+                .iter()
+                .filter(|session| session.parent_id.as_deref() == Some("fixture-main-thread"))
+                .count(),
+            2
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_state_identities_use_non_empty_fallbacks() {
+        let path = temporary_database("empty-identities");
+        create_database(
+            &path,
+            include_str!("../tests/fixtures/state/empty-identities.sql"),
+        );
+
+        let result = read_state_database(&path);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.sessions.len(), 1);
+        assert_eq!(result.sessions[0].id, "fixture-session-tree");
+        assert_eq!(
+            result.sessions[0].rollout_id.as_deref(),
+            Some("fixture-rollout")
+        );
+        assert_eq!(result.sessions[0].thread_id, None);
         let _ = std::fs::remove_file(path);
     }
 

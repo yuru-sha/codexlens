@@ -68,6 +68,9 @@ fn synthetic_data() -> CanonicalData {
         sessions: (0..SESSION_COUNT)
             .map(|session| Session {
                 id: format!("synthetic-session-{session}"),
+                rollout_id: None,
+                session_id: None,
+                thread_id: None,
                 created_at: Some("2026-01-01T00:00:00Z".to_owned()),
                 updated_at: Some("2026-01-01T00:01:00Z".to_owned()),
                 cwd: Some("/synthetic/project".to_owned()),

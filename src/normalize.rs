@@ -10,11 +10,12 @@ use crate::instructions::{
 use crate::model::{
     CanonicalData, CanonicalDiagnostic, DiagnosticKind, FileOperation, MAX_MESSAGE_BYTES,
     MAX_TOOL_OUTPUT_BYTES, MAX_TOOL_SUMMARY_BYTES, Message, MessageRole, OutcomeSource, Record,
-    RecordKind, Session, SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn,
-    TurnLifecycleEvent, merge_session_fields, normalize_path,
+    RecordKind, Session, SourceKind, SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult,
+    Turn, TurnLifecycleEvent, merge_session_fields, normalize_path,
 };
 use crate::rollout::{
     KnownRecordType, ParseDiagnostic, RolloutInstructionContext, RolloutParseResult, RolloutRecord,
+    rollout_id_from_path,
 };
 use crate::state::StateReadResult;
 
@@ -178,39 +179,34 @@ fn normalize_records_with_resolver(
                     source.clone(),
                     &mut data.diagnostics,
                 ) {
-                    if matched_state_session_id
-                        .as_deref()
-                        .is_some_and(|state_id| state_id != candidate.id)
-                    {
-                        data.diagnostics.push(CanonicalDiagnostic {
-                            kind: DiagnosticKind::MetadataConflict,
-                            source: source.clone(),
-                            message: bounded(&format!(
-                                "state and rollout session identities differ: state={:?}, rollout={:?}",
-                                matched_state_session_id, candidate.id
-                            )),
+                    let previous_session_id = current_session_id.clone();
+                    let previous_was_state_fallback =
+                        previous_session_id.as_deref().is_some_and(|id| {
+                            sessions
+                                .get(id)
+                                .is_some_and(|session| session.provenance.kind == SourceKind::State)
                         });
-                    }
-                    if let Some(state_session) =
-                        state.iter().find(|session| session.id == candidate.id)
-                    {
-                        if state_session
-                            .rollout_path
+                    let session_id = merge_rollout_session(
+                        &mut sessions,
+                        candidate,
+                        state,
+                        &mut data.diagnostics,
+                    );
+                    if previous_was_state_fallback {
+                        if let Some(previous_session_id) = previous_session_id
                             .as_deref()
-                            .is_some_and(|path| !same_path(Path::new(path), &source.path))
+                            .filter(|previous| *previous != session_id)
                         {
-                            data.diagnostics.push(CanonicalDiagnostic {
-                                kind: DiagnosticKind::MetadataConflict,
-                                source: source.clone(),
-                                message: bounded(
-                                    "state and rollout session paths differ; state metadata was retained as enrichment",
-                                ),
-                            });
+                            rekey_session_references(
+                                &mut data,
+                                &mut sessions,
+                                previous_session_id,
+                                &session_id,
+                            );
                         }
                     }
-                    current_session_id = Some(candidate.id.clone());
+                    current_session_id = Some(session_id);
                     current_turn_id = None;
-                    merge_rollout_session(&mut sessions, candidate, state, &mut data.diagnostics);
                 }
             }
             crate::rollout::RolloutRecordKind::Known {
@@ -1098,12 +1094,127 @@ fn matching_state_session<'a>(
     state: &'a [Session],
 ) -> Option<&'a Session> {
     let path = path?;
-    state.iter().find(|session| {
-        session.rollout_path.as_deref().is_some_and(|rollout_path| {
-            let rollout_path = std::path::Path::new(rollout_path);
-            same_path(rollout_path, path)
+    state
+        .iter()
+        .find(|session| rollout_path_matches(session.rollout_path.as_deref(), path))
+}
+
+fn matching_state_session_for_candidate<'a>(
+    candidate: &Session,
+    state: &'a [Session],
+) -> Option<&'a Session> {
+    state
+        .iter()
+        .find(|session| session.id == candidate.id)
+        .or_else(|| {
+            state.iter().find(|session| {
+                candidate.rollout_path.as_deref().is_some_and(|path| {
+                    rollout_path_matches(session.rollout_path.as_deref(), Path::new(path))
+                })
+            })
         })
-    })
+        .or_else(|| {
+            state
+                .iter()
+                .find(|session| identities_match(candidate, session))
+        })
+}
+
+fn rekey_session_references(
+    data: &mut CanonicalData,
+    sessions: &mut BTreeMap<String, Session>,
+    from: &str,
+    to: &str,
+) {
+    if from == to {
+        return;
+    }
+    let update = |session_id: &mut Option<String>| {
+        if session_id.as_deref() == Some(from) {
+            *session_id = Some(to.to_owned());
+        }
+    };
+    for session in data.sessions.iter_mut() {
+        update(&mut session.parent_id);
+    }
+    for session in sessions.values_mut() {
+        update(&mut session.parent_id);
+    }
+    for turn in &mut data.turns {
+        update(&mut turn.session_id);
+    }
+    for record in &mut data.records {
+        update(&mut record.session_id);
+    }
+    for message in &mut data.messages {
+        update(&mut message.session_id);
+    }
+    for tool_call in &mut data.tool_calls {
+        update(&mut tool_call.session_id);
+    }
+    for tool_result in &mut data.tool_results {
+        update(&mut tool_result.session_id);
+    }
+    for operation in &mut data.file_operations {
+        update(&mut operation.session_id);
+    }
+    for usage in &mut data.token_usage {
+        update(&mut usage.session_id);
+    }
+    for snapshot in &mut data.instruction_snapshots {
+        update(&mut snapshot.session_id);
+    }
+    for join in &mut data.instruction_joins {
+        if join.session_id == from {
+            join.session_id = to.to_owned();
+        }
+    }
+}
+
+fn identities_match(left: &Session, right: &Session) -> bool {
+    if left.id == right.id {
+        return true;
+    }
+    if let (Some(left), Some(right)) = (left.thread_id.as_deref(), right.thread_id.as_deref()) {
+        return left == right;
+    }
+    let has_fallback_thread = left.thread_id.is_none() || right.thread_id.is_none();
+    left.rollout_id
+        .as_deref()
+        .zip(right.rollout_id.as_deref())
+        .is_some_and(|(left, right)| left == right)
+        || left
+            .session_id
+            .as_deref()
+            .zip(right.session_id.as_deref())
+            .is_some_and(|(left, right)| left == right && has_fallback_thread)
+}
+
+fn same_rollout_source(left: &Session, right: &Session) -> bool {
+    rollout_paths_match(left, right)
+        && ((left.rollout_id.is_some() || right.rollout_id.is_some())
+            || left.provenance.kind == SourceKind::State
+            || right.provenance.kind == SourceKind::State)
+}
+
+fn same_rollout_identity(left: &Session, right: &Session) -> bool {
+    rollout_paths_match(left, right)
+        && left
+            .rollout_id
+            .as_deref()
+            .zip(right.rollout_id.as_deref())
+            .is_some_and(|(left, right)| left == right)
+}
+
+fn rollout_paths_match(left: &Session, right: &Session) -> bool {
+    left.rollout_path
+        .as_deref()
+        .zip(right.rollout_path.as_deref())
+        .is_some_and(|(left, right)| rollout_path_matches(Some(left), Path::new(right)))
+}
+
+fn rollout_path_matches(left: Option<&str>, right: &Path) -> bool {
+    left.is_some_and(|left| same_path(Path::new(left), right))
 }
 
 fn source_is_archived(path: &Path) -> bool {
@@ -1130,22 +1241,82 @@ fn merge_rollout_session(
     candidate: Session,
     state: &[Session],
     diagnostics: &mut Vec<CanonicalDiagnostic>,
-) {
-    if let Some(existing) = sessions.get_mut(&candidate.id) {
-        if existing.provenance.path == candidate.provenance.path {
-            merge_session(existing, &candidate, diagnostics);
-            return;
+) -> String {
+    let state_session = matching_state_session_for_candidate(&candidate, state);
+    if let Some(state_session) = state_session {
+        if !same_rollout_identity(&candidate, state_session)
+            && !identities_match(&candidate, state_session)
+        {
+            diagnostics.push(CanonicalDiagnostic {
+                kind: DiagnosticKind::MetadataConflict,
+                source: state_session.provenance.clone(),
+                message: bounded(&format!(
+                    "state and rollout session identities differ: state={:?}, rollout={:?}",
+                    state_session.id, candidate.id
+                )),
+            });
+        }
+        if state_session
+            .rollout_path
+            .as_deref()
+            .is_some_and(|path| !rollout_path_matches(Some(path), &candidate.provenance.path))
+        {
+            diagnostics.push(CanonicalDiagnostic {
+                kind: DiagnosticKind::MetadataConflict,
+                source: candidate.provenance.clone(),
+                message: bounded(
+                    "state and rollout session paths differ; state metadata was retained as enrichment",
+                ),
+            });
+        }
+    }
+    let existing_id = sessions
+        .get(&candidate.id)
+        .map(|session| session.id.clone())
+        .or_else(|| {
+            sessions
+                .iter()
+                .find(|(_, session)| same_rollout_source(session, &candidate))
+                .map(|(id, _)| id.clone())
+        });
+    if let Some(existing_id) = existing_id {
+        let mut existing = sessions
+            .remove(&existing_id)
+            .expect("existing session was found in the session map");
+        if same_rollout_source(&existing, &candidate) {
+            if existing.provenance.kind == SourceKind::State
+                && candidate.provenance.kind == SourceKind::Rollout
+            {
+                let mut merged = candidate.clone();
+                merge_session(&mut merged, &existing, diagnostics);
+                if let Some(state_session) = state_session {
+                    merge_session(&mut merged, state_session, diagnostics);
+                }
+                let id = merged.id.clone();
+                sessions.insert(id.clone(), merged);
+                return id;
+            }
+            merge_session(&mut existing, &candidate, diagnostics);
+            if let Some(state_session) = state_session {
+                merge_session(&mut existing, state_session, diagnostics);
+            }
+            let id = existing.id.clone();
+            sessions.insert(id.clone(), existing);
+            return id;
         }
         let mut merged = candidate.clone();
-        merge_session(&mut merged, existing, diagnostics);
-        *existing = merged;
-        return;
+        merge_session(&mut merged, &existing, diagnostics);
+        let id = merged.id.clone();
+        sessions.insert(id.clone(), merged);
+        return id;
     }
     let mut merged = candidate.clone();
-    if let Some(state_session) = state.iter().find(|session| session.id == candidate.id) {
+    if let Some(state_session) = state_session {
         merge_session(&mut merged, state_session, diagnostics);
     }
-    sessions.insert(merged.id.clone(), merged);
+    let id = merged.id.clone();
+    sessions.insert(id.clone(), merged);
+    id
 }
 
 fn merge_session(
@@ -1172,30 +1343,49 @@ fn session_from_payload(
     diagnostics: &mut Vec<CanonicalDiagnostic>,
 ) -> Option<Session> {
     let payload = payload?.as_object()?;
-    let id = string_field(payload, &["id"]);
-    let session_id = string_field(payload, &["session_id"]);
-    let thread_id = string_field(payload, &["thread_id"]);
-    let identity = [id.as_ref(), session_id.as_ref(), thread_id.as_ref()]
-        .into_iter()
-        .flatten()
-        .next()
-        .cloned();
-    if let Some(identity) = identity.as_ref() {
-        if [id.as_ref(), session_id.as_ref(), thread_id.as_ref()]
-            .into_iter()
-            .flatten()
-            .any(|candidate| candidate != identity)
-        {
+    let id = string_field(payload, &["id"]).filter(|value| !value.is_empty());
+    let explicit_session_id =
+        string_field(payload, &["session_id"]).filter(|value| !value.is_empty());
+    let explicit_thread_id =
+        string_field(payload, &["thread_id"]).filter(|value| !value.is_empty());
+    let rollout_id = string_field(payload, &["rollout_id"])
+        .filter(|value| !value.is_empty())
+        .or_else(|| rollout_id_from_path(&source.path));
+    let thread_id = explicit_thread_id.clone().or(id.clone());
+    let session_id = explicit_session_id;
+    let identity = thread_id
+        .clone()
+        .or_else(|| session_id.clone())
+        .or_else(|| rollout_id.clone());
+    if let (Some(id), Some(thread_id)) = (id.as_ref(), thread_id.as_ref()) {
+        if id != thread_id && explicit_thread_id.is_some() {
             diagnostics.push(CanonicalDiagnostic {
                 kind: DiagnosticKind::MetadataConflict,
                 source: source.clone(),
-                message: "session metadata contains conflicting identity fields".to_owned(),
+                message: "session metadata contains conflicting thread identity fields".to_owned(),
+            });
+        }
+    }
+    let parent_thread_id =
+        string_field(payload, &["parent_thread_id"]).filter(|value| !value.is_empty());
+    let parent_id_alias = string_field(payload, &["parent_id"]).filter(|value| !value.is_empty());
+    if let (Some(parent_thread_id), Some(parent_id)) =
+        (parent_thread_id.as_ref(), parent_id_alias.as_ref())
+    {
+        if parent_thread_id != parent_id {
+            diagnostics.push(CanonicalDiagnostic {
+                kind: DiagnosticKind::MetadataConflict,
+                source: source.clone(),
+                message: "session metadata contains conflicting parent identity fields".to_owned(),
             });
         }
     }
     let id = identity?;
     Some(Session {
         id,
+        rollout_id,
+        session_id,
+        thread_id,
         created_at: string_field(payload, &["timestamp", "created_at"])
             .or_else(|| envelope_timestamp.map(str::to_owned)),
         updated_at: string_field(payload, &["updated_at"]),
@@ -1214,7 +1404,7 @@ fn session_from_payload(
             .or_else(|| source_is_archived(&source.path).then_some(true)),
         title: string_field(payload, &["title"]),
         preview: string_field(payload, &["preview", "first_user_message"]),
-        parent_id: string_field(payload, &["parent_thread_id", "parent_id"]),
+        parent_id: parent_thread_id.or(parent_id_alias),
         cli_version: string_field(payload, &["cli_version"]),
         originator: string_field(payload, &["originator"]),
         history_mode: string_field(payload, &["history_mode"]),
@@ -2951,6 +3141,220 @@ mod tests {
     }
 
     #[test]
+    fn repeated_rollout_metadata_does_not_create_false_identity_conflicts() {
+        let path = Path::new(
+            "sessions/2026/01/02/rollout-2026-01-02T00-00-00-fixture-main-thread_fixture-rollout.jsonl",
+        );
+        let result = parse_rollout_reader(
+            path,
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../tests/fixtures/rollout/session-identities.jsonl"
+            ))),
+        );
+
+        let state = Session {
+            id: "fixture-state-key".to_owned(),
+            rollout_id: Some("fixture-rollout".to_owned()),
+            session_id: Some("fixture-session-tree".to_owned()),
+            thread_id: None,
+            created_at: None,
+            updated_at: None,
+            cwd: Some("/fixture/main".to_owned()),
+            project: None,
+            model: None,
+            provider: None,
+            source: None,
+            thread_source: None,
+            rollout_path: Some(path.to_string_lossy().into_owned()),
+            archive_state: None,
+            title: None,
+            preview: None,
+            parent_id: None,
+            cli_version: None,
+            originator: None,
+            history_mode: None,
+            reasoning_effort: None,
+            provenance: SourceRef::state(PathBuf::from("state.sqlite")),
+        };
+        let data = normalize_rollout_with_state(&result, &[state]);
+
+        assert_eq!(data.sessions.len(), 1);
+        assert_eq!(data.sessions[0].id, "fixture-main-thread");
+        assert_eq!(
+            data.sessions[0].rollout_id.as_deref(),
+            Some("fixture-rollout")
+        );
+        assert_eq!(
+            data.sessions[0].session_id.as_deref(),
+            Some("fixture-session-tree")
+        );
+        assert_eq!(
+            data.sessions[0].thread_id.as_deref(),
+            Some("fixture-main-thread")
+        );
+        assert!(
+            data.records
+                .iter()
+                .all(|record| record.session_id.as_deref() == Some("fixture-main-thread"))
+        );
+        assert!(
+            data.diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.kind != DiagnosticKind::MetadataConflict)
+        );
+    }
+
+    #[test]
+    fn parent_thread_identity_is_preserved_for_subagents() {
+        let result = parse_rollout_reader(
+            Path::new(
+                "sessions/2026/01/02/rollout-2026-01-02T00-01-00-fixture-child-thread_fixture-child-rollout.jsonl",
+            ),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../tests/fixtures/rollout/session-identities-child.jsonl"
+            ))),
+        );
+
+        let data = normalize_rollout(&result);
+        let session = &data.sessions[0];
+        assert_eq!(session.id, "fixture-child-thread");
+        assert_eq!(session.session_id.as_deref(), Some("fixture-session-tree"));
+        assert_eq!(session.thread_id.as_deref(), Some("fixture-child-thread"));
+        assert_eq!(session.parent_id.as_deref(), Some("fixture-main-thread"));
+    }
+
+    #[test]
+    fn state_fallback_survives_identityless_session_metadata() {
+        let result = parse_rollout_reader(
+            Path::new("fixture.jsonl"),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../tests/fixtures/rollout/identityless.jsonl"
+            ))),
+        );
+        let state = Session {
+            id: "fixture-state-session".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
+            created_at: None,
+            updated_at: None,
+            cwd: Some("/fixture/main".to_owned()),
+            project: None,
+            model: None,
+            provider: None,
+            source: None,
+            thread_source: None,
+            rollout_path: Some("fixture.jsonl".to_owned()),
+            archive_state: None,
+            title: None,
+            preview: None,
+            parent_id: None,
+            cli_version: None,
+            originator: None,
+            history_mode: None,
+            reasoning_effort: None,
+            provenance: SourceRef::state(PathBuf::from("state.sqlite")),
+        };
+
+        let data = normalize_rollout_with_state(&result, &[state]);
+
+        assert_eq!(data.sessions.len(), 1);
+        assert_eq!(data.sessions[0].id, "fixture-state-session");
+        assert!(
+            data.records
+                .iter()
+                .all(|record| record.session_id.as_deref() == Some("fixture-state-session"))
+        );
+    }
+
+    #[test]
+    fn state_fallback_rekeys_records_when_rollout_identity_arrives() {
+        let result = parse_rollout_reader(
+            Path::new("fixture.jsonl"),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../tests/fixtures/rollout/state-fallback-rekey.jsonl"
+            ))),
+        );
+        let state = Session {
+            id: "fixture-state-session".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
+            created_at: None,
+            updated_at: None,
+            cwd: None,
+            project: None,
+            model: None,
+            provider: None,
+            source: None,
+            thread_source: None,
+            rollout_path: Some("fixture.jsonl".to_owned()),
+            archive_state: None,
+            title: None,
+            preview: None,
+            parent_id: None,
+            cli_version: None,
+            originator: None,
+            history_mode: None,
+            reasoning_effort: None,
+            provenance: SourceRef::state(PathBuf::from("state.sqlite")),
+        };
+
+        let data = normalize_rollout_with_state(&result, &[state]);
+
+        assert_eq!(data.sessions.len(), 1);
+        assert_eq!(data.sessions[0].id, "fixture-rollout-session");
+        assert!(
+            data.records
+                .iter()
+                .all(|record| record.session_id.as_deref() == Some("fixture-rollout-session"))
+        );
+    }
+
+    #[test]
+    fn state_fallback_rekeys_parent_references_in_memory() {
+        let mut data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-parent"}}
+{"type":"session_meta","payload":{"id":"fixture-child","parent_id":"fixture-parent"}}"#,
+        );
+        let mut sessions = data
+            .sessions
+            .iter()
+            .cloned()
+            .map(|session| (session.id.clone(), session))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            data.sessions
+                .iter()
+                .find(|session| session.id == "fixture-child")
+                .and_then(|session| session.parent_id.as_deref()),
+            Some("fixture-parent")
+        );
+
+        rekey_session_references(
+            &mut data,
+            &mut sessions,
+            "fixture-parent",
+            "fixture-rollout-parent",
+        );
+
+        assert_eq!(
+            data.sessions
+                .iter()
+                .find(|session| session.id == "fixture-child")
+                .and_then(|session| session.parent_id.as_deref()),
+            Some("fixture-rollout-parent")
+        );
+        assert_eq!(
+            sessions
+                .get("fixture-child")
+                .and_then(|session| session.parent_id.as_deref()),
+            Some("fixture-rollout-parent")
+        );
+    }
+
+    #[test]
     fn rollout_values_win_conflicts_and_state_fills_missing_metadata() {
         let parsed = parse_rollout_reader(
             Path::new("fixture.jsonl"),
@@ -2960,6 +3364,9 @@ mod tests {
         );
         let state = Session {
             id: "fixture-conflict-session".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
             created_at: None,
             updated_at: None,
             cwd: Some("/state".to_owned()),
@@ -3002,6 +3409,9 @@ mod tests {
         );
         let state = Session {
             id: "fixture-state-session".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
             created_at: None,
             updated_at: None,
             cwd: None,
@@ -3024,7 +3434,7 @@ mod tests {
 
         let data = normalize_rollout_with_state(&parsed, &[state]);
 
-        assert_eq!(data.sessions.len(), 2);
+        assert_eq!(data.sessions.len(), 1);
         assert!(data.diagnostics.iter().any(|diagnostic| {
             diagnostic.kind == DiagnosticKind::MetadataConflict
                 && diagnostic.message.contains("identities differ")
@@ -3041,6 +3451,9 @@ mod tests {
         );
         let state = Session {
             id: "fixture-stale-session".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
             created_at: None,
             updated_at: None,
             cwd: None,

@@ -90,6 +90,12 @@ impl From<&SourceLocation> for SourceRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
+    #[serde(default)]
+    pub rollout_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub cwd: Option<String>,
@@ -122,6 +128,24 @@ pub(crate) fn merge_session_fields(
     incoming: &Session,
 ) -> Vec<SessionConflict> {
     let mut conflicts = Vec::new();
+    merge_session_field(
+        "rollout_id",
+        &mut target.rollout_id,
+        &incoming.rollout_id,
+        &mut conflicts,
+    );
+    merge_session_field(
+        "session_id",
+        &mut target.session_id,
+        &incoming.session_id,
+        &mut conflicts,
+    );
+    merge_session_field(
+        "thread_id",
+        &mut target.thread_id,
+        &incoming.thread_id,
+        &mut conflicts,
+    );
     merge_session_field(
         "created_at",
         &mut target.created_at,

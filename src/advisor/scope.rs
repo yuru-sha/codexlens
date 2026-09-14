@@ -355,6 +355,9 @@ mod tests {
         )]);
         data.sessions.push(crate::model::Session {
             id: "other".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
             project: Some("/fixture/other".to_owned()),
             cwd: Some("/fixture/other".to_owned()),
             provenance: source(2),
@@ -410,6 +413,9 @@ mod tests {
         let mut data = data_with_join(vec![root, first_nested]);
         data.sessions.push(crate::model::Session {
             id: "other".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
             created_at: None,
             updated_at: None,
             cwd: Some("/fixture/project/other".to_owned()),
