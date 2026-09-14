@@ -29,6 +29,7 @@ impl StateDiagnosticKind {
 pub struct StateDiagnostic {
     pub source: SourceRef,
     pub kind: StateDiagnosticKind,
+    pub session_id: Option<String>,
     pub message: String,
 }
 
@@ -92,6 +93,7 @@ pub fn read_state_database(path: &Path) -> StateReadResult {
                 diagnostics: vec![StateDiagnostic {
                     source,
                     kind: StateDiagnosticKind::Unreadable,
+                    session_id: None,
                     message: bounded_message(&error.to_string()),
                 }],
             };
@@ -161,6 +163,7 @@ fn merge_state_session(
         diagnostics.push(StateDiagnostic {
             source: incoming.provenance.clone(),
             kind: StateDiagnosticKind::MetadataConflict,
+            session_id: Some(incoming.id.clone()),
             message: format!(
                 "state metadata conflict for {}: {} vs {}",
                 conflict.field, conflict.existing, conflict.incoming
@@ -179,6 +182,7 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
                 diagnostics: vec![StateDiagnostic {
                     source,
                     kind: StateDiagnosticKind::SchemaMismatch,
+                    session_id: None,
                     message: "no compatible threads table found".to_owned(),
                 }],
             };
@@ -189,6 +193,7 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
                 diagnostics: vec![StateDiagnostic {
                     source,
                     kind: StateDiagnosticKind::Query,
+                    session_id: None,
                     message: bounded_message(&error.to_string()),
                 }],
             };
@@ -203,6 +208,7 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
                 diagnostics: vec![StateDiagnostic {
                     source,
                     kind: StateDiagnosticKind::Query,
+                    session_id: None,
                     message: bounded_message(&error.to_string()),
                 }],
             };
@@ -215,6 +221,7 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
             diagnostics: vec![StateDiagnostic {
                 source,
                 kind: StateDiagnosticKind::SchemaMismatch,
+                session_id: None,
                 message: format!("table {table:?} has no compatible thread identity column"),
             }],
         };
@@ -244,6 +251,7 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
                 diagnostics: vec![StateDiagnostic {
                     source,
                     kind: StateDiagnosticKind::Query,
+                    session_id: None,
                     message: bounded_message(&error.to_string()),
                 }],
             };
@@ -258,6 +266,7 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
                 diagnostics: vec![StateDiagnostic {
                     source,
                     kind: StateDiagnosticKind::Query,
+                    session_id: None,
                     message: bounded_message(&error.to_string()),
                 }],
             };
@@ -273,6 +282,7 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
                 result.diagnostics.push(StateDiagnostic {
                     source: source.clone(),
                     kind: StateDiagnosticKind::Query,
+                    session_id: None,
                     message: bounded_message(&error.to_string()),
                 });
                 break;
@@ -290,6 +300,7 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
                 result.diagnostics.push(StateDiagnostic {
                     source: source.clone(),
                     kind: StateDiagnosticKind::Query,
+                    session_id: None,
                     message: format!("row {row_number}: {}", bounded_message(&error.to_string())),
                 });
                 continue;
@@ -304,6 +315,7 @@ fn read_connection(path: &Path, connection: &Connection) -> StateReadResult {
             result.diagnostics.push(StateDiagnostic {
                 source: source.clone(),
                 kind: StateDiagnosticKind::Query,
+                session_id: None,
                 message: format!("row {row_number} has no thread identity"),
             });
             continue;
@@ -506,11 +518,14 @@ mod tests {
         assert_eq!(result.sessions.len(), 1);
         assert_eq!(result.sessions[0].cwd.as_deref(), Some("/first"));
         assert_eq!(result.sessions[0].model.as_deref(), Some("model-one"));
-        assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.kind == StateDiagnosticKind::MetadataConflict)
+        let conflict = result
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.kind == StateDiagnosticKind::MetadataConflict)
+            .unwrap();
+        assert_eq!(
+            conflict.session_id.as_deref(),
+            Some("fixture-duplicate-session")
         );
         let _ = std::fs::remove_file(path);
     }

@@ -729,7 +729,7 @@ fn report_coverage_filtered(
             .into_iter()
             .map(|limitation| {
                 let (selected_sessions, selected_records) =
-                    source_impact(&source_impacts, limitation.source);
+                    limitation_impact(&source_impacts, limitation.source, limitation.session_id);
                 CoverageLimitation {
                     kind: limitation.kind.to_owned(),
                     source: limitation.source.clone(),
@@ -799,6 +799,7 @@ struct CoverageObservations<'period, 'source> {
 struct PendingCoverageLimitation<'source> {
     kind: &'static str,
     source: &'source SourceRef,
+    session_id: Option<&'source str>,
     message: String,
     affected_lenses: &'static [&'static str],
 }
@@ -827,6 +828,7 @@ impl<'period, 'source> CoverageObservations<'period, 'source> {
             self.add_limitation(
                 missing_kind,
                 source,
+                None,
                 format!("missing {field} timestamp"),
                 timestamp_lenses(),
             );
@@ -837,6 +839,7 @@ impl<'period, 'source> CoverageObservations<'period, 'source> {
             self.add_limitation(
                 "invalid_timestamp",
                 source,
+                None,
                 format!("{field} timestamp is invalid"),
                 timestamp_lenses(),
             );
@@ -870,6 +873,7 @@ impl<'period, 'source> CoverageObservations<'period, 'source> {
         self.add_limitation(
             diagnostic.kind.as_str(),
             &diagnostic.source,
+            diagnostic.session_id.as_deref(),
             diagnostic.message.clone(),
             diagnostic_lenses(diagnostic.kind),
         );
@@ -879,12 +883,14 @@ impl<'period, 'source> CoverageObservations<'period, 'source> {
         &mut self,
         kind: &'static str,
         source: &'source SourceRef,
+        session_id: Option<&'source str>,
         message: String,
         affected_lenses: &'static [&'static str],
     ) {
         self.limitations.push(PendingCoverageLimitation {
             kind,
             source,
+            session_id,
             message,
             affected_lenses,
         });
@@ -905,6 +911,7 @@ fn compare_limitations(
         .then_with(|| left.kind.cmp(right.kind))
         .then_with(|| left.source.path.cmp(&right.source.path))
         .then_with(|| left.source.line.cmp(&right.source.line))
+        .then_with(|| left.session_id.cmp(&right.session_id))
         .then_with(|| left.message.cmp(&right.message))
 }
 
@@ -954,13 +961,27 @@ struct SourceImpact {
     records: usize,
 }
 
-type SourceImpactIndex = HashMap<(u8, std::path::PathBuf), SourceImpact>;
+#[derive(Default)]
+struct SessionImpact {
+    records: usize,
+}
+
+#[derive(Default)]
+struct SourceImpactIndex {
+    by_source: HashMap<(u8, std::path::PathBuf), SourceImpact>,
+    by_session: HashMap<String, SessionImpact>,
+}
 
 fn source_impact_index(
     data: &CanonicalData,
     limitations: &[PendingCoverageLimitation<'_>],
 ) -> SourceImpactIndex {
-    let mut index = SourceImpactIndex::new();
+    let mut index = SourceImpactIndex::default();
+    for session_id in session_ids(data) {
+        index
+            .by_session
+            .insert(session_id, SessionImpact::default());
+    }
     let mut target_paths = HashMap::<u8, HashSet<std::path::PathBuf>>::new();
     for limitation in limitations {
         let kind = source_kind_key(limitation.source.kind);
@@ -969,6 +990,7 @@ fn source_impact_index(
             .or_default()
             .insert(limitation.source.path.clone());
         index
+            .by_source
             .entry((kind, limitation.source.path.clone()))
             .or_default();
     }
@@ -1073,13 +1095,20 @@ fn add_source_impact(
     is_record: bool,
 ) {
     let kind = source_kind_key(source.kind);
+    if is_record {
+        if let Some(session_id) = session_id {
+            if let Some(impact) = index.by_session.get_mut(session_id) {
+                impact.records += 1;
+            }
+        }
+    }
     if !target_paths
         .get(&kind)
         .is_some_and(|paths| paths.contains(&source.path))
     {
         return;
     }
-    let Some(impact) = index.get_mut(&(kind, source.path.clone())) else {
+    let Some(impact) = index.by_source.get_mut(&(kind, source.path.clone())) else {
         return;
     };
     if let Some(session_id) = session_id {
@@ -1090,8 +1119,19 @@ fn add_source_impact(
     }
 }
 
-fn source_impact(index: &SourceImpactIndex, source: &SourceRef) -> (usize, usize) {
+fn limitation_impact(
+    index: &SourceImpactIndex,
+    source: &SourceRef,
+    session_id: Option<&str>,
+) -> (usize, usize) {
+    if let Some(session_id) = session_id {
+        return index
+            .by_session
+            .get(session_id)
+            .map_or((0, 0), |impact| (1, impact.records));
+    }
     index
+        .by_source
         .get(&(source_kind_key(source.kind), source.path.clone()))
         .map_or((0, 0), |impact| (impact.sessions.len(), impact.records))
 }
@@ -1615,16 +1655,19 @@ mod tests {
             CanonicalDiagnostic {
                 kind: DiagnosticKind::OversizedLine,
                 source: source(4),
+                session_id: None,
                 message: "synthetic oversized line".to_owned(),
             },
             CanonicalDiagnostic {
                 kind: DiagnosticKind::Unreadable,
                 source: SourceRef::rollout("unreadable.jsonl".into(), 1),
+                session_id: None,
                 message: "synthetic unreadable source".to_owned(),
             },
             CanonicalDiagnostic {
                 kind: DiagnosticKind::MetadataConflict,
                 source: SourceRef::state("state.sqlite".into()),
+                session_id: Some("session".to_owned()),
                 message: "synthetic metadata conflict".to_owned(),
             },
         ];
@@ -1654,6 +1697,13 @@ mod tests {
         assert_eq!(invalid.selected_sessions, 1);
         assert_eq!(invalid.selected_records, 2);
         assert!(invalid.affected_lenses.iter().any(|lens| lens == "rework"));
+        let metadata_conflict = coverage
+            .limitations
+            .iter()
+            .find(|limitation| limitation.kind == "metadata_conflict")
+            .unwrap();
+        assert_eq!(metadata_conflict.selected_sessions, 1);
+        assert_eq!(metadata_conflict.selected_records, 2);
         assert!(
             render_report_metadata(&coverage, &StoreFreshness::recorded(1, None))
                 .contains("Limitations:\n")

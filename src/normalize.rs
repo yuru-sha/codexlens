@@ -105,6 +105,7 @@ pub fn normalize_rollout_result(
             .map(|diagnostic| CanonicalDiagnostic {
                 kind: diagnostic.kind.canonical_kind(),
                 source: diagnostic.source.clone(),
+                session_id: diagnostic.session_id.clone(),
                 message: diagnostic.message.clone(),
             }),
     );
@@ -185,6 +186,7 @@ fn normalize_records_with_resolver(
                         data.diagnostics.push(CanonicalDiagnostic {
                             kind: DiagnosticKind::MetadataConflict,
                             source: source.clone(),
+                            session_id: Some(candidate.id.clone()),
                             message: bounded(&format!(
                                 "state and rollout session identities differ: state={:?}, rollout={:?}",
                                 matched_state_session_id, candidate.id
@@ -202,6 +204,7 @@ fn normalize_records_with_resolver(
                             data.diagnostics.push(CanonicalDiagnostic {
                                 kind: DiagnosticKind::MetadataConflict,
                                 source: source.clone(),
+                                session_id: Some(candidate.id.clone()),
                                 message: bounded(
                                     "state and rollout session paths differ; state metadata was retained as enrichment",
                                 ),
@@ -935,6 +938,7 @@ fn canonical_parse_diagnostic(diagnostic: &ParseDiagnostic) -> CanonicalDiagnost
             crate::rollout::ParseDiagnosticKind::Unreadable => DiagnosticKind::Unreadable,
         },
         source: SourceRef::from(&diagnostic.source),
+        session_id: None,
         message: diagnostic.message.clone(),
     }
 }
@@ -1003,6 +1007,7 @@ fn merge_session(
         diagnostics.push(CanonicalDiagnostic {
             kind: DiagnosticKind::MetadataConflict,
             source: incoming.provenance.clone(),
+            session_id: Some(target.id.clone()),
             message: bounded(&format!(
                 "session metadata conflict for {}: {} vs {}",
                 conflict.field, conflict.existing, conflict.incoming
@@ -1035,6 +1040,7 @@ fn session_from_payload(
             diagnostics.push(CanonicalDiagnostic {
                 kind: DiagnosticKind::MetadataConflict,
                 source: source.clone(),
+                session_id: Some(identity.clone()),
                 message: "session metadata contains conflicting identity fields".to_owned(),
             });
         }

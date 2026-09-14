@@ -443,6 +443,13 @@ fn coverage_limitation_store() -> PathBuf {
             )
             .unwrap();
     }
+    store
+        .connection()
+        .execute(
+            "UPDATE diagnostics SET session_id = 'fixture-analysis-session-a' WHERE diagnostic_key = 'coverage-conflict'",
+            [],
+        )
+        .unwrap();
     path
 }
 
@@ -3495,6 +3502,12 @@ fn coverage_limitations_are_visible_in_table_markdown_and_json() {
             .iter()
             .any(|lens| lens == "usage")
     );
+    let metadata_conflict = limitations
+        .iter()
+        .find(|limitation| limitation["kind"] == "metadata_conflict")
+        .unwrap();
+    assert!(metadata_conflict["selected_sessions"].as_u64().unwrap() > 0);
+    assert!(metadata_conflict["selected_records"].as_u64().unwrap() > 0);
     assert!(json["coverage"]["limitations_omitted"].is_number());
     let _ = fs::remove_file(partial_store);
 
