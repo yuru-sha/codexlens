@@ -219,6 +219,9 @@ pub(super) fn build_events(data: &AnalysisContext<'_>) -> Vec<FailureEvent> {
         };
         let output = combined_result_output(result);
         let has_canonical_command = !command.trim().is_empty();
+        if !has_canonical_command && matches!(tool.as_str(), "exec" | "js" | "wait") {
+            continue;
+        }
         let family = if has_canonical_command {
             command_family(command)
         } else if is_shell_tool(&tool) {
@@ -439,16 +442,12 @@ mod tests {
         let context = AnalysisContext::new(&data);
         let events = context.failure_events();
 
-        assert!(
-            events
-                .iter()
-                .any(|event| { event.tool == "exec" && event.family == "no_canonical_command" })
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| { event.tool == "js" && event.family == "no_canonical_command" })
-        );
+        assert_eq!(events.len(), 1);
+        assert!(events.iter().all(|event| {
+            event.tool == "exec_command"
+                && event.family == "cargo test"
+                && event.category == "exit_code_1"
+        }));
         assert!(!events.iter().any(|event| {
             matches!(event.tool.as_str(), "exec" | "js" | "wait")
                 && event.family == "unknown_command"
@@ -456,18 +455,9 @@ mod tests {
 
         let findings = analyze(&context, &AnalysisOptions::default());
         assert!(
-            findings
+            !findings
                 .iter()
-                .filter(|finding| { finding.key.contains("no_canonical_command") })
-                .all(|finding| {
-                    finding
-                        .suggested_action
-                        .contains("no shell-command prerequisite")
-                        && finding
-                            .limitations
-                            .iter()
-                            .any(|limitation| limitation.contains("No canonical command"))
-                })
+                .any(|finding| finding.key.contains("no_canonical_command"))
         );
 
         let parsed_renderer_command = parse_rollout_reader(
@@ -481,7 +471,7 @@ mod tests {
         let renderer_data = normalize_rollout(&parsed_renderer_command);
         let renderer_context = AnalysisContext::new(&renderer_data);
         let renderer_events = renderer_context.failure_events();
-        assert_eq!(renderer_events[0].family, "no_canonical_command");
+        assert!(renderer_events.is_empty());
     }
 
     #[test]
@@ -503,5 +493,10 @@ mod tests {
             vec!["exit_code_23", "timeout", "renderer_failed"]
         );
         assert!(events.iter().all(|event| event.structured));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.session_id == "fixture-renderer-unknown")
+        );
     }
 }
