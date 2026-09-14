@@ -431,7 +431,8 @@ fn verification_event_for_call(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::io::Cursor;
+    use std::path::{Path, PathBuf};
 
     use crate::model::{
         FileOperation, OutcomeSource, Record, RecordKind, SourceKind, SourceRef, ToolCall,
@@ -487,6 +488,24 @@ mod tests {
             ..CanonicalData::default()
         };
         assert_eq!(verification_events(&AnalysisContext::new(&data)).len(), 1);
+    }
+
+    #[test]
+    fn string_encoded_tool_command_reaches_verification_consumer() {
+        let parsed = crate::rollout::parse_rollout_reader(
+            Path::new("fixture.jsonl"),
+            crate::rollout::PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../../tests/fixtures/rollout/string-encoded-commands.jsonl"
+            ))),
+        );
+        let data = crate::normalize::normalize_rollout(&parsed);
+        let event = verification_events(&AnalysisContext::new(&data))
+            .into_iter()
+            .find(|event| event.command == "cargo check")
+            .unwrap();
+
+        assert_eq!(event.source.path, PathBuf::from("fixture.jsonl"));
+        assert_eq!(event.source.line, Some(7));
     }
 
     #[test]

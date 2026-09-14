@@ -790,11 +790,16 @@ fn structured_command_value(value: &Value) -> Option<String> {
 }
 
 fn structured_input_command(payload: &Map<String, Value>) -> Option<String> {
-    payload
-        .get("input")
-        .or_else(|| payload.get("arguments"))
-        .filter(|value| value.is_object() || value.is_array())
-        .and_then(structured_command_value)
+    ["input", "arguments"].iter().find_map(|key| {
+        payload.get(*key).and_then(|value| match value {
+            Value::String(encoded) => serde_json::from_str::<Value>(encoded)
+                .ok()
+                .filter(|value| value.is_object() || value.is_array())
+                .and_then(|value| structured_command_value(&value)),
+            value if value.is_object() || value.is_array() => structured_command_value(value),
+            _ => None,
+        })
+    })
 }
 
 fn result_command_value(value: &Value) -> Option<String> {
@@ -2162,6 +2167,140 @@ mod tests {
             .find(|result| result.call_id.as_deref() == Some("fixture-unstructured-result"))
             .unwrap();
         assert_eq!(unstructured_result.command, None);
+    }
+
+    #[test]
+    fn decodes_string_encoded_tool_arguments_without_promoting_arbitrary_text() {
+        let data = parse(include_str!(
+            "../tests/fixtures/rollout/string-encoded-commands.jsonl"
+        ));
+        let call = |call_id: &str| {
+            data.tool_calls
+                .iter()
+                .find(|call| call.call_id.as_deref() == Some(call_id))
+                .unwrap()
+        };
+
+        let function_call = call("fixture-string-function-call");
+        assert_eq!(function_call.command.as_deref(), Some("cargo run"));
+        assert_eq!(function_call.input_summary.as_deref(), Some("cargo run"));
+        assert_eq!(function_call.provenance.line, Some(3));
+
+        let argv_call = call("fixture-string-argv-call");
+        assert_eq!(argv_call.command.as_deref(), Some("cargo check"));
+
+        let command_array_call = call("fixture-string-command-array-call");
+        assert_eq!(command_array_call.command.as_deref(), Some("cargo build"));
+
+        let file_call = call("fixture-string-file-call");
+        assert_eq!(
+            file_call.command.as_deref(),
+            Some("*** Update File: src/lib.rs\n@@\n-old\n+new\n")
+        );
+        assert_eq!(data.file_operations.len(), 2);
+        assert_eq!(data.file_operations[0].path, "src/lib.rs");
+        assert_eq!(data.file_operations[1].path, "src/second.rs");
+
+        let verification_call = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.is_none() && call.command.as_deref() == Some("cargo check"))
+            .unwrap();
+        assert_eq!(verification_call.command.as_deref(), Some("cargo check"));
+
+        let fallback_call = call("fixture-string-fallback-call");
+        assert_eq!(fallback_call.command.as_deref(), Some("cargo fmt"));
+
+        let second_file_call = call("fixture-string-second-file-call");
+        assert_eq!(
+            second_file_call.command.as_deref(),
+            Some("*** Update File: src/second.rs\n@@\n-old\n+new\n")
+        );
+
+        for call_id in [
+            "fixture-string-malformed-call",
+            "fixture-string-wrapper-call",
+            "fixture-string-natural-call",
+        ] {
+            let call = call(call_id);
+            assert_eq!(call.command, None, "{call_id}");
+        }
+        assert_eq!(
+            crate::analysis::classify_verification_command(
+                verification_call.command.as_deref().unwrap()
+            ),
+            Some("check".to_owned())
+        );
+
+        let failure =
+            crate::analysis::analyze_failures(&data, &crate::analysis::AnalysisOptions::default())
+                .into_iter()
+                .find(|finding| {
+                    finding.kind == crate::analysis::FindingType::Failure
+                        && finding.key.contains("|cargo run|")
+                })
+                .unwrap();
+        assert_eq!(failure.scope.as_str(), "project");
+        assert_eq!(failure.occurrences, 2);
+        assert_eq!(failure.distinct_sessions, 2);
+        assert_eq!(failure.confidence, crate::analysis::FindingConfidence::High);
+        assert_eq!(failure.evidence.len(), 2);
+        assert!(
+            failure
+                .evidence
+                .iter()
+                .all(|evidence| evidence.role == crate::analysis::EvidenceRole::Observation)
+        );
+        assert_eq!(
+            failure
+                .evidence
+                .iter()
+                .map(|evidence| evidence.source.line)
+                .collect::<Vec<_>>(),
+            vec![Some(14), Some(19)]
+        );
+        assert!(
+            failure
+                .evidence
+                .iter()
+                .all(|evidence| evidence.source.path == Path::new("fixture.jsonl"))
+        );
+
+        let verification = crate::analysis::analyze_verification(
+            &data,
+            &crate::analysis::AnalysisOptions::default(),
+        );
+        let missing = verification
+            .iter()
+            .find(|finding| finding.affected_paths == ["src/second.rs"])
+            .unwrap();
+        assert_eq!(missing.kind, crate::analysis::FindingType::Verification);
+        assert_eq!(
+            missing.scope,
+            crate::analysis::FindingScope::Project(PathBuf::from("/fixture/project"))
+        );
+        assert_eq!(missing.confidence, crate::analysis::FindingConfidence::Low);
+        assert_eq!(missing.occurrences, 1);
+        assert_eq!(missing.distinct_sessions, 1);
+        assert_eq!(missing.evidence.len(), 2);
+        assert!(
+            missing
+                .observed_commands
+                .iter()
+                .any(|command| command.contains("cargo check"))
+        );
+        assert!(missing.evidence.iter().any(|evidence| {
+            evidence.role == crate::analysis::EvidenceRole::VerificationCommand
+                && evidence.source.path == Path::new("fixture.jsonl")
+                && evidence.source.line == Some(8)
+        }));
+
+        let function_result = data
+            .tool_results
+            .iter()
+            .find(|result| result.call_id.as_deref() == Some("fixture-string-function-call"))
+            .unwrap();
+        assert_eq!(function_result.command, None);
     }
 
     #[test]
