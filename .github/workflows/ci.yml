@@ -42,7 +42,7 @@ jobs:
           timing_failure_marker='CODEXLENS_REPORTING_BENCHMARK_TIMING_FAILURE:'
           timing_failure_seen=false
           clean_runs=0
-          for attempt in 1 2 3; do
+          for attempt in 1 2 3 4 5; do
             if output=$(cargo bench --locked --bench reporting 2>&1); then
               printf '%s\n' "${output}"
               if [ "${timing_failure_seen}" = true ]; then

@@ -89,8 +89,9 @@ the previous successful ingest.
 
 When discovered inputs include plain rollouts, state databases provide session
 metadata for rollout normalization and are not stored as separate session rows;
-this keeps one canonical stored session per rollout source. Direct state-only
-ingestion still persists state sessions when explicitly requested.
+this keeps one canonical stored session per physical rollout while retaining
+its rollout, tree-session, thread, and parent-thread identities. Direct
+state-only ingestion still persists state sessions when explicitly requested.
 
 The explicit `refresh` command discovers raw rollout/state inputs, captures
 instruction context, and delegates identity, incremental ingest, and
@@ -124,7 +125,8 @@ No raw Codex field name should be required by a lens or a report.
 
 The domain model owns stable concepts:
 
-- `Session`: identity, timestamps, cwd, project, model/provider metadata;
+- `Session`: per-thread identity, rollout/tree-session/parent identities,
+  timestamps, cwd, project, model/provider metadata;
 - `Turn`: turn identity and lifecycle;
 - `Record`: timestamped session evidence with a stable kind;
 - `Message`: user or assistant text, with source reference;
@@ -258,8 +260,12 @@ and produces a bounded diagnostic. Unknown settings are ignored.
 
 When a rollout and state index provide the same session, rollout
 `session_meta` values are authoritative because they belong to the event
-stream. State values fill missing fields; differing non-empty values are kept
-as a diagnostic and are not silently overwritten.
+stream. State values fill missing fields; differing non-empty values for the
+same canonical field are kept as a diagnostic and are not silently overwritten.
+Rollout,
+tree-session, thread, and parent-thread identities remain separate canonical
+fields, and a matching rollout path must not produce a duplicate session merely
+because an upstream identity field uses a different value.
 
 The resolution rules follow the
 [official Codex AGENTS.md guide](https://developers.openai.com/codex/guides/agents-md).

@@ -1561,6 +1561,95 @@ mod tests {
     }
 
     #[test]
+    fn canonical_parent_links_select_multiple_children_without_duplicate_records() {
+        let parse = |path: &str, content: &'static str| {
+            normalize_rollout(&parse_rollout_reader(
+                Path::new(path),
+                PlainJsonlReader::new(Cursor::new(content.as_bytes())),
+            ))
+        };
+        let mut data = parse(
+            "sessions/2026/01/02/rollout-2026-01-02T00-00-00-fixture-main-thread_fixture-rollout.jsonl",
+            include_str!("../tests/fixtures/rollout/session-identities.jsonl"),
+        );
+        let main_record_count = data.records.len();
+        for child in [
+            parse(
+                "sessions/2026/01/02/rollout-2026-01-02T00-01-00-fixture-child-thread_fixture-child-rollout.jsonl",
+                include_str!("../tests/fixtures/rollout/session-identities-child.jsonl"),
+            ),
+            parse(
+                "sessions/2026/01/02/rollout-2026-01-02T00-02-00-fixture-child-two_fixture-child-two-rollout.jsonl",
+                include_str!("../tests/fixtures/rollout/session-identities-child-two.jsonl"),
+            ),
+        ] {
+            data.sessions.extend(child.sessions);
+            data.records.extend(child.records);
+        }
+        let total_record_count = data.records.len();
+
+        assert_eq!(
+            select_session_ids(&data, &SessionSelectionOptions::default())
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["fixture-main-thread"]
+        );
+        let with_children = select_session_ids(
+            &data,
+            &SessionSelectionOptions {
+                include_subagents: true,
+                ..SessionSelectionOptions::default()
+            },
+        );
+        assert_eq!(
+            with_children.into_iter().collect::<Vec<_>>(),
+            [
+                "fixture-child-thread",
+                "fixture-child-two",
+                "fixture-main-thread"
+            ]
+        );
+
+        let default_report =
+            select_report_data_with_options(&data, None, &SessionSelectionOptions::default());
+        assert_eq!(default_report.data.records.len(), main_record_count);
+        assert!(
+            default_report
+                .data
+                .records
+                .iter()
+                .all(|record| record.session_id.as_deref() == Some("fixture-main-thread"))
+        );
+        let child_report = select_report_data_with_options(
+            &data,
+            None,
+            &SessionSelectionOptions {
+                include_subagents: true,
+                ..SessionSelectionOptions::default()
+            },
+        );
+        assert_eq!(child_report.data.records.len(), total_record_count);
+        assert_eq!(
+            child_report
+                .data
+                .records
+                .iter()
+                .filter(|record| record.session_id.as_deref() == Some("fixture-child-thread"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            child_report
+                .data
+                .records
+                .iter()
+                .filter(|record| record.session_id.as_deref() == Some("fixture-child-two"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn session_window_uses_latest_event_even_when_it_is_a_child_session() {
         let parsed = parse_rollout_reader(
             PathBuf::from("session-selection-boundary.jsonl").as_path(),

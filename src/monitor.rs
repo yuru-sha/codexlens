@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::model::CanonicalData;
+use crate::model::{CanonicalData, SourceKind};
 use crate::normalize::{
     RolloutNormalizationContext, normalize_rollout_incremental, pending_tool_calls_for_source,
     recent_tool_results_for_source,
@@ -260,8 +260,8 @@ impl LocalMonitor {
             records,
             diagnostics: parsed.diagnostics,
         };
-        let (data, retracted_file_operations) = if complete_end > start {
-            let (state_sessions, context) = if let Some(context) = self.context.clone() {
+        let (data, retracted_file_operations, session_rekey) = if complete_end > start {
+            let (state_sessions, previous_context) = if let Some(context) = self.context.clone() {
                 (Vec::new(), Some(context))
             } else {
                 let stored = store.load_canonical()?;
@@ -281,14 +281,16 @@ impl LocalMonitor {
                 &parsed,
                 &state_sessions,
                 &resolver,
-                context.as_ref(),
+                previous_context.as_ref(),
                 sequence_start,
             );
+            let session_rekey =
+                session_rekey_for_poll(previous_context.as_ref(), &data, &self.path);
             let retracted_file_operations = context.invalidated_file_operations.clone();
             self.context = Some(context);
-            (data, retracted_file_operations)
+            (data, retracted_file_operations, session_rekey)
         } else {
-            (CanonicalData::default(), Vec::new())
+            (CanonicalData::default(), Vec::new(), None)
         };
 
         let should_write = self.initial
@@ -304,6 +306,9 @@ impl LocalMonitor {
                     IngestInputKind::Rollout,
                     &data,
                     &retracted_file_operations,
+                    session_rekey
+                        .as_ref()
+                        .map(|(from, to)| (from.as_str(), to.as_str())),
                 )?
             };
             Some(summary)
@@ -559,6 +564,23 @@ fn record_identity(record: &RolloutRecord) -> Option<String> {
         .find_map(|key| object.get(*key).and_then(|value| value.as_str()))
         .filter(|value| !value.is_empty() && value.len() <= 128)
         .map(|value| format!("{category}:{value}"))
+}
+
+fn session_rekey_for_poll(
+    previous_context: Option<&RolloutNormalizationContext>,
+    data: &CanonicalData,
+    path: &Path,
+) -> Option<(String, String)> {
+    let previous = previous_context?.session.as_ref()?;
+    if previous.provenance.kind != SourceKind::State {
+        return None;
+    }
+    let next = data.sessions.iter().find(|session| {
+        session.id != previous.id
+            && session.provenance.kind == SourceKind::Rollout
+            && session.provenance.path == path
+    })?;
+    Some((previous.id.clone(), next.id.clone()))
 }
 
 fn stored_context(

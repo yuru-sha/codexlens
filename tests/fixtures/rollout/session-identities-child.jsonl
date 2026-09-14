@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-02T00:01:00Z","type":"session_meta","payload":{"id":"fixture-child-thread","session_id":"fixture-session-tree","parent_thread_id":"fixture-main-thread","cwd":"/fixture/child"}}
+{"timestamp":"2026-01-02T00:01:01Z","type":"event_msg","payload":{"type":"task_started"}}

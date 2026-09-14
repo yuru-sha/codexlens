@@ -1377,6 +1377,9 @@ mod tests {
     fn fixture_session(id: &str, project: &Path, cwd: &Path, parent_id: Option<&str>) -> Session {
         Session {
             id: id.to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
             created_at: None,
             updated_at: None,
             cwd: Some(cwd.display().to_string()),
