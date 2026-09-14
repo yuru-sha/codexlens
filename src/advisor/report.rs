@@ -633,7 +633,7 @@ fn report_coverage_filtered(
     impact_data: &CanonicalData,
 ) -> ReportCoverage {
     let record_times = record_timestamps(data);
-    let mut observations = CoverageObservations::new(period, impact_data);
+    let mut observations = CoverageObservations::new(period);
 
     for session in &data.sessions {
         observations.observe_timestamp(
@@ -717,7 +717,6 @@ fn report_coverage_filtered(
         invalid_activity_timestamps,
         mut limitations,
         period: _,
-        impact_data: _,
     } = observations;
     limitations.sort_by(|left, right| {
         limitation_priority(&left.kind)
@@ -729,6 +728,21 @@ fn report_coverage_filtered(
     });
     let limitations_omitted = limitations.len().saturating_sub(MAX_REPORT_EVIDENCE);
     limitations.truncate(MAX_REPORT_EVIDENCE);
+    let limitations: Vec<CoverageLimitation> = limitations
+        .into_iter()
+        .map(|limitation| {
+            let (selected_sessions, selected_records) =
+                source_impact(impact_data, &limitation.source);
+            CoverageLimitation {
+                kind: limitation.kind,
+                source: limitation.source,
+                message: limitation.message,
+                selected_sessions,
+                selected_records,
+                affected_lenses: limitation.affected_lenses,
+            }
+        })
+        .collect();
     timestamps.sort();
     let (activity_start, activity_end) = match (timestamps.first(), timestamps.last()) {
         (Some(start), Some(end)) => (Some(start.1.clone()), Some(end.1.clone())),
@@ -773,18 +787,23 @@ fn report_coverage_filtered(
 
 struct CoverageObservations<'a> {
     period: Option<&'a ReportingPeriod>,
-    impact_data: &'a CanonicalData,
     timestamps: Vec<(Timestamp, String)>,
     missing_activity_timestamps: usize,
     invalid_activity_timestamps: usize,
-    limitations: Vec<CoverageLimitation>,
+    limitations: Vec<PendingCoverageLimitation>,
+}
+
+struct PendingCoverageLimitation {
+    kind: String,
+    source: SourceRef,
+    message: String,
+    affected_lenses: Vec<String>,
 }
 
 impl<'a> CoverageObservations<'a> {
-    fn new(period: Option<&'a ReportingPeriod>, impact_data: &'a CanonicalData) -> Self {
+    fn new(period: Option<&'a ReportingPeriod>) -> Self {
         Self {
             period,
-            impact_data,
             timestamps: Vec::new(),
             missing_activity_timestamps: 0,
             invalid_activity_timestamps: 0,
@@ -859,13 +878,10 @@ impl<'a> CoverageObservations<'a> {
         message: String,
         affected_lenses: &[&str],
     ) {
-        let (selected_sessions, selected_records) = source_impact(self.impact_data, source);
-        self.limitations.push(CoverageLimitation {
+        self.limitations.push(PendingCoverageLimitation {
             kind: kind.to_owned(),
             source: source.clone(),
             message,
-            selected_sessions,
-            selected_records,
             affected_lenses: affected_lenses
                 .iter()
                 .map(|lens| (*lens).to_owned())
