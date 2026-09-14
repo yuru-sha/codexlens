@@ -79,6 +79,15 @@ Shell-like completion records may expose fields such as `command`, `cwd`,
 An exit code is stronger evidence of failure than a text heuristic; the
 analysis layer must prefer it when available.
 
+Tool-result `output` strings may also begin with a Codex renderer envelope:
+`Process exited with code N`, `Exit code: N`, `Script completed`, `Script
+failed`, or `Script timed out`. The adapter parses these forms before any
+fallback output-text heuristic, records parsed status as distinct evidence,
+and ignores the rendered payload body for outcome classification. Explicit
+`exit_code` and `status` fields remain authoritative. Unknown or malformed
+renderer text remains unknown rather than becoming a failure from incidental
+words in the body.
+
 ### 3.1 Tool normalization rules
 
 The outer envelope type and nested payload type are never tool names or

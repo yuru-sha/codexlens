@@ -1252,6 +1252,7 @@ fn outcome_source_from_db(value: &str) -> OutcomeSource {
     match value {
         "exit_code" => OutcomeSource::ExitCode,
         "status" => OutcomeSource::Status,
+        "parsed_renderer" => OutcomeSource::ParsedRenderer,
         "output_text" => OutcomeSource::OutputText,
         _ => OutcomeSource::Unknown,
     }
@@ -2773,6 +2774,7 @@ fn outcome_source_name(source: crate::model::OutcomeSource) -> &'static str {
     match source {
         crate::model::OutcomeSource::ExitCode => "exit_code",
         crate::model::OutcomeSource::Status => "status",
+        crate::model::OutcomeSource::ParsedRenderer => "parsed_renderer",
         crate::model::OutcomeSource::OutputText => "output_text",
         crate::model::OutcomeSource::Unknown => "unknown",
     }
