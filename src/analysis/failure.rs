@@ -449,6 +449,11 @@ mod tests {
                 .iter()
                 .any(|event| { event.tool == "js" && event.family == "no_canonical_command" })
         );
+        assert!(events.iter().any(|event| {
+            event.tool == "exec_command"
+                && event.family == "cargo test"
+                && event.category == "exit_code_1"
+        }));
         assert!(!events.iter().any(|event| {
             matches!(event.tool.as_str(), "exec" | "js" | "wait")
                 && event.family == "unknown_command"
@@ -503,5 +508,10 @@ mod tests {
             vec!["exit_code_23", "timeout", "renderer_failed"]
         );
         assert!(events.iter().all(|event| event.structured));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.session_id == "fixture-renderer-unknown")
+        );
     }
 }

@@ -81,7 +81,8 @@ from the project language.
 - tool result with non-zero exit code or failed status;
 - tool result with a parsed Codex renderer status;
 - explicit error event;
-- bounded stderr/output error marker when structured outcome is absent.
+- bounded error markers in explicit stdout/stderr when structured outcome is
+  absent. Renderer `output` text is not failure evidence by itself.
 
 ### Signature
 

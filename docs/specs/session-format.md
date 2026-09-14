@@ -84,9 +84,10 @@ Tool-result `output` strings may also begin with a Codex renderer envelope:
 failed`, or `Script timed out`. The adapter parses these forms before any
 fallback output-text heuristic, records parsed status as distinct evidence,
 and ignores the rendered payload body for outcome classification. Explicit
-`exit_code` and `status` fields remain authoritative. Unknown or malformed
-renderer text remains unknown rather than becoming a failure from incidental
-words in the body.
+`exit_code` and `status` fields remain authoritative. The renderer `output`
+field is not fallback failure evidence; fallback text heuristics apply only to
+explicit `stdout`/`stderr` fields. Unknown or malformed renderer text remains
+unknown rather than becoming a failure from incidental words in the body.
 
 ### 3.1 Tool normalization rules
 
