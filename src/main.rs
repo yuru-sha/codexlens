@@ -1061,7 +1061,7 @@ fn execute_query(connection: &rusqlite::Connection, sql: &str) -> Result<QueryRe
     let mut statement = connection
         .prepare(sql)
         .map_err(|_| anyhow::anyhow!("query must contain one valid SQL statement"))?;
-    if starts_with_sql_keyword(sql, "pragma") || !statement.readonly() {
+    if !statement.readonly() || is_mutating_pragma(sql) {
         bail!("query must be a single read-only SQL statement");
     }
 
@@ -1194,34 +1194,101 @@ fn render_query_markdown(result: &QueryResult) -> String {
     output
 }
 
-fn starts_with_sql_keyword(mut sql: &str, keyword: &str) -> bool {
+// ponytail: keep the built-in read-only argument list explicit; extend it when SQLite adds one.
+const READ_ONLY_PRAGMA_ARGUMENTS: &[&str] = &[
+    "foreign_key_check",
+    "foreign_key_list",
+    "index_info",
+    "index_list",
+    "index_xinfo",
+    "integrity_check",
+    "quick_check",
+    "table_list",
+    "table_info",
+    "table_xinfo",
+];
+
+const MUTATING_PRAGMA_WITHOUT_ARGUMENTS: &[&str] = &[
+    "incremental_vacuum",
+    "optimize",
+    "shrink_memory",
+    "wal_checkpoint",
+];
+
+fn is_mutating_pragma(sql: &str) -> bool {
+    let Some(mut rest) = after_sql_keyword(sql, "pragma") else {
+        return false;
+    };
+    rest = skip_sql_space_and_comments(rest);
+    let Some((mut after_name, mut name)) = take_sql_identifier(rest) else {
+        return true;
+    };
+    after_name = skip_sql_space_and_comments(after_name);
+    if let Some(after_schema) = after_name.strip_prefix('.') {
+        let Some((qualified_rest, qualified_name)) =
+            take_sql_identifier(skip_sql_space_and_comments(after_schema))
+        else {
+            return true;
+        };
+        after_name = qualified_rest;
+        name = qualified_name;
+    }
+    after_name = skip_sql_space_and_comments(after_name);
+    if after_name.starts_with('=') {
+        return true;
+    }
+    if after_name.starts_with('(') {
+        return !READ_ONLY_PRAGMA_ARGUMENTS
+            .iter()
+            .any(|candidate| name.eq_ignore_ascii_case(candidate));
+    }
+    MUTATING_PRAGMA_WITHOUT_ARGUMENTS
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+fn after_sql_keyword<'a>(sql: &'a str, keyword: &str) -> Option<&'a str> {
+    let sql = skip_sql_space_and_comments(sql);
+    let prefix = sql.get(..keyword.len())?;
+    if !prefix.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    if sql
+        .get(keyword.len()..)
+        .and_then(|tail| tail.chars().next())
+        .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+    sql.get(keyword.len()..)
+}
+
+fn skip_sql_space_and_comments(mut sql: &str) -> &str {
     loop {
         sql = sql.trim_start();
         if let Some(comment) = sql.strip_prefix("--") {
             let Some(end) = comment.find('\n') else {
-                return false;
+                return "";
             };
             sql = &comment[end + 1..];
             continue;
         }
         if let Some(comment) = sql.strip_prefix("/*") {
             let Some(end) = comment.find("*/") else {
-                return false;
+                return "";
             };
             sql = &comment[end + 2..];
             continue;
         }
-        let Some(prefix) = sql.get(..keyword.len()) else {
-            return false;
-        };
-        if !prefix.eq_ignore_ascii_case(keyword) {
-            return false;
-        }
-        return !sql
-            .get(keyword.len()..)
-            .and_then(|tail| tail.chars().next())
-            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+        return sql;
     }
+}
+
+fn take_sql_identifier(sql: &str) -> Option<(&str, &str)> {
+    let end = sql
+        .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .unwrap_or(sql.len());
+    (end > 0).then(|| (&sql[end..], &sql[..end]))
 }
 
 fn proposal_batch(plan: &codexlens::advisor::ProposalPlan) -> codexlens::advisor::DiffBatch {
