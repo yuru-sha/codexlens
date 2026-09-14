@@ -28,6 +28,15 @@ identity values.
 usable identity. `rollout/state-fallback-rekey.jsonl` covers records emitted
 before rollout metadata supplies the canonical identity.
 
+`rollout/wrapper-tools.jsonl` covers direct shell calls, opaque wrapper calls
+containing nested shell/patch source, and non-shell wrapper failures.
+
+`rollout/tool-result-envelopes.jsonl` covers parsed renderer success, failure,
+timeout, malformed envelopes, and incidental failure words in successful output.
+
+`rollout/string-encoded-commands.jsonl` covers JSON-encoded function and custom
+tool arguments, file patches, malformed input, and wrapper-like text.
+
 `state/` contains synthetic SQL schemas for state adapter and store migration
 tests, including separate main/sub-agent identity metadata and empty identity
 fallbacks. `store/` contains synthetic rollout input and a version-one schema.
