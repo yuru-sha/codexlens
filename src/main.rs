@@ -1685,7 +1685,7 @@ fn session_scope_matches(
         .project
         .as_deref()
         .or(session.cwd.as_deref())
-        .filter(|path| Path::new(path).is_absolute())
+        .filter(|path| Path::new(path).is_absolute() || Path::new(path).has_root())
         .map(|path| {
             FindingScope::Project(fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)))
         })
@@ -2673,6 +2673,9 @@ fn coverage_for_scope(
 }
 
 fn data_for_scope(data: &CanonicalData, scope: &ScopeFilter) -> CanonicalData {
+    if data.surfaces.is_empty() && matches!(scope, ScopeFilter::All | ScopeFilter::Global) {
+        return data.clone();
+    }
     let session_ids = data
         .sessions
         .iter()
@@ -2794,7 +2797,7 @@ fn session_matches_filter(data: &CanonicalData, session_id: &str, filter: &Scope
         .iter()
         .find(|session| session.id == session_id)
         .and_then(|session| session.project.as_deref().or(session.cwd.as_deref()))
-        .filter(|path| Path::new(path).is_absolute())
+        .filter(|path| Path::new(path).is_absolute() || Path::new(path).has_root())
         .map(PathBuf::from);
     match filter {
         ScopeFilter::Projects => project.is_some(),
