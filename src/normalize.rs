@@ -609,11 +609,12 @@ fn call_file_operations(
     data: &CanonicalData,
     call: &ToolCall,
 ) -> Vec<(FileOperation, (String, String, String, String))> {
-    let command = call
-        .command
-        .as_deref()
-        .or(call.input_summary.as_deref())
-        .unwrap_or_default();
+    let tool = normalize_token(call.tool_name.as_deref().unwrap_or_default()).to_ascii_lowercase();
+    let command = match call.command.as_deref() {
+        Some(command) => command,
+        None if !is_shell_tool(&tool) => call.input_summary.as_deref().unwrap_or_default(),
+        _ => "",
+    };
     let cwd = call.cwd.clone().or_else(|| {
         context_cwd(data, call.session_id.as_deref(), call.turn_id.as_deref()).map(str::to_owned)
     });
@@ -661,76 +662,61 @@ fn append_observed_file_operations(
     if session_id.is_none() {
         return;
     }
-    let text = command_payload_text(command);
     let tool = normalize_token(tool_name).to_ascii_lowercase();
-    let explicit_tool = matches!(
-        tool.as_str(),
-        "apply_patch" | "edit_file" | "write_file" | "create_file" | "replace_file"
-    );
+    let file_tool = is_file_operation_tool(&tool);
+    let shell_tool = is_shell_tool(&tool);
+    let wrapper_tool = is_wrapper_tool(&tool);
     let mut observed = Vec::new();
-    let mut patch_operation = None;
-    for line in text.lines() {
-        let Some((operation, path)) = [
-            ("*** Update File:", "edit"),
-            ("*** Add File:", "create"),
-            ("*** Delete File:", "delete"),
-        ]
-        .iter()
-        .find_map(|(marker, operation)| {
-            line.trim()
-                .strip_prefix(marker)
-                .map(|path| (*operation, path.trim().to_owned()))
-        }) else {
-            continue;
-        };
-        patch_operation = Some(operation);
-        if !path.is_empty() {
-            observed.push((operation.to_owned(), path));
-        }
-    }
-    if observed.is_empty() && explicit_tool {
-        if let Some(path) = json_string_field(command, &["path", "file_path", "filename"])
-            .filter(|path| likely_file_path(path))
-            .or_else(|| {
-                let path = command.trim();
-                likely_file_path(path).then(|| path.to_owned())
-            })
-        {
-            observed.push((
-                if tool == "create_file" {
-                    "create".to_owned()
-                } else {
-                    patch_operation.unwrap_or("edit").to_owned()
-                },
-                path,
-            ));
-        }
-    }
-    if observed.is_empty() {
-        let tokens = text.split_whitespace().collect::<Vec<_>>();
-        for (index, token) in tokens.iter().enumerate() {
-            let operation = token.starts_with('>').then_some("write");
-            let Some(operation) = operation else {
+    if !shell_tool && !wrapper_tool {
+        let text = command_payload_text(command);
+        let mut patch_operation = None;
+        for line in text.lines() {
+            let Some((operation, path)) =
+                PATCH_FILE_MARKERS.iter().find_map(|(marker, operation)| {
+                    line.trim()
+                        .strip_prefix(marker)
+                        .map(|path| (*operation, path.trim().to_owned()))
+                })
+            else {
                 continue;
             };
-            let path = if *token == ">" || *token == ">>" {
-                tokens.get(index + 1).copied()
-            } else {
-                token.strip_prefix('>')
-            };
-            if let Some(path) = path.filter(|path| !path.is_empty()) {
+            patch_operation = Some(operation);
+            if likely_file_path(&path) {
+                observed.push((operation.to_owned(), path));
+            }
+        }
+        if observed.is_empty() && file_tool {
+            if let Some(path) = json_string_field(command, &["path", "file_path", "filename"])
+                .filter(|path| likely_file_path(path))
+                .or_else(|| {
+                    let path = command.trim();
+                    likely_file_path(path).then(|| path.to_owned())
+                })
+            {
                 observed.push((
-                    operation.to_owned(),
-                    path.trim_matches(|c| c == '\'' || c == '"').to_owned(),
+                    if tool == "create_file" {
+                        "create".to_owned()
+                    } else {
+                        patch_operation.unwrap_or("edit").to_owned()
+                    },
+                    path,
                 ));
             }
         }
     }
+    if shell_tool && !has_patch_marker(command) {
+        observed.extend(
+            shell_redirection_targets(command)
+                .into_iter()
+                .map(|path| ("write".to_owned(), path)),
+        );
+    } else if !shell_tool && observed.is_empty() {
+        return;
+    }
     for (operation, path) in observed {
-        let path = normalize_path(&path);
-        if path.is_empty() {
+        let Some(path) = normalize_file_operation_path(&path) else {
             continue;
-        }
+        };
         operations.push(FileOperation {
             session_id: session_id.clone(),
             turn_id: turn_id.clone(),
@@ -740,6 +726,172 @@ fn append_observed_file_operations(
             provenance: provenance.clone(),
         });
     }
+}
+
+const PATCH_FILE_MARKERS: [(&str, &str); 3] = [
+    ("*** Update File:", "edit"),
+    ("*** Add File:", "create"),
+    ("*** Delete File:", "delete"),
+];
+
+fn has_patch_marker(text: &str) -> bool {
+    text.lines().any(|line| {
+        PATCH_FILE_MARKERS
+            .iter()
+            .any(|(marker, _)| line.trim().starts_with(marker))
+    })
+}
+
+fn is_file_operation_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "apply_patch" | "edit_file" | "write_file" | "create_file" | "replace_file"
+    )
+}
+
+fn is_shell_tool(tool: &str) -> bool {
+    matches!(tool, "exec_command" | "shell")
+}
+
+fn is_wrapper_tool(tool: &str) -> bool {
+    matches!(tool, "exec" | "js" | "wait")
+}
+
+fn shell_redirection_targets(command: &str) -> Vec<String> {
+    if serde_json::from_str::<Value>(command).is_ok() {
+        return Vec::new();
+    }
+    let chars = command.chars().collect::<Vec<_>>();
+    let mut targets = Vec::new();
+    let mut index = 0;
+    let mut quote = None;
+    while index < chars.len() {
+        let character = chars[index];
+        if let Some(delimiter) = quote {
+            if character == '\\' && delimiter == '"' {
+                index = (index + 2).min(chars.len());
+                continue;
+            }
+            if character == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            index += 1;
+            continue;
+        }
+        if character != '>' {
+            index += 1;
+            continue;
+        }
+        let mut target_start = index + 1;
+        if chars.get(target_start) == Some(&'>') {
+            target_start += 1;
+        }
+        while chars
+            .get(target_start)
+            .is_some_and(|character| character.is_whitespace())
+        {
+            target_start += 1;
+        }
+        if chars.get(target_start) == Some(&'&') {
+            index = target_start + 1;
+            continue;
+        }
+        let (target, next_index) = shell_redirection_target(&chars, target_start);
+        if let Some(target) = target {
+            if normalize_file_operation_path(&target).is_some() {
+                targets.push(target);
+            }
+        }
+        index = next_index.max(index + 1);
+    }
+    targets
+}
+
+fn shell_redirection_target(chars: &[char], start: usize) -> (Option<String>, usize) {
+    let Some(&first) = chars.get(start) else {
+        return (None, chars.len());
+    };
+    if shell_redirection_boundary(first) {
+        return (None, start + 1);
+    }
+    if matches!(first, '\'' | '"') {
+        let mut index = start + 1;
+        while index < chars.len() {
+            if chars[index] == '\\' && first == '"' {
+                index = (index + 2).min(chars.len());
+                continue;
+            }
+            if chars[index] == first {
+                let next = index + 1;
+                let fragmented = chars
+                    .get(next)
+                    .is_some_and(|character| !shell_redirection_boundary(*character));
+                return (
+                    (!fragmented).then(|| chars[start + 1..index].iter().collect()),
+                    next,
+                );
+            }
+            index += 1;
+        }
+        return (None, chars.len());
+    }
+    let mut end = start;
+    while chars
+        .get(end)
+        .is_some_and(|character| !shell_redirection_boundary(*character))
+    {
+        end += 1;
+    }
+    (Some(chars[start..end].iter().collect()), end)
+}
+
+fn shell_redirection_boundary(character: char) -> bool {
+    character.is_whitespace() || matches!(character, ';' | '|' | '&' | '<' | '>' | '(' | ')')
+}
+
+fn normalize_file_operation_path(path: &str) -> Option<String> {
+    let path = path.trim();
+    let path = match (path.chars().next(), path.chars().last()) {
+        (Some(first), Some(last)) if matches!(first, '\'' | '"') => {
+            if first != last {
+                return None;
+            }
+            let start = first.len_utf8();
+            let end = path.len().checked_sub(last.len_utf8())?;
+            path.get(start..end)?
+        }
+        (Some(_), Some('\'' | '"')) => return None,
+        _ => path,
+    }
+    .trim();
+    if path.is_empty()
+        || path
+            .chars()
+            .any(|character| character == '\n' || character == '\r')
+        || path.starts_with(['{', '['])
+    {
+        return None;
+    }
+    let normalized = normalize_path(path);
+    let lower = normalized.to_ascii_lowercase();
+    if normalized.is_empty()
+        || lower == "/dev/null"
+        || lower.starts_with("/dev/null/")
+        || normalized == "="
+        || normalized.starts_with('&')
+        || normalized == "const"
+        || (lower.starts_with("s:") && lower.ends_with("});"))
+        || lower.ends_with("});")
+        || normalized.contains(['<', '>'])
+    {
+        return None;
+    }
+    Some(normalized)
 }
 
 fn operation_identity_path(path: &str, cwd: Option<&str>) -> String {
@@ -753,10 +905,8 @@ fn operation_identity_path(path: &str, cwd: Option<&str>) -> String {
 
 fn likely_file_path(path: &str) -> bool {
     let path = path.trim();
-    !path.is_empty()
-        && !path.contains(['\n', '\r'])
-        && !path.starts_with(['{', '['])
-        && (!path.chars().any(char::is_whitespace) || path.starts_with(['/', '.', '~']))
+    (!path.chars().any(char::is_whitespace) || path.starts_with(['/', '.', '~']))
+        && normalize_file_operation_path(path).is_some()
 }
 
 fn canonical_command_value(value: &Value) -> String {
@@ -2101,6 +2251,39 @@ mod tests {
         );
 
         assert!(data.file_operations.is_empty());
+    }
+
+    #[test]
+    fn file_operations_require_typed_provenance_and_valid_targets() {
+        let data = parse(include_str!(
+            "../tests/fixtures/rollout/parser-artifacts-file-operations.jsonl"
+        ));
+
+        assert_eq!(
+            data.file_operations
+                .iter()
+                .map(|operation| operation.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "src/patched.rs",
+                "/fixture/project/quoted absolute.txt",
+                "src/quoted output.txt",
+            ]
+        );
+        assert!(data.file_operations.iter().all(|operation| {
+            operation.path != "/dev/null" && !operation.path.starts_with("/dev/null/")
+        }));
+
+        assert!(
+            crate::analysis::analyze_rework(&data, &crate::analysis::AnalysisOptions::default())
+                .is_empty()
+        );
+        assert!(crate::analysis::views::stuck(&data).rows.is_empty());
+        assert!(
+            crate::analysis::views::waste(&data)
+                .opportunities
+                .is_empty()
+        );
     }
 
     #[test]

@@ -1,0 +1,19 @@
+{"timestamp":"2026-01-08T00:00:00Z","type":"session_meta","payload":{"id":"fixture-file-operation-session","cwd":"/fixture/project","project":"/fixture/project"}}
+{"timestamp":"2026-01-08T00:00:01Z","type":"turn_context","payload":{"turn_id":"fixture-file-operation-turn","cwd":"/fixture/project"}}
+{"timestamp":"2026-01-08T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-patch-call","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/patched.rs\\n@@\\n-old\\n+new\\n\"}"}}
+{"timestamp":"2026-01-08T00:00:03Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-shell-call","name":"exec_command","input":{"cmd":"printf x > 'src/quoted output.txt' && printf y > \"/fixture/project/quoted absolute.txt\" && printf z 2> /dev/null"}}}
+{"timestamp":"2026-01-08T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-wrapper-call","name":"exec","input":"await tools.exec_command({cmd: \"printf x > /dev/null/...\"});"}}
+{"timestamp":"2026-01-08T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-summary-call","name":"exec_command","input":"printf x > /fixture/project/from-summary.txt"}}
+{"timestamp":"2026-01-08T00:00:06Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-json-call","name":"exec_command","input":"{\"cmd\":\"printf x > /fixture/project/from-json.txt\"}"}}
+{"timestamp":"2026-01-08T00:00:06Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-json-command-call","name":"exec_command","input":{"command":"{\"cmd\":\"printf x > /fixture/project/from-json-command.txt\"}"}}}
+{"timestamp":"2026-01-08T00:00:07Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-patch-text-call","name":"exec_command","input":"*** Update File: /fixture/project/from-patch.txt\\n+ printf x > /dev/null"}}
+{"timestamp":"2026-01-08T00:00:08Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-equal-call","name":"exec_command","input":{"cmd":"printf x > ="}}}
+{"timestamp":"2026-01-08T00:00:09Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-fd-call","name":"exec_command","input":{"cmd":"printf x >&2;"}}}
+{"timestamp":"2026-01-08T00:00:10Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-null-path-call","name":"exec_command","input":{"cmd":"printf x > /dev/null/..."}}}
+{"timestamp":"2026-01-08T00:00:11Z","type":"response_item","payload":{"type":"local_shell_call","call_id":"fixture-ambiguous-call","input":{"cmd":"printf x > /fixture/project/ambiguous.txt"}}}
+{"timestamp":"2026-01-08T00:00:11.100Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-empty-redirection-call","name":"exec_command","input":{"cmd":"printf x >"}}}
+{"timestamp":"2026-01-08T00:00:11.200Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-empty-quoted-redirection-call","name":"exec_command","input":{"cmd":"printf x > \"\""}}}
+{"timestamp":"2026-01-08T00:00:11.300Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-fragmented-redirection-call","name":"exec_command","input":{"cmd":"printf x > \"src/fragmented.txt\"suffix"}}}
+{"timestamp":"2026-01-08T00:00:11.400Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-malformed-path-call","name":"edit_file","input":{"path":"\""}}}
+{"timestamp":"2026-01-08T00:00:12Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-failed-patch-call","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/failed.rs\\n@@\\n-old\\n+new\\n\"}"}}
+{"timestamp":"2026-01-08T00:00:13Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-failed-patch-call","exit_code":1,"status":"failed","output":"patch failed"}}
