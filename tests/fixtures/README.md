@@ -20,6 +20,9 @@ unknown record to ensure forward compatibility is tested from the beginning.
 `rollout/edge-cases.jsonl` covers thread-only identities, missing content,
 structured status, unmatched tool results, and repeated token snapshots.
 
+`rollout/tool-result-envelopes.jsonl` covers parsed renderer success, failure,
+timeout, malformed envelopes, and incidental failure words in successful output.
+
 `state/` contains synthetic SQL schemas for state adapter and store migration
 tests. `store/` contains synthetic rollout input and a version-one schema.
 

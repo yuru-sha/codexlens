@@ -242,7 +242,7 @@ pub(super) fn build_events(data: &AnalysisContext<'_>) -> Vec<FailureEvent> {
 fn result_is_structured_failure(result: &ToolResult) -> bool {
     matches!(
         result.outcome_source,
-        OutcomeSource::ExitCode | OutcomeSource::Status
+        OutcomeSource::ExitCode | OutcomeSource::Status | OutcomeSource::ParsedRenderer
     ) || result.exit_code.is_some()
         || result.status.as_deref().is_some_and(status_is_failed)
 }
@@ -268,6 +268,9 @@ fn failure_category(result: &ToolResult, output: &str) -> String {
         return match status.as_str() {
             "cancelled" | "canceled" => "cancelled".to_owned(),
             "timeout" | "timed_out" => "timeout".to_owned(),
+            _ if result.outcome_source == OutcomeSource::ParsedRenderer => {
+                "renderer_failed".to_owned()
+            }
             _ => "failed_status".to_owned(),
         };
     }
@@ -381,5 +384,26 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].family, "unknown_command");
+    }
+
+    #[test]
+    fn parsed_renderer_failures_are_structured_and_malformed_results_are_ignored() {
+        let parsed = parse_rollout_reader(
+            Path::new("fixture-renderer.jsonl"),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../../tests/fixtures/rollout/tool-result-envelopes.jsonl"
+            ))),
+        );
+        let data = normalize_rollout(&parsed);
+        let events = build_events(&AnalysisContext::new(&data));
+
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.category.as_str())
+                .collect::<Vec<_>>(),
+            vec!["exit_code_23", "timeout", "renderer_failed"]
+        );
+        assert!(events.iter().all(|event| event.structured));
     }
 }
