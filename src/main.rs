@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, IsTerminal, Read, Write};
@@ -2672,9 +2673,9 @@ fn coverage_for_scope(
     scoped_coverage
 }
 
-fn data_for_scope(data: &CanonicalData, scope: &ScopeFilter) -> CanonicalData {
+fn data_for_scope<'a>(data: &'a CanonicalData, scope: &ScopeFilter) -> Cow<'a, CanonicalData> {
     if data.surfaces.is_empty() && matches!(scope, ScopeFilter::All | ScopeFilter::Global) {
-        return data.clone();
+        return Cow::Borrowed(data);
     }
     let session_ids = data
         .sessions
@@ -2742,7 +2743,7 @@ fn data_for_scope(data: &CanonicalData, scope: &ScopeFilter) -> CanonicalData {
             .is_none_or(|id| session_ids.contains(id))
     });
     codexlens::config::recompute_surface_usage(&mut scoped);
-    scoped
+    Cow::Owned(scoped)
 }
 
 fn period_for_scope(selection: &ReportingSelection, scope: &ScopeFilter) -> PeriodCoverage {
