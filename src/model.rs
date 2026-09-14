@@ -320,6 +320,7 @@ impl ToolOutcome {
 pub enum OutcomeSource {
     ExitCode,
     Status,
+    ParsedRenderer,
     OutputText,
     Unknown,
 }
