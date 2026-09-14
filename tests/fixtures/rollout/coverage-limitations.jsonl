@@ -1,0 +1,4 @@
+{"timestamp":"2026-01-05T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-coverage-limitations-session","cwd":"/fixture/coverage-limitations","project":"/fixture/coverage-limitations","model_provider":"fixture-provider"}}
+{"timestamp":"2026-01-05T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"fixture-coverage-limitations-turn","cwd":"/fixture/coverage-limitations","model":"fixture-model"}}
+{"timestamp":"not-a-timestamp","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Synthetic incomplete lifecycle evidence."}]}}
+{"timestamp":"2026-01-05T00:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Synthetic valid sibling evidence."}]}}

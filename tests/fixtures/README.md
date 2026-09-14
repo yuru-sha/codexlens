@@ -44,6 +44,9 @@ fallbacks. `store/` contains synthetic rollout input and a version-one schema.
 `rollout/defensive.jsonl` covers optional envelope fields, unknown nested
 events, and a malformed line.
 
+`rollout/coverage-limitations.jsonl` covers a bounded incomplete turn and a
+valid sibling event for coverage-reporting tests.
+
 Observed-instruction snapshot tests generate bounded synthetic text in memory,
 so instruction content is not stored in repository fixtures.
 

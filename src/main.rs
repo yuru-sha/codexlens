@@ -10,12 +10,13 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use rusqlite::types::ValueRef;
 
 use codexlens::advisor::{
-    ApplyPlan, ApplyReport, DiffBatch, DoctorOptions, ReportCoverage, doctor_with_coverage,
-    prepare_apply_proposals, proposals_for_findings, render_diffs, render_doctor_with_coverage,
+    ApplyPlan, ApplyReport, DiffBatch, DoctorOptions, ReportCoverage, coverage_limitations_json,
+    doctor_with_coverage, prepare_apply_proposals, proposals_for_findings,
+    render_coverage_limitations, render_diffs, render_doctor_with_coverage,
     render_doctor_with_period, render_json_diff, render_json_diff_with_period,
     render_json_finding_report_with_coverage, render_json_finding_report_with_period,
     render_proposal_summary, render_report_metadata_with_period, report_coverage,
-    report_coverage_with_period, report_sessions,
+    report_coverage_for_period_selection, report_sessions,
 };
 use codexlens::analysis::views::{
     FailureReport, InventoryReport, OverheadReport, PromptReport, StuckReport, UsageReport,
@@ -1492,6 +1493,7 @@ fn render_sessions_table(
         "Coverage: {} ({} sessions)\n",
         coverage.status, coverage.session_count
     ));
+    output.push_str(&render_coverage_limitations(coverage));
     if sessions.is_empty() {
         output.push_str("No selected sessions.\n");
         output.push_str("Omitted sessions: 0\n");
@@ -1709,6 +1711,7 @@ fn render_doctor_table(
         "Coverage: {} ({} sessions)\n",
         coverage.status, coverage.session_count
     ));
+    output.push_str(&render_coverage_limitations(coverage));
     if doctor.top_fixes.is_empty() {
         output.push_str("No top fixes with bounded evidence.\n");
     } else {
@@ -1862,9 +1865,11 @@ fn render_view_table(
     );
     append_period_metadata(&mut output, period);
     output.push_str(&format!(
-        "Coverage: {} ({} sessions)\n\n",
+        "Coverage: {} ({} sessions)\n",
         coverage.status, coverage.session_count
     ));
+    output.push_str(&render_coverage_limitations(coverage));
+    output.push('\n');
     match report {
         ViewReport::Inventory(report) => render_inventory_table(&mut output, report),
         ViewReport::Overhead(report) => render_overhead_table(&mut output, report),
@@ -2177,6 +2182,9 @@ fn cli_coverage_json(
         "missing_activity_timestamps": coverage.missing_activity_timestamps,
         "invalid_activity_timestamps": coverage.invalid_activity_timestamps,
     });
+    let limitations = coverage_limitations_json(coverage);
+    value["limitations"] = limitations["limitations"].clone();
+    value["limitations_omitted"] = limitations["limitations_omitted"].clone();
     if let Some(period) = period {
         value["requested_start"] = serde_json::json!(period.requested_start);
         value["requested_end"] = serde_json::json!(period.requested_end);
@@ -2448,13 +2456,19 @@ fn load_reporting(
         return Ok((selected.data, freshness, None));
     };
     let eligible_data = select_eligible_session_data(&data, &selection_options);
-    let mut report_coverage = report_coverage_with_period(&eligible_data, &period);
+    let mut report_coverage =
+        report_coverage_for_period_selection(&eligible_data, &period, &selected.data);
     report_coverage.session_count = selected.coverage.included_sessions;
     report_coverage.record_count = selected.coverage.included_records;
     report_coverage.status = match selected.coverage.state {
         PeriodCoverageState::Empty => "empty",
-        PeriodCoverageState::Complete => "observed",
-        PeriodCoverageState::Partial => "partial",
+        PeriodCoverageState::Complete
+            if report_coverage.limitations.is_empty()
+                && report_coverage.limitations_omitted == 0 =>
+        {
+            "observed"
+        }
+        PeriodCoverageState::Complete | PeriodCoverageState::Partial => "partial",
     }
     .to_owned();
     Ok((
