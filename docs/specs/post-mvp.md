@@ -206,8 +206,8 @@ The top-level JSON contract is versioned and uses stable snake-case fields:
 
 `data` has one of these command-specific shapes:
 
-- Finding commands (`analyze`, `failures`, `corrections`, `rework`, `stuck`,
-  `verification`, `knowledge`, `rediscovery`, `instructions`, and `doctor`)
+- Finding commands (`analyze`, `corrections`, `rework`, `verification`,
+  `knowledge`, `rediscovery`, `instructions`, and `doctor`)
   use `{period_start, period_end, session_count, freshness, finding_counts,
   groups}` with optional additive `coverage`. `freshness` is
   `{state, source_count, latest_ingested_at}`;
@@ -220,6 +220,12 @@ The top-level JSON contract is versioned and uses stable snake-case fields:
   `coverage`, where `omitted_count` is the number of selected rows beyond the
   default 50-row bound and each session is
   `{id, created_at, updated_at, cwd, project}`.
+- Core product views (`inventory`, `overhead`, `usage`, `waste`, `failures`,
+  `stuck`, and `prompts`) use `{measure, rows|opportunities, omitted_count}`;
+  `usage` also includes typed `coverage`. Their rows retain the scope,
+  bounded action/evidence fields, and unknown or incomplete states described in
+  `docs/specs/cli.md`; `failures` and `stuck` nest their actionable opportunity
+  row, while `waste` uses `opportunities` instead of `rows`.
 - `optimize --diff` uses `{rendered, skipped}`, where `rendered` contains the
   typed proposal and unified `diff`, and `skipped` contains
   `{target_path, reason, proposal}`. `proposal` is the typed proposal when a
@@ -239,12 +245,24 @@ their JSON primitive types; nullable values are `string | null` or
 `failure | correction | rework | stuck | verification | knowledge | gap |
 overscoped | duplicate | stale | truncated`; `severity` and `confidence` are
 `low | medium | high`; `verification_status` is `missing | not_observed | null`.
-The `command` value is canonical: `stuck` serializes as `rework` and
-`rediscovery` as `knowledge`, matching their aliases.
+The `command` value is canonical for aliases: `rediscovery` serializes as
+`knowledge`. `rework` is the finding-report command, while `stuck` is the
+distinct stuck-work view and serializes as `stuck`.
 
 The complete required top-level types are `schema_version: integer`,
-`command: analyze | sessions | failures | corrections | rework | verification |
-knowledge | instructions | doctor | optimize_diff`, and `data: object`.
+`command: analyze | sessions | inventory | overhead | usage | waste | failures |
+stuck | prompts | corrections | rework | verification | knowledge |
+instructions | doctor | optimize_diff | optimize | sql | query`, and
+`data: object`. `sql` and `query` use the bounded read-only escape-hatch shape
+`{columns, rows, omitted_column_count, omitted_count}`. `optimize --print`
+uses `command: optimize` and its `data` contains bounded `findings`,
+`configuration_waste`, `overhead`, `proposals`, `next_steps`, and
+`limitations`; all unsupported or ambiguous proposal inputs remain listed in
+`proposals.skipped` or `limitations`.
+The stable compatibility surface for these product views is the CLI JSON
+envelope. The Rust `analysis::views` rows and `UsageKind` are non-exhaustive
+0.x plumbing; callers must not construct them with exhaustive struct literals
+or match without a wildcard when consuming the expanding command contract.
 Finding-report data has `period_start: string | null`,
 `period_end: string | null`, `session_count: non-negative integer`,
 `freshness: Freshness`, `finding_counts: object<string, non-negative integer>`,

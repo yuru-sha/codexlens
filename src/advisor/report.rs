@@ -24,6 +24,7 @@ const DEFAULT_REPORT_EXCERPT_BYTES: usize = 256;
 pub const DEFAULT_SESSION_LIMIT: usize = 50;
 // ponytail: cap machine diffs at 16 KiB; add a streamed artifact only when consumers need full patches.
 const MAX_JSON_DIFF_BYTES: usize = 16 * 1024;
+const MAX_RENDERED_DIFFS: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorOptions {
@@ -277,24 +278,33 @@ fn render_json_diff_inner(
             ));
         }
     }
+    let rendered_omitted_count = rendered_json.len().saturating_sub(MAX_RENDERED_DIFFS);
+    rendered_json.truncate(MAX_RENDERED_DIFFS);
     skipped.sort_by(|left, right| {
         left.0
             .target_path
             .cmp(&right.0.target_path)
             .then_with(|| left.0.reason.cmp(&right.0.reason))
     });
+    let skipped_omitted_count = skipped.len().saturating_sub(MAX_RENDERED_DIFFS);
     let mut data = serde_json::json!({
         "rendered": rendered_json,
         "skipped": skipped
             .into_iter()
+            .take(MAX_RENDERED_DIFFS)
             .map(|(skipped, proposal)| {
                 serde_json::json!({
-                    "target_path": skipped.target_path.to_string_lossy(),
+                    "target_path": bounded_excerpt(
+                        &skipped.target_path.to_string_lossy(),
+                        MAX_PROPOSAL_TEXT_BYTES,
+                    ),
                     "reason": bounded_excerpt(&skipped.reason, MAX_PROPOSAL_TEXT_BYTES),
                     "proposal": proposal.map(proposal_json),
                 })
             })
             .collect::<Vec<_>>(),
+        "rendered_omitted_count": rendered_omitted_count,
+        "skipped_omitted_count": skipped_omitted_count,
     });
     if let Some((freshness, coverage, period)) = metadata {
         data["freshness"] = freshness_json(freshness);
@@ -387,15 +397,15 @@ fn scope_json(scope: &FindingScope) -> serde_json::Value {
         FindingScope::Global => serde_json::json!({"kind": "global"}),
         FindingScope::Project(path) => serde_json::json!({
             "kind": "project",
-            "value": path.to_string_lossy(),
+            "value": bounded_excerpt(&path.to_string_lossy(), MAX_PROPOSAL_TEXT_BYTES),
         }),
         FindingScope::Instruction(path) => serde_json::json!({
             "kind": "instruction",
-            "value": path.to_string_lossy(),
+            "value": bounded_excerpt(&path.to_string_lossy(), MAX_PROPOSAL_TEXT_BYTES),
         }),
         FindingScope::Path(path) => serde_json::json!({
             "kind": "path",
-            "value": path,
+            "value": bounded_excerpt(path, MAX_PROPOSAL_TEXT_BYTES),
         }),
     }
 }
@@ -447,7 +457,7 @@ fn source_json(source: &SourceRef) -> serde_json::Value {
             SourceKind::Rollout => "rollout",
             SourceKind::State => "state",
         },
-        "path": source.path.to_string_lossy(),
+        "path": bounded_excerpt(&source.path.to_string_lossy(), MAX_PROPOSAL_TEXT_BYTES),
         "line": source.line,
         "ingested_at": source.ingested_at,
         "parser_schema_version": source.parser_schema_version,
@@ -475,7 +485,10 @@ fn rendered_diff_json(rendered: &RenderedDiff, diff: &str) -> serde_json::Value 
 fn proposal_json(proposal: &Proposal) -> serde_json::Value {
     serde_json::json!({
         "target_scope": scope_json(&proposal.target_scope),
-        "target_path": proposal.target_path.to_string_lossy(),
+        "target_path": bounded_excerpt(
+            &proposal.target_path.to_string_lossy(),
+            MAX_PROPOSAL_TEXT_BYTES,
+        ),
         "action": proposal.action.as_str(),
         "observed_problem": bounded_excerpt(&proposal.observed_problem, MAX_PROPOSAL_TEXT_BYTES),
         "evidence_count": proposal.evidence_count,
@@ -491,7 +504,9 @@ fn proposal_json(proposal: &Proposal) -> serde_json::Value {
             .existing_text
             .as_deref()
             .map(|text| bounded_excerpt(text, MAX_PROPOSAL_TEXT_BYTES)),
-        "source_path": proposal.source_path.as_ref().map(|path| path.to_string_lossy()),
+        "source_path": proposal.source_path.as_ref().map(|path| {
+            bounded_excerpt(&path.to_string_lossy(), MAX_PROPOSAL_TEXT_BYTES)
+        }),
         "expected_target_hash": proposal.expected_target_hash,
         "expected_source_hash": proposal.expected_source_hash,
         "target_rationale": bounded_excerpt(&proposal.target_rationale, MAX_PROPOSAL_TEXT_BYTES),
@@ -1412,32 +1427,51 @@ pub fn render_proposal_summary(rendered: &RenderedDiff) -> String {
     let mut output = format!(
         "Proposal {} {}\nObserved: {}\nEvidence: {} occurrences across {} sessions\nConfidence: {}\nHeuristic: {}\nTarget: {}\nVerification: {}\n",
         proposal.action.as_str(),
-        proposal.target_path.display(),
-        proposal.observed_problem,
+        bounded_excerpt(
+            &proposal.target_path.display().to_string(),
+            MAX_PROPOSAL_TEXT_BYTES
+        ),
+        bounded_excerpt(&proposal.observed_problem, MAX_PROPOSAL_TEXT_BYTES),
         proposal.evidence_count,
         proposal.distinct_sessions,
         proposal.confidence.as_str(),
-        proposal.heuristic,
-        proposal.target_rationale,
-        PROPOSAL_VERIFICATION,
+        bounded_excerpt(&proposal.heuristic, MAX_PROPOSAL_TEXT_BYTES),
+        bounded_excerpt(&proposal.target_rationale, MAX_PROPOSAL_TEXT_BYTES),
+        bounded_excerpt(PROPOSAL_VERIFICATION, MAX_PROPOSAL_TEXT_BYTES),
     );
     for limitation in &proposal.limitations {
         output.push_str("Limitation: ");
-        output.push_str(limitation);
+        output.push_str(&bounded_excerpt(limitation, MAX_PROPOSAL_TEXT_BYTES));
         output.push('\n');
     }
     for evidence in bounded_evidence(&proposal.evidence, MAX_PROPOSAL_TEXT_BYTES) {
         output.push_str("Evidence ref: ");
-        output.push_str(&source_label(&evidence.source));
+        output.push_str(&bounded_excerpt(
+            &source_label(&evidence.source),
+            MAX_PROPOSAL_TEXT_BYTES,
+        ));
         if let Some(excerpt) = evidence.excerpt {
             output.push_str(" — ");
-            output.push_str(&excerpt);
+            output.push_str(&bounded_excerpt(&excerpt, MAX_PROPOSAL_TEXT_BYTES));
         }
         output.push('\n');
     }
-    output.push_str(&proposal.review_reminder);
+    output.push_str(&bounded_excerpt(
+        &proposal.review_reminder,
+        MAX_PROPOSAL_TEXT_BYTES,
+    ));
     output.push('\n');
-    output.push_str(&rendered.diff);
+    let redacted_diff = bounded_excerpt(&rendered.diff, usize::MAX);
+    if redacted_diff != rendered.diff {
+        output
+            .push_str("Diff omitted: redaction is required to keep the unified diff applicable.\n");
+    } else if rendered.diff.len() > MAX_JSON_DIFF_BYTES {
+        output.push_str(&format!(
+            "Diff omitted: rendered diff exceeds the {MAX_JSON_DIFF_BYTES}-byte limit.\n"
+        ));
+    } else {
+        output.push_str(&rendered.diff);
+    }
     output
 }
 

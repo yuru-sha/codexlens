@@ -10,7 +10,7 @@ use crate::analysis::{
     EvidenceRef, Finding, FindingConfidence, FindingScope, FindingType, VerificationStatus,
     bounded_excerpt,
 };
-use crate::model::CanonicalData;
+use crate::model::{CanonicalData, SurfaceKind, SurfaceUsageState};
 
 use super::diff::SkippedProposal;
 use super::scope::{file_hash, recommend_scope, stored_file};
@@ -92,7 +92,7 @@ pub enum ProposalError {
 
 impl Proposal {
     pub fn validate(&self) -> Result<(), ProposalError> {
-        if self.evidence_count == 0 || self.evidence.is_empty() {
+        if self.evidence.is_empty() {
             return Err(ProposalError::MissingEvidence);
         }
         if self.evidence.len() > MAX_REPORT_EVIDENCE {
@@ -242,6 +242,105 @@ impl Proposal {
         };
         proposal.validate().ok().map(|_| proposal)
     }
+
+    fn from_surface_opportunity(
+        data: &CanonicalData,
+        opportunity: &crate::analysis::views::ViewOpportunity,
+    ) -> Result<Self, &'static str> {
+        let id = opportunity
+            .id
+            .strip_prefix("surface:")
+            .ok_or("not a configuration surface opportunity")?;
+        let surface = data
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == id)
+            .ok_or("configured surface is no longer present")?;
+        if surface.kind != SurfaceKind::Instruction {
+            return Err("the configured surface has no stored instruction baseline");
+        }
+        let target_path = surface
+            .path
+            .clone()
+            .ok_or("the configured surface has no target path")?;
+        let file = stored_file(data, &target_path)
+            .ok_or("the configured surface has no readable stored instruction baseline")?;
+        let existing_text = file
+            .content
+            .as_deref()
+            .filter(|content| !content.trim().is_empty())
+            .filter(|content| content.len() <= MAX_PROPOSAL_TEXT_BYTES)
+            .ok_or("the stored instruction baseline is empty or too large")?;
+        let expected_target_hash = file_hash(data, &target_path)
+            .ok_or("the stored instruction baseline has no content hash")?;
+        let evidence = bounded_evidence(&opportunity.evidence, MAX_PROPOSAL_TEXT_BYTES);
+        if !evidence
+            .iter()
+            .any(|evidence| evidence.session_id.is_some())
+        {
+            return Err("surface evidence has no session-bound instruction resolution");
+        }
+        let (action, existing_text, proposed_text, heuristic) =
+            if opportunity.action.starts_with("Remove") {
+                (
+                    ProposalAction::Remove,
+                    Some(existing_text.to_owned()),
+                    None,
+                    "configured instruction surface had no observed use",
+                )
+            } else if opportunity.action.starts_with("Slim") {
+                let (existing, proposed) = redundant_instruction_pair(existing_text)
+                    .ok_or("no deterministic bounded slim replacement was found")?;
+                (
+                    ProposalAction::Modify,
+                    Some(existing),
+                    Some(proposed),
+                    "configured instruction surface contains redundant adjacent guidance",
+                )
+            } else {
+                return Err("re-scope needs an explicit before/after content pair");
+            };
+        let proposal = Self {
+            target_scope: opportunity.scope.clone(),
+            target_path,
+            action,
+            observed_problem: bounded_excerpt(&opportunity.impact, MAX_PROPOSAL_TEXT_BYTES),
+            evidence_count: opportunity.occurrences,
+            distinct_sessions: opportunity.distinct_sessions,
+            confidence: opportunity.confidence,
+            heuristic: heuristic.to_owned(),
+            evidence,
+            proposed_text,
+            existing_text,
+            source_path: None,
+            expected_target_hash: Some(expected_target_hash),
+            expected_source_hash: None,
+            target_rationale: format!(
+                "The selected surface owner is {}; remove only the stored, hash-guarded instruction content after review",
+                opportunity.owner
+            ),
+            limitations: opportunity.limitations.clone(),
+            review_reminder: "Review the evidence and diff before applying this proposal; codexlens does not apply it automatically".to_owned(),
+        };
+        proposal
+            .validate()
+            .map_err(|_| "surface proposal validation failed")?;
+        Ok(proposal)
+    }
+}
+
+fn redundant_instruction_pair(content: &str) -> Option<(String, String)> {
+    let lines = content.split_inclusive('\n').collect::<Vec<_>>();
+    for pair in lines.windows(2) {
+        if pair[0].trim().is_empty() || pair[0].trim_end() != pair[1].trim_end() {
+            continue;
+        }
+        let existing = format!("{}{}", pair[0], pair[1]);
+        if existing.len() <= MAX_PROPOSAL_TEXT_BYTES && pair[0].len() <= MAX_PROPOSAL_TEXT_BYTES {
+            return Some((existing, pair[0].to_owned()));
+        }
+    }
+    None
 }
 
 fn required_text(text: Option<&str>, field: &'static str) -> Result<(), ProposalError> {
@@ -272,10 +371,14 @@ fn proposal_advice(finding: &Finding) -> Option<(ProposalAction, Option<String>)
     let (action, text) = match finding.kind {
         FindingType::Failure => (
             ProposalAction::Add,
-            finding
-                .observed_commands
-                .first()
-                .map(|command| format!("Before running {command}, verify the documented prerequisite.")),
+            finding.observed_commands.first().map_or_else(
+                || Some(finding.suggested_action.clone()),
+                |command| {
+                    Some(format!(
+                        "Before running {command}, verify the documented prerequisite."
+                    ))
+                },
+            ),
         ),
         FindingType::Correction | FindingType::Gap => (
             ProposalAction::Add,
@@ -398,6 +501,70 @@ pub fn proposals_for_findings(data: &CanonicalData, findings: &[Finding]) -> Pro
             }),
         }
     }
+    sort_proposal_plan(&mut plan);
+    plan
+}
+
+pub fn proposals_for_findings_and_waste(
+    data: &CanonicalData,
+    findings: &[Finding],
+    opportunities: &[crate::analysis::views::ViewOpportunity],
+) -> ProposalPlan {
+    let mut plan = proposals_for_findings(data, findings);
+    for opportunity in opportunities {
+        if !opportunity.id.starts_with("surface:") {
+            continue;
+        }
+        match Proposal::from_surface_opportunity(data, opportunity) {
+            Ok(proposal) if proposal.confidence == FindingConfidence::High => {
+                plan.proposals.push(proposal);
+            }
+            Ok(proposal) => plan.skipped.push(SkippedProposal {
+                target_path: proposal.target_path,
+                reason: format!(
+                    "proposal confidence is {}; optimize --diff requires high-confidence proposals",
+                    proposal.confidence.as_str()
+                ),
+            }),
+            Err(reason) => plan.skipped.push(SkippedProposal {
+                target_path: surface_target_path(data, opportunity),
+                reason: format!("configuration waste is actionable but {reason}"),
+            }),
+        }
+    }
+    let represented_surface_ids = opportunities
+        .iter()
+        .filter_map(|opportunity| opportunity.id.strip_prefix("surface:"))
+        .collect::<BTreeSet<_>>();
+    for surface in crate::analysis::views::inventory(data).rows {
+        if represented_surface_ids.contains(surface.id.as_str()) {
+            continue;
+        }
+        let uncertain = surface.usage_state == SurfaceUsageState::Unknown;
+        if !uncertain && surface.action.is_none() {
+            continue;
+        }
+        let target_path = surface.path.unwrap_or_else(|| {
+            PathBuf::from(format!(
+                "<configuration surface: {}>",
+                bounded_excerpt(&surface.name, MAX_PROPOSAL_TEXT_BYTES)
+            ))
+        });
+        let reason = if uncertain {
+            "configuration surface was skipped because usage evidence is unavailable"
+        } else {
+            "configuration waste was skipped because supporting evidence or a bounded target is insufficient"
+        };
+        plan.skipped.push(SkippedProposal {
+            target_path,
+            reason: format!("{} ({})", reason, surface.id),
+        });
+    }
+    sort_proposal_plan(&mut plan);
+    plan
+}
+
+fn sort_proposal_plan(plan: &mut ProposalPlan) {
     plan.proposals.sort_by(|left, right| {
         left.target_path
             .cmp(&right.target_path)
@@ -409,7 +576,18 @@ pub fn proposals_for_findings(data: &CanonicalData, findings: &[Finding]) -> Pro
             .cmp(&right.target_path)
             .then_with(|| left.reason.cmp(&right.reason))
     });
-    plan
+}
+
+fn surface_target_path(
+    data: &CanonicalData,
+    opportunity: &crate::analysis::views::ViewOpportunity,
+) -> PathBuf {
+    opportunity
+        .id
+        .strip_prefix("surface:")
+        .and_then(|id| data.surfaces.iter().find(|surface| surface.id == id))
+        .and_then(|surface| surface.path.clone())
+        .unwrap_or_else(|| PathBuf::from(&opportunity.target))
 }
 
 fn target_path_for_finding(data: &CanonicalData, finding: &Finding) -> PathBuf {
@@ -477,8 +655,11 @@ mod tests {
     use super::*;
     use crate::advisor::test_support::{data_with_join, file, finding, proposal};
     use crate::advisor::{RenderedDiff, render_proposal_summary};
-    use crate::analysis::{EvidenceRef, EvidenceRole};
-    use crate::model::{InstructionScope, SourceKind, SourceRef};
+    use crate::analysis::{EvidenceRef, EvidenceRole, FindingSeverity};
+    use crate::model::{
+        InstructionScope, SourceKind, SourceRef, Surface, SurfaceKind, SurfaceLoadMode,
+        SurfaceScope, SurfaceUsageState,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -555,6 +736,32 @@ mod tests {
     }
 
     #[test]
+    fn non_shell_failure_keeps_an_actionable_proposal_without_a_command() {
+        let data = data_with_join(vec![file(
+            "/fixture/project/AGENTS.md",
+            InstructionScope::ProjectRoot,
+            "root",
+        )]);
+        let mut value = finding(
+            FindingScope::Project(PathBuf::from("/fixture/project")),
+            FindingType::Failure,
+            None,
+        );
+        value.observed_commands.clear();
+        value.suggested_action =
+            "Document the wrapper prerequisite before invoking the non-shell tool".to_owned();
+
+        let proposal = Proposal::from_finding(&data, &value).expect("failure proposal");
+        assert_eq!(proposal.action, ProposalAction::Add);
+        assert!(
+            proposal
+                .proposed_text
+                .as_deref()
+                .is_some_and(|text| text.contains("wrapper prerequisite"))
+        );
+    }
+
+    #[test]
     fn knowledge_move_to_docs_is_explicit_only() {
         let path = "/fixture/project/AGENTS.md";
         let data = data_with_join(vec![file(
@@ -575,6 +782,162 @@ mod tests {
         assert!(plan.proposals.is_empty());
         assert_eq!(plan.skipped.len(), 1);
         assert!(plan.skipped[0].reason.contains("explicit-only"));
+    }
+
+    #[test]
+    fn unused_instruction_surface_without_session_evidence_is_explicitly_skipped() {
+        let path = PathBuf::from("/fixture/project/AGENTS.md");
+        let mut data = data_with_join(vec![file(
+            path.to_str().unwrap(),
+            InstructionScope::ProjectRoot,
+            "unused guidance\n",
+        )]);
+        data.surfaces = vec![Surface {
+            id: "unused-instruction".to_owned(),
+            kind: SurfaceKind::Instruction,
+            name: "AGENTS.md".to_owned(),
+            path: Some(path.clone()),
+            scope: SurfaceScope::Project(PathBuf::from("/fixture/project")),
+            enabled: Some(true),
+            load_mode: SurfaceLoadMode::StartupFull,
+            static_bytes: Some(16),
+            startup_bytes: Some(16),
+            observed_uses: 0,
+            observed_sessions: 0,
+            usage_state: SurfaceUsageState::Unused,
+            limitations: Vec::new(),
+        }];
+        let mut opportunities = crate::analysis::views::waste(&data).opportunities;
+        for opportunity in &mut opportunities {
+            for evidence in &mut opportunity.evidence {
+                evidence.session_id = None;
+            }
+        }
+        let plan = proposals_for_findings_and_waste(&data, &[], &opportunities);
+
+        assert!(plan.proposals.is_empty());
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].target_path, path);
+        assert!(plan.skipped[0].reason.contains("session-bound"));
+    }
+
+    #[test]
+    fn unused_surface_skip_keeps_the_configured_target_path() {
+        let path = PathBuf::from("/fixture/project/config.toml");
+        let data = CanonicalData {
+            surfaces: vec![Surface {
+                id: "unused-config".to_owned(),
+                kind: SurfaceKind::Config,
+                name: "config".to_owned(),
+                path: Some(path.clone()),
+                scope: SurfaceScope::Project(PathBuf::from("/fixture/project")),
+                enabled: Some(true),
+                load_mode: SurfaceLoadMode::StartupFull,
+                static_bytes: Some(10),
+                startup_bytes: Some(10),
+                observed_uses: 0,
+                observed_sessions: 0,
+                usage_state: SurfaceUsageState::Unused,
+                limitations: Vec::new(),
+            }],
+            ..CanonicalData::default()
+        };
+
+        let opportunities = crate::analysis::views::waste(&data).opportunities;
+        let plan = proposals_for_findings_and_waste(&data, &[], &opportunities);
+        assert_eq!(plan.proposals.len(), 0);
+        assert_eq!(plan.skipped[0].target_path, path);
+    }
+
+    #[test]
+    fn evidence_less_pathless_surface_is_reported_as_an_explicit_skip() {
+        let data = CanonicalData {
+            surfaces: vec![Surface {
+                id: "pathless-unused".to_owned(),
+                kind: SurfaceKind::Config,
+                name: "synthetic-config".to_owned(),
+                path: None,
+                scope: SurfaceScope::Global,
+                enabled: Some(true),
+                load_mode: SurfaceLoadMode::StartupFull,
+                static_bytes: Some(10),
+                startup_bytes: Some(10),
+                observed_uses: 0,
+                observed_sessions: 0,
+                usage_state: SurfaceUsageState::Unused,
+                limitations: Vec::new(),
+            }],
+            ..CanonicalData::default()
+        };
+
+        let plan = proposals_for_findings_and_waste(&data, &[], &[]);
+
+        assert!(plan.proposals.is_empty());
+        assert_eq!(plan.skipped.len(), 1);
+        assert!(
+            plan.skipped[0]
+                .target_path
+                .to_string_lossy()
+                .contains("synthetic-config")
+        );
+        assert!(plan.skipped[0].reason.contains("supporting evidence"));
+    }
+
+    #[test]
+    fn heavy_instruction_surface_can_propose_a_bounded_safe_slim() {
+        let path = PathBuf::from("/fixture/project/AGENTS.md");
+        let mut data = data_with_join(vec![file(
+            path.to_str().unwrap(),
+            InstructionScope::ProjectRoot,
+            "repeated guidance\nrepeated guidance\n",
+        )]);
+        data.surfaces = vec![Surface {
+            id: "heavy-instruction".to_owned(),
+            kind: SurfaceKind::Instruction,
+            name: "AGENTS.md".to_owned(),
+            path: Some(path.clone()),
+            scope: SurfaceScope::Project(PathBuf::from("/fixture/project")),
+            enabled: Some(true),
+            load_mode: SurfaceLoadMode::StartupFull,
+            static_bytes: Some(8_192),
+            startup_bytes: Some(8_192),
+            observed_uses: 2,
+            observed_sessions: 1,
+            usage_state: SurfaceUsageState::Used,
+            limitations: Vec::new(),
+        }];
+        let opportunity = crate::analysis::views::ViewOpportunity {
+            id: "surface:heavy-instruction".to_owned(),
+            title: "heavy instruction".to_owned(),
+            scope: FindingScope::Project(PathBuf::from("/fixture/project")),
+            owner: "/fixture/project".to_owned(),
+            target: path.display().to_string(),
+            impact: "startup context is heavy".to_owned(),
+            severity: FindingSeverity::Medium,
+            confidence: FindingConfidence::High,
+            occurrences: 2,
+            distinct_sessions: 1,
+            action: "Slim the instruction surface".to_owned(),
+            follow_up: "codexlens inventory --scope project:/fixture/project".to_owned(),
+            evidence: finding(
+                FindingScope::Project(PathBuf::from("/fixture/project")),
+                FindingType::Gap,
+                None,
+            )
+            .evidence,
+            limitations: Vec::new(),
+        };
+        let plan = proposals_for_findings_and_waste(&data, &[], &[opportunity]);
+        assert_eq!(plan.proposals.len(), 1);
+        assert_eq!(plan.proposals[0].action, ProposalAction::Modify);
+        assert_eq!(
+            plan.proposals[0].existing_text.as_deref(),
+            Some("repeated guidance\nrepeated guidance\n")
+        );
+        assert_eq!(
+            plan.proposals[0].proposed_text.as_deref(),
+            Some("repeated guidance\n")
+        );
     }
 
     #[test]

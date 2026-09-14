@@ -7,16 +7,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use rusqlite::hooks::{AuthAction, Authorization};
 use rusqlite::types::ValueRef;
 
 use codexlens::advisor::{
-    ApplyPlan, ApplyReport, DiffBatch, DoctorOptions, ReportCoverage, coverage_limitations_json,
-    doctor_with_coverage, prepare_apply_proposals, proposals_for_findings,
-    render_coverage_limitations, render_diffs, render_doctor_with_coverage,
-    render_doctor_with_period, render_json_diff, render_json_diff_with_period,
-    render_json_finding_report_with_coverage, render_json_finding_report_with_period,
-    render_proposal_summary, render_report_metadata_with_period, report_coverage,
-    report_coverage_for_period_selection, report_sessions,
+    ApplyPlan, ApplyReport, CoverageLimitation, DiffBatch, DoctorOptions, DoctorReport,
+    ReportCoverage, coverage_limitations_json, doctor_with_coverage, prepare_apply_proposals,
+    proposals_for_findings_and_waste, recommend_scope, render_coverage_limitations, render_diffs,
+    render_doctor_with_coverage, render_doctor_with_period, render_json_diff,
+    render_json_diff_with_period, render_json_finding_report_with_coverage,
+    render_json_finding_report_with_period, render_proposal_summary,
+    render_report_metadata_with_period, report_coverage, report_coverage_for_period_selection,
+    report_sessions,
 };
 use codexlens::analysis::views::{
     FailureReport, InventoryReport, OverheadReport, PromptReport, StuckReport, UsageReport,
@@ -121,6 +123,12 @@ enum Command {
         limit: Option<usize>,
     },
     Query {
+        #[arg(value_name = "SQL")]
+        sql: Option<String>,
+        #[command(flatten)]
+        options: QueryOptions,
+    },
+    Sql {
         #[arg(value_name = "SQL")]
         sql: Option<String>,
         #[command(flatten)]
@@ -504,7 +512,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Refresh { refresh } => run_refresh(&refresh),
-        Command::Analyze { store } => run_finding_report(&store, analyze_default, "analyze"),
+        Command::Analyze { store } => run_analyze(&store),
         Command::Sessions { store } => run_sessions_report(&store),
         Command::Inventory { store } => run_view_report(&store, ViewKind::Inventory),
         Command::Overhead { store } => run_view_report(&store, ViewKind::Overhead),
@@ -519,7 +527,8 @@ fn main() -> Result<()> {
         Command::Knowledge { store } => run_finding_report(&store, knowledge, "knowledge"),
         Command::Instructions { store } => run_finding_report(&store, instructions, "instructions"),
         Command::Doctor { store, limit } => run_doctor_report(&store, limit),
-        Command::Query { sql, options } => run_query(sql, &options),
+        Command::Query { sql, options } => run_query(sql, &options, "query"),
+        Command::Sql { sql, options } => run_query(sql, &options, "sql"),
         Command::Optimize {
             store,
             diff,
@@ -535,34 +544,44 @@ fn main() -> Result<()> {
                     "reporting period filters are supported by optimize --diff only; optimize --apply requires the unfiltered store"
                 );
             }
-            let (data, findings, freshness, selection) = load_analysis(&store)?;
-            let findings = findings
+            let (data, freshness, selection) = load_reporting(&store)?;
+            let scoped_data = data_for_scope(&data, &store.scope);
+            let findings = analyze_default(&scoped_data)
                 .into_iter()
                 .filter(|finding| scope_matches(&store.scope, &finding.scope))
                 .collect::<Vec<_>>();
-            let proposal_plan = proposals_for_findings(&data, &findings);
-            if diff || print {
+            let waste = match filter_view_report(
+                ViewReport::Waste(codexlens::analysis::views::waste(&scoped_data)),
+                &store.scope,
+            ) {
+                ViewReport::Waste(report) => report,
+                _ => unreachable!("waste report variant"),
+            };
+            let proposal_plan =
+                proposals_for_findings_and_waste(&scoped_data, &findings, &waste.opportunities);
+            if print {
+                run_optimize_print(
+                    &scoped_data,
+                    &findings,
+                    &waste,
+                    &proposal_plan,
+                    &freshness,
+                    &store,
+                    selection.as_ref(),
+                )
+            } else if diff {
                 let batch = proposal_batch(&proposal_plan);
                 if let Some(selection) = selection.as_ref() {
-                    let coverage = selection.report_coverage.clone();
+                    let coverage = coverage_for_scope(&data, Some(selection), &store.scope);
+                    let period = period_for_scope(selection, &store.scope);
                     store.format.write_report(
                         "OPTIMIZE",
                         || {
                             render_optimize_human_with_period(
-                                &batch,
-                                &coverage,
-                                &freshness,
-                                &selection.coverage,
+                                &batch, &coverage, &freshness, &period,
                             )
                         },
-                        || {
-                            render_json_diff_with_period(
-                                &batch,
-                                &freshness,
-                                &coverage,
-                                &selection.coverage,
-                            )
-                        },
+                        || render_json_diff_with_period(&batch, &freshness, &coverage, &period),
                     )
                 } else {
                     store.format.write_report(
@@ -1001,7 +1020,7 @@ struct QueryResult {
     omitted_rows: usize,
 }
 
-fn run_query(sql: Option<String>, options: &QueryOptions) -> Result<()> {
+fn run_query(sql: Option<String>, options: &QueryOptions, command: &str) -> Result<()> {
     let sql = match sql {
         Some(sql) => sql,
         None => read_query_from_stdin()?,
@@ -1015,14 +1034,17 @@ fn run_query(sql: Option<String>, options: &QueryOptions) -> Result<()> {
     let store = Store::open_read_only(&path).with_context(|| {
         format!("failed to open query store {display}; provide a valid SQLite store")
     })?;
+    store
+        .connection()
+        .authorizer(Some(read_only_sql_authorizer));
     let result = execute_query(store.connection(), &sql)?;
     match options.format {
-        OutputFormat::Table => print!("{}", render_query_table(&result)),
-        OutputFormat::Markdown => print!("{}", render_query_markdown(&result)),
+        OutputFormat::Table => print!("{}", render_query_table(&result, command)),
+        OutputFormat::Markdown => print!("{}", render_query_markdown(&result, command)),
         OutputFormat::Json => {
             let document = serde_json::json!({
                 "schema_version": 1,
-                "command": "query",
+                "command": command,
                 "data": {
                     "columns": result.columns,
                     "rows": result.rows,
@@ -1059,9 +1081,13 @@ fn validate_query_input(sql: &str) -> Result<()> {
 }
 
 fn execute_query(connection: &rusqlite::Connection, sql: &str) -> Result<QueryResult> {
-    let mut statement = connection
-        .prepare(sql)
-        .map_err(|_| anyhow::anyhow!("query must contain one valid SQL statement"))?;
+    let mut statement = connection.prepare(sql).map_err(|error| {
+        if error.sqlite_error_code() == Some(rusqlite::ErrorCode::AuthorizationForStatementDenied) {
+            anyhow::anyhow!("query must be a single read-only SQL statement")
+        } else {
+            anyhow::anyhow!("query must contain one valid SQL statement")
+        }
+    })?;
     if !statement.readonly() || is_mutating_pragma(sql) {
         bail!("query must be a single read-only SQL statement");
     }
@@ -1104,6 +1130,51 @@ fn execute_query(connection: &rusqlite::Connection, sql: &str) -> Result<QueryRe
     })
 }
 
+fn read_only_sql_authorizer(context: rusqlite::hooks::AuthContext<'_>) -> Authorization {
+    match context.action {
+        AuthAction::Read { .. } | AuthAction::Select | AuthAction::Recursive => {
+            Authorization::Allow
+        }
+        AuthAction::Function { function_name }
+            if !function_name.eq_ignore_ascii_case("load_extension") =>
+        {
+            Authorization::Allow
+        }
+        AuthAction::Pragma {
+            pragma_name,
+            pragma_value,
+        } if pragma_value.is_none() && read_only_pragma_without_argument(pragma_name) => {
+            Authorization::Allow
+        }
+        AuthAction::Pragma { pragma_name, .. }
+            if READ_ONLY_PRAGMA_ARGUMENTS
+                .iter()
+                .any(|candidate| pragma_name.eq_ignore_ascii_case(candidate)) =>
+        {
+            Authorization::Allow
+        }
+        _ => Authorization::Deny,
+    }
+}
+
+fn read_only_pragma_without_argument(name: &str) -> bool {
+    [
+        "application_id",
+        "compile_options",
+        "data_version",
+        "encoding",
+        "foreign_keys",
+        "freelist_count",
+        "page_count",
+        "page_size",
+        "recursive_triggers",
+        "schema_version",
+        "user_version",
+    ]
+    .iter()
+    .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
 fn query_value(value: ValueRef<'_>) -> serde_json::Value {
     match value {
         ValueRef::Null => serde_json::Value::Null,
@@ -1127,8 +1198,8 @@ fn query_human_value(value: &serde_json::Value) -> String {
     value.replace(['\r', '\n'], " ")
 }
 
-fn render_query_table(result: &QueryResult) -> String {
-    let mut output = String::from("QUERY\n");
+fn render_query_table(result: &QueryResult, command: &str) -> String {
+    let mut output = format!("{}\n", command.to_ascii_uppercase());
     if result.columns.is_empty() {
         output.push_str("No columns.\n");
         return output;
@@ -1159,8 +1230,8 @@ fn markdown_cell(value: &str) -> String {
     value.replace('\\', "\\\\").replace('|', "\\|")
 }
 
-fn render_query_markdown(result: &QueryResult) -> String {
-    let mut output = String::from("# QUERY\n\n");
+fn render_query_markdown(result: &QueryResult, command: &str) -> String {
+    let mut output = format!("# {}\n\n", command.to_ascii_uppercase());
     if result.columns.is_empty() {
         output.push_str("No columns.\n");
         return output;
@@ -1373,37 +1444,66 @@ fn bounded_path(path: &Path) -> String {
     bounded_text(&path.display().to_string())
 }
 
-fn load_analysis(
-    options: &StoreOptions,
-) -> Result<(
-    CanonicalData,
-    Vec<Finding>,
-    StoreFreshness,
-    Option<ReportingSelection>,
-)> {
-    let (data, freshness, selection) = load_reporting(options)?;
-    let findings = analyze_default(&data);
-    Ok((data, findings, freshness, selection))
+fn run_analyze(options: &StoreOptions) -> Result<()> {
+    validate_reporting_options(options)?;
+    if !options.frozen {
+        let store_path = options.store_path()?;
+        refresh_reporting_store(options, &store_path)?;
+    }
+    run_finding_report(options, analyze_default, "analyze")
+}
+
+fn refresh_reporting_store(options: &StoreOptions, store_path: &Path) -> Result<()> {
+    let refresh = RefreshOptions {
+        store: store_path.to_path_buf(),
+        codex_home: options.codex_home.clone(),
+        include_archived: options.include_archived,
+        include_subagents: options.include_subagents,
+        config: None,
+    };
+    let outcome = refresh_store(&refresh).with_context(|| {
+        format!(
+            "analyze could not refresh derived store {}",
+            bounded_display(store_path)
+        )
+    })?;
+    report_auto_refresh(&outcome, store_path);
+    Ok(())
 }
 
 fn run_view_report(options: &StoreOptions, kind: ViewKind) -> Result<()> {
     let (data, freshness, selection) = load_reporting(options)?;
-    let coverage = report_coverage_for_selection(&data, selection.as_ref());
-    let period = selection.as_ref().map(|selection| &selection.coverage);
+    let coverage = coverage_for_scope(&data, selection.as_ref(), &options.scope);
+    let scoped_data = data_for_scope(&data, &options.scope);
+    let period = selection
+        .as_ref()
+        .map(|selection| period_for_scope(selection, &options.scope));
     let report = match kind {
-        ViewKind::Inventory => ViewReport::Inventory(codexlens::analysis::views::inventory(&data)),
-        ViewKind::Overhead => ViewReport::Overhead(codexlens::analysis::views::overhead(&data)),
-        ViewKind::Usage => ViewReport::Usage(codexlens::analysis::views::usage(&data)),
-        ViewKind::Waste => ViewReport::Waste(codexlens::analysis::views::waste(&data)),
-        ViewKind::Failures => ViewReport::Failures(codexlens::analysis::views::failures(&data)),
-        ViewKind::Stuck => ViewReport::Stuck(codexlens::analysis::views::stuck(&data)),
-        ViewKind::Prompts => ViewReport::Prompts(codexlens::analysis::views::prompts(&data)),
+        ViewKind::Inventory => {
+            ViewReport::Inventory(codexlens::analysis::views::inventory(&scoped_data))
+        }
+        ViewKind::Overhead => {
+            ViewReport::Overhead(codexlens::analysis::views::overhead(&scoped_data))
+        }
+        ViewKind::Usage => ViewReport::Usage(codexlens::analysis::views::usage(&scoped_data)),
+        ViewKind::Waste => ViewReport::Waste(codexlens::analysis::views::waste(&scoped_data)),
+        ViewKind::Failures => {
+            ViewReport::Failures(codexlens::analysis::views::failures(&scoped_data))
+        }
+        ViewKind::Stuck => ViewReport::Stuck(codexlens::analysis::views::stuck(&scoped_data)),
+        ViewKind::Prompts => ViewReport::Prompts(codexlens::analysis::views::prompts(&scoped_data)),
     };
     let report = filter_view_report(report, &options.scope);
     match options.format {
         OutputFormat::Table => {
-            let (stdout, stderr) =
-                render_view_table(kind, &report, &freshness, &coverage, &options.scope, period);
+            let (stdout, stderr) = render_view_table(
+                kind,
+                &report,
+                &freshness,
+                &coverage,
+                &options.scope,
+                period.as_ref(),
+            );
             print!("{stdout}");
             eprint!("{stderr}");
             Ok(())
@@ -1411,21 +1511,37 @@ fn run_view_report(options: &StoreOptions, kind: ViewKind) -> Result<()> {
         OutputFormat::Markdown => {
             print!(
                 "{}",
-                render_view_markdown(kind, &report, &freshness, &coverage, &options.scope, period,)
+                render_view_markdown(
+                    kind,
+                    &report,
+                    &freshness,
+                    &coverage,
+                    &options.scope,
+                    period.as_ref(),
+                )
             );
             Ok(())
         }
-        OutputFormat::Json => {
-            print_view_json(kind, &report, &data, &freshness, &coverage, options, period)
-        }
+        OutputFormat::Json => print_view_json(
+            kind,
+            &report,
+            &scoped_data,
+            &freshness,
+            &coverage,
+            options,
+            period.as_ref(),
+        ),
     }
 }
 
 fn run_sessions_report(options: &StoreOptions) -> Result<()> {
     let (data, freshness, selection) = load_reporting(options)?;
-    let coverage = report_coverage_for_selection(&data, selection.as_ref());
-    let period = selection.as_ref().map(|selection| &selection.coverage);
-    let sessions = report_sessions(&data)
+    let coverage = coverage_for_scope(&data, selection.as_ref(), &options.scope);
+    let scoped_data = data_for_scope(&data, &options.scope);
+    let period = selection
+        .as_ref()
+        .map(|selection| period_for_scope(selection, &options.scope));
+    let sessions = report_sessions(&scoped_data)
         .into_iter()
         .filter(|session| session_scope_matches(&options.scope, session))
         .collect::<Vec<_>>();
@@ -1434,14 +1550,26 @@ fn run_sessions_report(options: &StoreOptions) -> Result<()> {
         OutputFormat::Table => {
             print!(
                 "{}",
-                render_sessions_table(&sessions, &freshness, &coverage, &options.scope, period,)
+                render_sessions_table(
+                    &sessions,
+                    &freshness,
+                    &coverage,
+                    &options.scope,
+                    period.as_ref(),
+                )
             );
             Ok(())
         }
         OutputFormat::Markdown => {
             print!(
                 "{}",
-                render_sessions_markdown(&sessions, &freshness, &coverage, &options.scope, period,)
+                render_sessions_markdown(
+                    &sessions,
+                    &freshness,
+                    &coverage,
+                    &options.scope,
+                    period.as_ref(),
+                )
             );
             Ok(())
         }
@@ -1463,7 +1591,7 @@ fn run_sessions_report(options: &StoreOptions) -> Result<()> {
                 "schema_version": 1,
                 "command": "sessions",
                 "scope": scope_filter_json(&options.scope),
-                "coverage": cli_coverage_json(&data, &coverage, options, period),
+                "coverage": cli_coverage_json(&scoped_data, &coverage, options, period.as_ref()),
                 "freshness": freshness_json(&freshness),
                 "data": {
                     "rows": rows,
@@ -1608,35 +1736,58 @@ struct DoctorView {
     top_fixes: Vec<ViewOpportunity>,
     cost: OverheadReport,
     pruning: InventoryReport,
+    finding_report: DoctorReport,
     has_opportunities: bool,
+    coverage_sufficient: bool,
 }
 
 fn run_doctor_report(options: &StoreOptions, limit: Option<usize>) -> Result<()> {
     let (data, freshness, selection) = load_reporting(options)?;
-    let coverage = report_coverage_for_selection(&data, selection.as_ref());
-    let period = selection.as_ref().map(|selection| &selection.coverage);
+    let coverage = coverage_for_scope(&data, selection.as_ref(), &options.scope);
+    let scoped_data = data_for_scope(&data, &options.scope);
+    let period = selection
+        .as_ref()
+        .map(|selection| period_for_scope(selection, &options.scope));
     let waste = match filter_view_report(
-        ViewReport::Waste(codexlens::analysis::views::waste(&data)),
+        ViewReport::Waste(codexlens::analysis::views::waste(&scoped_data)),
         &options.scope,
     ) {
         ViewReport::Waste(report) => report,
         _ => unreachable!("waste report variant"),
     };
     let cost = match filter_view_report(
-        ViewReport::Overhead(codexlens::analysis::views::overhead(&data)),
+        ViewReport::Overhead(codexlens::analysis::views::overhead(&scoped_data)),
         &options.scope,
     ) {
         ViewReport::Overhead(report) => report,
         _ => unreachable!("overhead report variant"),
     };
     let pruning = match filter_view_report(
-        ViewReport::Inventory(codexlens::analysis::views::inventory(&data)),
+        ViewReport::Inventory(codexlens::analysis::views::inventory(&scoped_data)),
         &options.scope,
     ) {
         ViewReport::Inventory(report) => report,
         _ => unreachable!("inventory report variant"),
     };
     let max_per_scope = limit.unwrap_or(5).min(5);
+    let findings = analyze_default(&scoped_data)
+        .into_iter()
+        .filter(|finding| scope_matches(&options.scope, &finding.scope))
+        .collect::<Vec<_>>();
+    let mut finding_report = doctor_with_coverage(
+        &scoped_data,
+        &findings,
+        freshness.clone(),
+        &DoctorOptions {
+            max_findings_per_scope: Some(CLI_VIEW_ROW_LIMIT),
+            ..DoctorOptions::default()
+        },
+        &coverage,
+    );
+    if let Some(period) = period.as_ref() {
+        finding_report.period_start = period.observed_start.clone();
+        finding_report.period_end = period.observed_end.clone();
+    }
     let mut seen_per_scope = BTreeMap::<String, usize>::new();
     let top_fixes = waste
         .opportunities
@@ -1654,6 +1805,16 @@ fn run_doctor_report(options: &StoreOptions, limit: Option<usize>) -> Result<()>
         .cloned()
         .collect();
     let has_opportunities = !waste.opportunities.is_empty();
+    let unknown_cost = cost.rows.iter().any(|row| row.unknown_cost);
+    let unknown_inventory = pruning
+        .rows
+        .iter()
+        .any(|row| row.usage_state == codexlens::model::SurfaceUsageState::Unknown);
+    let coverage_sufficient = coverage.status == "observed"
+        && coverage.limitations.is_empty()
+        && coverage.limitations_omitted == 0
+        && !unknown_cost
+        && !unknown_inventory;
     let doctor = DoctorView {
         top_fixes,
         cost,
@@ -1665,12 +1826,19 @@ fn run_doctor_report(options: &StoreOptions, limit: Option<usize>) -> Result<()>
                 .filter(|row| row.action.is_some())
                 .collect(),
         },
+        finding_report,
         has_opportunities,
+        coverage_sufficient,
     };
     match options.format {
         OutputFormat::Table => {
-            let (stdout, stderr) =
-                render_doctor_table(&doctor, &freshness, &coverage, &options.scope, period);
+            let (stdout, stderr) = render_doctor_table(
+                &doctor,
+                &freshness,
+                &coverage,
+                &options.scope,
+                period.as_ref(),
+            );
             print!("{stdout}");
             eprint!("{stderr}");
             Ok(())
@@ -1678,18 +1846,24 @@ fn run_doctor_report(options: &StoreOptions, limit: Option<usize>) -> Result<()>
         OutputFormat::Markdown => {
             print!(
                 "{}",
-                render_doctor_markdown(&doctor, &freshness, &coverage, &options.scope, period)
+                render_doctor_markdown(
+                    &doctor,
+                    &freshness,
+                    &coverage,
+                    &options.scope,
+                    period.as_ref(),
+                )
             );
             Ok(())
         }
         OutputFormat::Json => print_doctor_json(
             &doctor,
-            &data,
+            &scoped_data,
             &freshness,
             &coverage,
             &options.scope,
             options,
-            period,
+            period.as_ref(),
         ),
     }
 }
@@ -1713,9 +1887,15 @@ fn render_doctor_table(
     ));
     output.push_str(&render_coverage_limitations(coverage));
     if doctor.top_fixes.is_empty() {
-        output.push_str("No top fixes with bounded evidence.\n");
+        if doctor.coverage_sufficient {
+            output.push_str("No top fixes with bounded evidence.\n");
+        } else {
+            output.push_str(
+                "No actionable finding was observed with sufficient evidence.\nAnalysis is incomplete; inspect coverage limitations before treating this as healthy.\n",
+            );
+        }
     } else {
-        for (index, opportunity) in doctor.top_fixes.iter().enumerate() {
+        for (index, opportunity) in doctor.top_fixes.iter().take(CLI_VIEW_ROW_LIMIT).enumerate() {
             output.push_str(&format!(
                 "\n{}. {}\n",
                 index + 1,
@@ -1723,6 +1903,7 @@ fn render_doctor_table(
             ));
             append_opportunity_fields(&mut output, opportunity);
         }
+        append_omitted(&mut output, doctor.top_fixes.len());
     }
     if !doctor.cost.rows.is_empty() {
         output.push_str("\nCOST\n");
@@ -1732,7 +1913,7 @@ fn render_doctor_table(
         output.push_str("\nCONFIG WORTH PRUNING\n");
         render_inventory_table(&mut output, &doctor.pruning);
     }
-    if !doctor.has_opportunities {
+    if !doctor.has_opportunities && doctor.coverage_sufficient {
         output.push_str("\nLOOKS HEALTHY\nNo actionable opportunities were observed.\n");
     }
     (output, String::new())
@@ -1760,25 +1941,45 @@ fn print_doctor_json(
     options: &StoreOptions,
     period: Option<&PeriodCoverage>,
 ) -> Result<()> {
+    let finding_document = if let Some(period) = period {
+        render_json_finding_report_with_period("doctor", &doctor.finding_report, coverage, period)?
+    } else {
+        render_json_finding_report_with_coverage("doctor", &doctor.finding_report, coverage)?
+    };
+    let mut doctor_data = serde_json::from_str::<serde_json::Value>(&finding_document)?
+        .get("data")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("doctor finding report did not contain data"))?;
+    doctor_data["top_fixes"] = serde_json::json!(
+        doctor
+            .top_fixes
+            .iter()
+            .take(CLI_VIEW_ROW_LIMIT)
+            .map(opportunity_json)
+            .collect::<Vec<_>>()
+    );
+    doctor_data["top_fixes_omitted_count"] =
+        serde_json::json!(doctor.top_fixes.len().saturating_sub(CLI_VIEW_ROW_LIMIT));
+    doctor_data["cost"] = serde_json::json!({
+        "measure": doctor.cost.measure,
+        "rows": doctor.cost.rows.iter().take(CLI_VIEW_ROW_LIMIT).map(overhead_row_json).collect::<Vec<_>>(),
+        "omitted_count": doctor.cost.rows.len().saturating_sub(CLI_VIEW_ROW_LIMIT),
+    });
+    doctor_data["config_pruning"] = serde_json::json!({
+        "measure": doctor.pruning.measure,
+        "rows": doctor.pruning.rows.iter().take(CLI_VIEW_ROW_LIMIT).map(inventory_row_json).collect::<Vec<_>>(),
+        "omitted_count": doctor.pruning.rows.len().saturating_sub(CLI_VIEW_ROW_LIMIT),
+    });
+    doctor_data["looks_healthy"] =
+        serde_json::json!(!doctor.has_opportunities && doctor.coverage_sufficient);
+    doctor_data["analysis_sufficient"] = serde_json::json!(doctor.coverage_sufficient);
     let document = serde_json::json!({
         "schema_version": 1,
         "command": "doctor",
         "scope": scope_filter_json(scope),
         "coverage": cli_coverage_json(data, coverage, options, period),
         "freshness": freshness_json(freshness),
-        "data": {
-            "top_fixes": doctor.top_fixes.iter().map(opportunity_json).collect::<Vec<_>>(),
-            "cost": {
-                "measure": doctor.cost.measure,
-                "rows": doctor.cost.rows.iter().map(overhead_row_json).collect::<Vec<_>>(),
-            },
-            "config_pruning": {
-                "measure": doctor.pruning.measure,
-                "rows": doctor.pruning.rows.iter().take(CLI_VIEW_ROW_LIMIT).map(inventory_row_json).collect::<Vec<_>>(),
-                "omitted_count": doctor.pruning.rows.len().saturating_sub(CLI_VIEW_ROW_LIMIT),
-            },
-            "looks_healthy": !doctor.has_opportunities,
-        },
+        "data": doctor_data,
     });
     println!("{}", serde_json::to_string_pretty(&document)?);
     Ok(())
@@ -1895,6 +2096,7 @@ fn render_inventory_table(output: &mut String, report: &InventoryReport) {
             bounded_text(&row.name),
             row.scope
         ));
+        output.push_str(&format!("  owner: {}\n", bounded_text(&row.owner)));
         append_field(output, "path", row.path.as_deref().map(bounded_path));
         output.push_str(&format!(
             "  usage: {} ({} uses, {} sessions)\n",
@@ -1926,10 +2128,11 @@ fn render_overhead_table(output: &mut String, report: &OverheadReport) {
         append_field(output, "project", row.project.as_deref().map(bounded_path));
         output.push_str(&format!("  sessions: {}\n", row.session_count));
         output.push_str(&format!(
-            "  observed minimum: {} bytes\n  readable startup: {} bytes\n  residual: {} bytes\n  unknown cost: {}\n",
+            "  observed minimum: {} bytes\n  readable startup: {} bytes\n  residual: {} bytes\n  cost control: {}\n  unknown cost: {}\n",
             optional_number(row.observed_min_startup_bytes),
             optional_number(row.readable_startup_bytes),
             optional_number(row.residual_bytes),
+            if row.unknown_cost { "unknown" } else { "user-controlled" },
             row.unknown_cost
         ));
         append_evidence(output, &row.evidence);
@@ -2061,8 +2264,9 @@ fn append_opportunity_table(output: &mut String, opportunity: &ViewOpportunity) 
 
 fn append_opportunity_fields(output: &mut String, opportunity: &ViewOpportunity) {
     output.push_str(&format!(
-        "  scope: {}\n  target: {}\n  impact: {}\n  severity: {}\n  confidence: {}\n  counts: {} occurrences, {} sessions\n  action: {}\n",
+        "  scope: {}\n  owner: {}\n  target: {}\n  impact: {}\n  severity: {}\n  confidence: {}\n  counts: {} occurrences, {} sessions\n  action: {}\n  follow-up: {}\n",
         opportunity.scope,
+        bounded_text(&opportunity.owner),
         bounded_text(&opportunity.target),
         bounded_text(&opportunity.impact),
         opportunity.severity.as_str(),
@@ -2070,6 +2274,7 @@ fn append_opportunity_fields(output: &mut String, opportunity: &ViewOpportunity)
         opportunity.occurrences,
         opportunity.distinct_sessions,
         bounded_text(&opportunity.action),
+        bounded_text(&opportunity.follow_up),
     ));
     append_evidence(output, &opportunity.evidence);
     append_limitations(output, &opportunity.limitations);
@@ -2272,6 +2477,7 @@ fn opportunity_json(opportunity: &ViewOpportunity) -> serde_json::Value {
         "id": bounded_text(&opportunity.id),
         "title": bounded_text(&opportunity.title),
         "scope": finding_scope_json(&opportunity.scope),
+        "owner": bounded_text(&opportunity.owner),
         "target": bounded_text(&opportunity.target),
         "impact": bounded_text(&opportunity.impact),
         "severity": opportunity.severity.as_str(),
@@ -2279,6 +2485,7 @@ fn opportunity_json(opportunity: &ViewOpportunity) -> serde_json::Value {
         "occurrences": opportunity.occurrences,
         "distinct_sessions": opportunity.distinct_sessions,
         "action": bounded_text(&opportunity.action),
+        "follow_up": bounded_text(&opportunity.follow_up),
         "evidence": opportunity.evidence.iter().take(3).map(evidence_json).collect::<Vec<_>>(),
         "limitations": opportunity
             .limitations
@@ -2352,6 +2559,7 @@ fn inventory_row_json(row: &codexlens::analysis::views::InventoryRow) -> serde_j
     serde_json::json!({
         "id": bounded_text(&row.id),
         "scope": finding_scope_json(&row.scope),
+        "owner": bounded_text(&row.owner),
         "kind": row.kind.as_str(),
         "name": bounded_text(&row.name),
         "path": row.path.as_deref().map(bounded_path),
@@ -2375,6 +2583,7 @@ fn overhead_row_json(row: &codexlens::analysis::views::OverheadRow) -> serde_jso
         "observed_min_startup_bytes": row.observed_min_startup_bytes,
         "readable_startup_bytes": row.readable_startup_bytes,
         "residual_bytes": row.residual_bytes,
+        "cost_control": if row.unknown_cost { "unknown" } else { "user_controlled" },
         "unknown_cost": row.unknown_cost,
         "evidence": row.evidence.iter().take(3).map(evidence_json).collect::<Vec<_>>(),
         "limitations": row.limitations.iter().map(|value| bounded_text(value)).collect::<Vec<_>>(),
@@ -2415,49 +2624,154 @@ fn usage_row_json(row: &codexlens::analysis::views::UsageRow) -> serde_json::Val
 struct ReportingSelection {
     coverage: PeriodCoverage,
     report_coverage: ReportCoverage,
+    period: ReportingPeriod,
+    selection_options: SessionSelectionOptions,
+    source_data: CanonicalData,
 }
 
-fn report_coverage_for_selection(
+fn coverage_for_scope(
     data: &CanonicalData,
     selection: Option<&ReportingSelection>,
+    scope: &ScopeFilter,
 ) -> ReportCoverage {
-    selection.map_or_else(
-        || report_coverage(data),
-        |selection| selection.report_coverage.clone(),
+    if let Some(selection) = selection {
+        if matches!(scope, ScopeFilter::All | ScopeFilter::Global) {
+            return selection.report_coverage.clone();
+        }
+        let (mut scoped_coverage, _) = period_report_coverage(selection, scope);
+        if scoped_coverage.session_count == 0 && selection.report_coverage.status != "empty" {
+            scoped_coverage.status = "partial".to_owned();
+            scoped_coverage.limitations.push(CoverageLimitation {
+                kind: "scope_selection".to_owned(),
+                source: codexlens::model::SourceRef::state(PathBuf::from("<scope>")),
+                message: "No selected project session was available for this scope".to_owned(),
+                selected_sessions: 0,
+                selected_records: 0,
+                affected_lenses: vec!["all".to_owned()],
+            });
+        }
+        return scoped_coverage;
+    }
+    if matches!(scope, ScopeFilter::All | ScopeFilter::Global) {
+        return report_coverage(data);
+    }
+
+    let scoped = data_for_scope(data, scope);
+    let mut scoped_coverage = report_coverage(&scoped);
+    if scoped.sessions.is_empty() && scoped_coverage.status != "empty" {
+        scoped_coverage.status = "partial".to_owned();
+        scoped_coverage.limitations.push(CoverageLimitation {
+            kind: "scope_selection".to_owned(),
+            source: codexlens::model::SourceRef::state(PathBuf::from("<scope>")),
+            message: "No selected project session was available for this scope".to_owned(),
+            selected_sessions: 0,
+            selected_records: 0,
+            affected_lenses: vec!["all".to_owned()],
+        });
+    }
+    scoped_coverage
+}
+
+fn data_for_scope(data: &CanonicalData, scope: &ScopeFilter) -> CanonicalData {
+    let session_ids = data
+        .sessions
+        .iter()
+        .filter(|session| session_matches_filter(data, &session.id, scope))
+        .map(|session| session.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut scoped = data.clone();
+    scoped
+        .sessions
+        .retain(|session| session_ids.contains(&session.id));
+    scoped.turns.retain(|turn| {
+        turn.session_id
+            .as_ref()
+            .is_some_and(|id| session_ids.contains(id))
+    });
+    scoped.records.retain(|record| {
+        record
+            .session_id
+            .as_ref()
+            .is_some_and(|id| session_ids.contains(id))
+    });
+    scoped.messages.retain(|message| {
+        message
+            .session_id
+            .as_ref()
+            .is_some_and(|id| session_ids.contains(id))
+    });
+    scoped.tool_calls.retain(|call| {
+        call.session_id
+            .as_ref()
+            .is_some_and(|id| session_ids.contains(id))
+    });
+    scoped.tool_results.retain(|result| {
+        result
+            .session_id
+            .as_ref()
+            .is_some_and(|id| session_ids.contains(id))
+    });
+    scoped.file_operations.retain(|operation| {
+        operation
+            .session_id
+            .as_ref()
+            .is_some_and(|id| session_ids.contains(id))
+    });
+    scoped.token_usage.retain(|usage| {
+        usage
+            .session_id
+            .as_ref()
+            .is_some_and(|id| session_ids.contains(id))
+    });
+    scoped.instruction_snapshots.retain(|snapshot| {
+        snapshot
+            .session_id
+            .as_ref()
+            .is_some_and(|id| session_ids.contains(id))
+    });
+    scoped
+        .instruction_joins
+        .retain(|join| session_ids.contains(&join.session_id));
+    scoped.diagnostics.retain(|diagnostic| {
+        diagnostic
+            .session_id
+            .as_ref()
+            .is_none_or(|id| session_ids.contains(id))
+    });
+    codexlens::config::recompute_surface_usage(&mut scoped);
+    scoped
+}
+
+fn period_for_scope(selection: &ReportingSelection, scope: &ScopeFilter) -> PeriodCoverage {
+    if matches!(scope, ScopeFilter::All | ScopeFilter::Global) {
+        return selection.coverage.clone();
+    }
+    period_report_coverage(selection, scope).1
+}
+
+fn period_report_coverage(
+    selection: &ReportingSelection,
+    scope: &ScopeFilter,
+) -> (ReportCoverage, PeriodCoverage) {
+    period_report_coverage_from_data(
+        &selection.source_data,
+        &selection.period,
+        &selection.selection_options,
+        scope,
     )
 }
 
-fn load_reporting(
-    options: &StoreOptions,
-) -> Result<(CanonicalData, StoreFreshness, Option<ReportingSelection>)> {
-    let period = ReportingPeriod::from_bounds(options.since.as_deref(), options.until.as_deref())
-        .map_err(anyhow::Error::new)?;
-    let selection_options = session_selection_options(options)?;
-    let store_path = options.store_path()?;
-    if !options.frozen {
-        let refresh = RefreshOptions {
-            store: store_path.clone(),
-            codex_home: options.codex_home.clone(),
-            include_archived: options.include_archived,
-            include_subagents: options.include_subagents,
-            config: None,
-        };
-        let outcome = refresh_store(&refresh).with_context(|| {
-            format!(
-                "automatic analysis could not refresh derived store {}",
-                bounded_display(&store_path)
-            )
-        })?;
-        report_auto_refresh(&outcome, &store_path);
-    }
-    let (data, freshness) = load_store(&store_path)?;
-    let selected = select_report_data_with_options(&data, period.as_ref(), &selection_options);
-    let Some(period) = period else {
-        return Ok((selected.data, freshness, None));
-    };
-    let eligible_data = select_eligible_session_data(&data, &selection_options);
+fn period_report_coverage_from_data(
+    data: &CanonicalData,
+    period: &ReportingPeriod,
+    selection_options: &SessionSelectionOptions,
+    scope: &ScopeFilter,
+) -> (ReportCoverage, PeriodCoverage) {
+    let scoped_source = data_for_scope(data, scope);
+    let selected = select_report_data_with_options(&scoped_source, Some(period), selection_options);
+    let eligible_data = select_eligible_session_data(&scoped_source, selection_options);
     let mut report_coverage =
-        report_coverage_for_period_selection(&eligible_data, &period, &selected.data);
+        report_coverage_for_period_selection(&eligible_data, period, &selected.data);
     report_coverage.session_count = selected.coverage.included_sessions;
     report_coverage.record_count = selected.coverage.included_records;
     report_coverage.status = match selected.coverage.state {
@@ -2471,14 +2785,63 @@ fn load_reporting(
         PeriodCoverageState::Complete | PeriodCoverageState::Partial => "partial",
     }
     .to_owned();
+    (report_coverage, selected.coverage)
+}
+
+fn session_matches_filter(data: &CanonicalData, session_id: &str, filter: &ScopeFilter) -> bool {
+    let project = data
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.project.as_deref().or(session.cwd.as_deref()))
+        .filter(|path| Path::new(path).is_absolute())
+        .map(PathBuf::from);
+    match filter {
+        ScopeFilter::Projects => project.is_some(),
+        ScopeFilter::Project(root) => project
+            .as_deref()
+            .is_some_and(|path| scope_path_matches(root, path)),
+        ScopeFilter::All | ScopeFilter::Global => true,
+    }
+}
+
+fn load_reporting(
+    options: &StoreOptions,
+) -> Result<(CanonicalData, StoreFreshness, Option<ReportingSelection>)> {
+    let period = ReportingPeriod::from_bounds(options.since.as_deref(), options.until.as_deref())
+        .map_err(anyhow::Error::new)?;
+    let selection_options = session_selection_options(options)?;
+    let store_path = options.store_path()?;
+    let (data, freshness) = load_store(&store_path)?;
+    let selected = select_report_data_with_options(&data, period.as_ref(), &selection_options);
+    let Some(period) = period else {
+        return Ok((selected.data, freshness, None));
+    };
+    let source_data = data.clone();
+    let (report_coverage, _) = period_report_coverage_from_data(
+        &source_data,
+        &period,
+        &selection_options,
+        &ScopeFilter::All,
+    );
     Ok((
         selected.data,
         freshness,
         Some(ReportingSelection {
             coverage: selected.coverage,
             report_coverage,
+            period,
+            selection_options,
+            source_data,
         }),
     ))
+}
+
+fn validate_reporting_options(options: &StoreOptions) -> Result<()> {
+    ReportingPeriod::from_bounds(options.since.as_deref(), options.until.as_deref())
+        .map_err(anyhow::Error::new)?;
+    session_selection_options(options)?;
+    Ok(())
 }
 
 fn report_auto_refresh(outcome: &RefreshOutcome, store: &Path) {
@@ -2570,13 +2933,17 @@ fn run_finding_report(
     command: &str,
 ) -> Result<()> {
     let (data, freshness, selection) = load_reporting(options)?;
-    let coverage = report_coverage_for_selection(&data, selection.as_ref());
-    let findings = lens(&data)
+    let coverage = coverage_for_scope(&data, selection.as_ref(), &options.scope);
+    let scoped_data = data_for_scope(&data, &options.scope);
+    let period = selection
+        .as_ref()
+        .map(|selection| period_for_scope(selection, &options.scope));
+    let findings = lens(&scoped_data)
         .into_iter()
         .filter(|finding| scope_matches(&options.scope, &finding.scope))
         .collect::<Vec<_>>();
     let mut report = doctor_with_coverage(
-        &data,
+        &scoped_data,
         &findings,
         freshness,
         &DoctorOptions {
@@ -2585,27 +2952,20 @@ fn run_finding_report(
         },
         &coverage,
     );
-    if let Some(selection) = selection.as_ref() {
-        report.period_start = selection.coverage.observed_start.clone();
-        report.period_end = selection.coverage.observed_end.clone();
+    if let Some(period) = period.as_ref() {
+        report.period_start = period.observed_start.clone();
+        report.period_end = period.observed_end.clone();
     }
-    if let Some(selection) = selection.as_ref() {
+    if let Some(period) = period.as_ref() {
         options.format.write_report(
             command,
             || {
                 (
-                    render_doctor_with_period(&report, &coverage, &selection.coverage),
+                    render_doctor_with_period(&report, &coverage, period),
                     String::new(),
                 )
             },
-            || {
-                render_json_finding_report_with_period(
-                    command,
-                    &report,
-                    &coverage,
-                    &selection.coverage,
-                )
-            },
+            || render_json_finding_report_with_period(command, &report, &coverage, period),
         )
     } else {
         options.format.write_report(
@@ -2621,18 +2981,287 @@ fn run_finding_report(
     }
 }
 
+fn run_optimize_print(
+    data: &CanonicalData,
+    findings: &[Finding],
+    waste: &WasteReport,
+    proposal_plan: &codexlens::advisor::ProposalPlan,
+    freshness: &StoreFreshness,
+    options: &StoreOptions,
+    selection: Option<&ReportingSelection>,
+) -> Result<()> {
+    let coverage = coverage_for_scope(data, selection, &options.scope);
+    let period = selection.map(|selection| period_for_scope(selection, &options.scope));
+    let batch = proposal_batch(proposal_plan);
+    options.format.write_report(
+        "OPTIMIZE",
+        || {
+            (
+                render_optimize_briefing_human(
+                    data,
+                    findings,
+                    waste,
+                    &batch,
+                    freshness,
+                    &coverage,
+                    options,
+                    period.as_ref(),
+                ),
+                String::new(),
+            )
+        },
+        || {
+            render_optimize_briefing_json(
+                data,
+                findings,
+                waste,
+                &batch,
+                freshness,
+                &coverage,
+                options,
+                period.as_ref(),
+            )
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_optimize_briefing_human(
+    data: &CanonicalData,
+    findings: &[Finding],
+    waste: &WasteReport,
+    batch: &DiffBatch,
+    freshness: &StoreFreshness,
+    coverage: &ReportCoverage,
+    options: &StoreOptions,
+    period: Option<&PeriodCoverage>,
+) -> String {
+    let mut output = format!(
+        "OPTIMIZATION BRIEFING\nScope: {}\nStore freshness: {}\nCoverage: {} ({} sessions)\n",
+        scope_label(&options.scope),
+        freshness,
+        coverage.status,
+        coverage.session_count,
+    );
+    append_period_metadata(&mut output, period);
+    output.push_str(&render_coverage_limitations(coverage));
+
+    output.push_str("\nFINDINGS\n");
+    if findings.is_empty() {
+        output.push_str("No selected findings were observed.\n");
+    } else {
+        for finding in findings.iter().take(CLI_VIEW_ROW_LIMIT) {
+            output.push_str(&format!(
+                "- {}\n  problem: {}\n  impact: {} occurrences across {} sessions\n  owner: {}\n  target: {}\n  action: {}\n  follow-up: {}\n",
+                finding.kind.as_str(),
+                bounded_text(&finding.summary),
+                finding.occurrences,
+                finding.distinct_sessions,
+                briefing_owner(&finding.scope),
+                briefing_finding_target(data, finding),
+                bounded_text(&finding.suggested_action),
+                briefing_follow_up(data, finding),
+            ));
+            if !finding.affected_paths.is_empty() {
+                output.push_str(&format!(
+                    "  affected paths: {}\n",
+                    bounded_list(&finding.affected_paths)
+                ));
+            }
+            append_evidence(&mut output, &finding.evidence);
+            append_limitations(&mut output, &finding.limitations);
+        }
+        append_omitted(&mut output, findings.len());
+    }
+
+    output.push_str("\nCONFIGURATION WASTE\n");
+    if waste.opportunities.is_empty() {
+        output.push_str("No actionable configuration waste was observed.\n");
+    } else {
+        for opportunity in waste.opportunities.iter().take(CLI_VIEW_ROW_LIMIT) {
+            append_opportunity_table(&mut output, opportunity);
+        }
+        append_omitted(&mut output, waste.opportunities.len());
+    }
+
+    let overhead = codexlens::analysis::views::overhead(data);
+    output.push_str("\nOVERHEAD\n");
+    render_overhead_table(&mut output, &filter_overhead(overhead, &options.scope));
+
+    output.push_str("\nREVIEWABLE PROPOSALS\n");
+    if batch.rendered.is_empty() {
+        output.push_str("No reviewable diffs were rendered.\n");
+    } else {
+        for rendered in batch.rendered.iter().take(CLI_VIEW_ROW_LIMIT) {
+            output.push_str(&render_proposal_summary(rendered));
+            output.push('\n');
+        }
+        append_omitted(&mut output, batch.rendered.len());
+    }
+    for skipped in batch.skipped.iter().take(CLI_VIEW_ROW_LIMIT) {
+        output.push_str(&format!(
+            "Skipped {}: {}\n",
+            bounded_path(&skipped.target_path),
+            bounded_text(&skipped.reason)
+        ));
+    }
+    if batch.skipped.len() > CLI_VIEW_ROW_LIMIT {
+        output.push_str(&format!(
+            "Skipped {} additional proposal(s).\n",
+            batch.skipped.len() - CLI_VIEW_ROW_LIMIT
+        ));
+    }
+
+    output.push_str("\nNEXT WORKFLOW\n");
+    output.push_str("1. Review the bounded evidence and targets above.\n");
+    output.push_str("2. Run codexlens optimize --diff for the applicable scope.\n");
+    output.push_str("3. Apply only an inspected plan with codexlens optimize --apply --yes.\n");
+    output.push_str("4. Run the project's documented verification command.\n");
+    output
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_optimize_briefing_json(
+    data: &CanonicalData,
+    findings: &[Finding],
+    waste: &WasteReport,
+    batch: &DiffBatch,
+    freshness: &StoreFreshness,
+    coverage: &ReportCoverage,
+    options: &StoreOptions,
+    period: Option<&PeriodCoverage>,
+) -> Result<String, serde_json::Error> {
+    let overhead = filter_overhead(codexlens::analysis::views::overhead(data), &options.scope);
+    let findings = findings
+        .iter()
+        .take(CLI_VIEW_ROW_LIMIT)
+        .map(|finding| briefing_finding_json(data, finding))
+        .collect::<Vec<_>>();
+    let safe_diff_document: serde_json::Value = serde_json::from_str(&render_json_diff(batch)?)?;
+    let proposals = safe_diff_document["data"].clone();
+    let limitations = coverage
+        .limitations
+        .iter()
+        .take(CLI_VIEW_ROW_LIMIT)
+        .map(|limitation| bounded_text(&limitation.message))
+        .chain(
+            batch
+                .skipped
+                .iter()
+                .take(CLI_VIEW_ROW_LIMIT)
+                .map(|skipped| bounded_text(&skipped.reason)),
+        )
+        .chain(
+            proposals["skipped"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(CLI_VIEW_ROW_LIMIT)
+                .filter_map(|skipped| skipped["reason"].as_str().map(str::to_owned)),
+        )
+        .collect::<Vec<_>>();
+    let document = serde_json::json!({
+        "schema_version": 1,
+        "command": "optimize",
+        "scope": scope_filter_json(&options.scope),
+        "coverage": cli_coverage_json(data, coverage, options, period),
+        "freshness": freshness_json(freshness),
+        "data": {
+            "findings": findings,
+            "configuration_waste": waste.opportunities.iter().take(CLI_VIEW_ROW_LIMIT).map(opportunity_json).collect::<Vec<_>>(),
+            "overhead": overhead.rows.iter().take(CLI_VIEW_ROW_LIMIT).map(overhead_row_json).collect::<Vec<_>>(),
+            "proposals": proposals,
+            "next_steps": [
+                "Review the bounded evidence and targets above",
+                "Run codexlens optimize --diff for the applicable scope",
+                "Apply only an inspected plan with codexlens optimize --apply --yes",
+                "Run the project's documented verification command",
+            ],
+            "limitations": limitations,
+        },
+    });
+    let mut output = serde_json::to_string_pretty(&document)?;
+    output.push('\n');
+    Ok(output)
+}
+
+fn filter_overhead(mut report: OverheadReport, scope: &ScopeFilter) -> OverheadReport {
+    report.rows.retain(|row| scope_matches(scope, &row.scope));
+    report
+}
+
+fn briefing_finding_target(data: &CanonicalData, finding: &Finding) -> String {
+    recommend_scope(data, finding)
+        .map(|recommendation| bounded_path(&recommendation.target_path))
+        .or_else(|| {
+            finding
+                .affected_paths
+                .first()
+                .map(|path| bounded_text(path))
+        })
+        .unwrap_or_else(|| match &finding.scope {
+            FindingScope::Global => "AGENTS.md".to_owned(),
+            FindingScope::Project(path) | FindingScope::Instruction(path) => bounded_path(path),
+            FindingScope::Path(path) => bounded_text(path),
+        })
+}
+
+fn briefing_owner(scope: &FindingScope) -> String {
+    match scope {
+        FindingScope::Global => "global instruction owner".to_owned(),
+        FindingScope::Project(path) | FindingScope::Instruction(path) => bounded_path(path),
+        FindingScope::Path(path) => bounded_text(path),
+    }
+}
+
+fn briefing_follow_up(data: &CanonicalData, finding: &Finding) -> String {
+    codexlens::analysis::views::follow_up_for_finding(data, finding)
+}
+
+fn briefing_finding_json(data: &CanonicalData, finding: &Finding) -> serde_json::Value {
+    serde_json::json!({
+        "kind": finding.kind.as_str(),
+        "severity": finding.severity.as_str(),
+        "confidence": finding.confidence.as_str(),
+        "scope": finding_scope_json(&finding.scope),
+        "problem": bounded_text(&finding.summary),
+        "impact": format!("{} occurrences across {} sessions", finding.occurrences, finding.distinct_sessions),
+        "occurrences": finding.occurrences,
+        "distinct_sessions": finding.distinct_sessions,
+        "owner": briefing_owner(&finding.scope),
+        "target": briefing_finding_target(data, finding),
+        "affected_paths": finding
+            .affected_paths
+            .iter()
+            .take(3)
+            .map(|path| bounded_text(path))
+            .collect::<Vec<_>>(),
+        "evidence": finding.evidence.iter().take(3).map(evidence_json).collect::<Vec<_>>(),
+        "action": bounded_text(&finding.suggested_action),
+        "follow_up": briefing_follow_up(data, finding),
+        "limitations": finding.limitations.iter().take(3).map(|value| bounded_text(value)).collect::<Vec<_>>(),
+    })
+}
+
 fn render_optimize_human(batch: &DiffBatch) -> (String, String) {
     let mut stdout = String::new();
     let mut stderr = String::new();
-    for rendered in &batch.rendered {
+    for rendered in batch.rendered.iter().take(CLI_VIEW_ROW_LIMIT) {
         stdout.push_str(&render_proposal_summary(rendered));
         stdout.push('\n');
     }
-    for skipped in &batch.skipped {
+    append_omitted(&mut stdout, batch.rendered.len());
+    for skipped in batch.skipped.iter().take(CLI_VIEW_ROW_LIMIT) {
         stderr.push_str(&format!(
             "Skipped {}: {}\n",
-            skipped.target_path.display(),
-            skipped.reason
+            bounded_path(&skipped.target_path),
+            bounded_text(&skipped.reason)
+        ));
+    }
+    if batch.skipped.len() > CLI_VIEW_ROW_LIMIT {
+        stderr.push_str(&format!(
+            "Skipped {} additional proposal(s).\n",
+            batch.skipped.len() - CLI_VIEW_ROW_LIMIT
         ));
     }
     if batch.rendered.is_empty() && batch.skipped.is_empty() {
@@ -2687,6 +3316,7 @@ mod tests {
         for command in [
             "analyze",
             "sessions",
+            "sql",
             "failures",
             "corrections",
             "rework",

@@ -213,6 +213,18 @@ This lens joins findings to instruction files and snapshots:
 The lens must not declare a gap when the exact historical instruction
 snapshot is unavailable; it should say that comparison is inconclusive.
 
+## 8.1 Product views
+
+The typed views retain global and project scope as separate rows. `usage`
+reports tool, Skill, model, prompt, subagent, and configured-surface signals;
+prompt and subagent rows use counts and token observations available for those
+canonical records, and unknown attribution remains explicit. `inventory`
+reports owner/scope, path, load mode, use state, estimates, and a concrete
+remove/slim/re-scope action only when evidence supports it. `overhead`
+reports readable always-on bytes, residual bytes, and whether the cost is
+user-controlled or unknown. `waste` ranks those configuration opportunities
+alongside recurring failures and stuck loops.
+
 ## 9. `doctor`
 
 `doctor` combines the highest-ranked findings and groups them by scope:
@@ -233,10 +245,17 @@ and operational errors to stderr. Period-filtered JSON adds the version-1
 `data.coverage` object defined in
 [`post-mvp.md`](post-mvp.md#7-explicit-reporting-periods).
 
+An actionable item includes the problem, impact, owner, target, counts,
+evidence, action, limitations, and a focused follow-up command. A healthy
+verdict is allowed only when coverage is observed and complete and the
+selected inventory and overhead have no unknown estimates; empty or partial
+coverage and unknown cost/use are inconclusive.
+
 The `analyze` command renders all lens findings. `failures`, `corrections`,
 `rework`, `verification`, `knowledge`, and `instructions` render one lens
-through the same report shape. `stuck` aliases `rework`, and `rediscovery`
-aliases `knowledge`. `sessions` lists stored session metadata and freshness.
+through the same report shape. `stuck` is the independent stuck-work view,
+while `rework` is the finding-report command; `rediscovery` aliases
+`knowledge`. `sessions` lists stored session metadata and freshness.
 All of these commands read an existing derived store and do not reopen raw
 inputs.
 
@@ -255,7 +274,9 @@ validated proposal batch. A proposal must state:
 
 The current `optimize --diff` command produces a unified diff for high-
 confidence proposals and reports skipped proposals explicitly. `optimize
---apply` requires interactive confirmation or `--yes` in non-interactive use,
+--print` emits a complete bounded briefing containing findings, configuration
+waste, overhead, proposal/skip status, limitations, and the next workflow.
+The `--apply` path requires interactive confirmation or `--yes` in non-interactive use,
 then validates the full instruction/documentation write set, re-reads and
 re-hashes every file, creates retained backups, and applies one recoverable
 transaction. It never writes rollout/state inputs or the derived store.

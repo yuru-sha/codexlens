@@ -571,6 +571,26 @@ fn run_query(args: &[&str], store: &Path, stdin: Option<&[u8]>) -> Output {
     child.wait_with_output().unwrap()
 }
 
+fn run_sql(args: &[&str], store: &Path, stdin: Option<&[u8]>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codexlens"));
+    command
+        .arg("sql")
+        .args(args)
+        .args(["--store", store.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+    let mut child = command.spawn().unwrap();
+    if let Some(input) = stdin {
+        child.stdin.take().unwrap().write_all(input).unwrap();
+    }
+    child.wait_with_output().unwrap()
+}
+
 fn assert_file_unchanged(path: &Path, before: &[u8], label: &str) {
     assert_eq!(fs::read(path).unwrap(), before, "{label} changed");
 }
@@ -663,7 +683,9 @@ fn assert_doctor_report(stdout: &str) {
     assert!(stdout.contains("Scope: global + projects"));
     assert!(stdout.contains("Coverage: partial (2 sessions)"));
     assert!(stdout.contains("COST"));
+    assert!(stdout.contains("  owner: "));
     assert!(stdout.contains("  action: "));
+    assert!(stdout.contains("  follow-up: "));
     assert!(stdout.contains("  evidence: "));
     let evidence_lines: Vec<_> = stdout
         .lines()
@@ -876,6 +898,9 @@ fn query_rejects_writes_and_bounds_rows_without_creating_a_store() {
         "PRAGMA query_only = OFF",
         "PRAGMA query_only(OFF)",
         "PRAGMA user_version = 42",
+        "ATTACH ':memory:' AS external_store",
+        "DETACH external_store",
+        "SELECT LOAD_EXTENSION('synthetic-extension')",
         "SELECT 1; SELECT 2",
     ] {
         let rejected = run_query(&[sql], &store, None);
@@ -889,6 +914,20 @@ fn query_rejects_writes_and_bounds_rows_without_creating_a_store() {
     assert!(!missing_output.status.success());
     assert!(String::from_utf8_lossy(&missing_output.stderr).contains("store does not exist"));
     assert!(!missing.exists());
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn sql_is_the_read_only_escape_hatch_and_query_remains_compatible() {
+    let store = fixture_store();
+    let before = fs::read(&store).unwrap();
+    let table = run_sql(&["SELECT(7)"], &store, None);
+    assert!(String::from_utf8_lossy(&table.stdout).starts_with("SQL\n"));
+    let output = run_sql(&["SELECT 7 AS value", "--format", "json"], &store, None);
+    let document = parse_json_report(&output, "sql");
+    assert_eq!(document["data"]["columns"], json!(["value"]));
+    assert_eq!(document["data"]["rows"][0][0], 7);
+    assert_eq!(fs::read(&store).unwrap(), before);
     let _ = fs::remove_file(store);
 }
 
@@ -939,6 +978,100 @@ fn optimize_print_is_read_only_and_scope_matches_findings() {
     let _ = fs::remove_file(store);
     let _ = fs::remove_file(target);
     let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn optimize_print_keeps_the_complete_action_briefing_in_json() {
+    let (store, target, project_root) = rendered_diff_store();
+    let output = run_args(&["optimize", "--print", "--format", "json"], &store);
+    let document = parse_json_report(&output, "optimize");
+    let data = document["data"].as_object().unwrap();
+    for field in [
+        "findings",
+        "configuration_waste",
+        "overhead",
+        "proposals",
+        "next_steps",
+        "limitations",
+    ] {
+        assert!(data.get(field).is_some(), "missing briefing field {field}");
+    }
+    assert!(
+        data["findings"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())
+    );
+    assert!(
+        data["next_steps"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())
+    );
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn optimize_chain_preserves_the_finding_target_and_evidence() {
+    let (store, target, project_root) = rendered_diff_store();
+    let doctor = parse_json_report(&run_args(&["doctor", "--format", "json"], &store), "doctor");
+    let top_fix = doctor["data"]["top_fixes"]
+        .as_array()
+        .and_then(|fixes| fixes.first())
+        .expect("synthetic doctor finding");
+
+    let optimize = parse_json_report(
+        &run_args(&["optimize", "--print", "--format", "json"], &store),
+        "optimize",
+    );
+    let target_value = top_fix["target"].as_str().expect("doctor target");
+    let proposal = optimize["data"]["proposals"]["rendered"]
+        .as_array()
+        .and_then(|proposals| {
+            proposals
+                .iter()
+                .find(|rendered| rendered["proposal"]["target_path"] == target_value)
+        })
+        .expect("matching optimize proposal");
+    assert_eq!(proposal["proposal"]["action"], "add");
+    assert_eq!(
+        proposal["proposal"]["evidence_count"],
+        top_fix["occurrences"]
+    );
+    assert_eq!(
+        proposal["proposal"]["distinct_sessions"],
+        top_fix["distinct_sessions"]
+    );
+    assert!(
+        proposal["proposal"]["evidence"]
+            .as_array()
+            .is_some_and(|evidence| !evidence.is_empty())
+    );
+    assert_eq!(
+        optimize["data"]["findings"]
+            .as_array()
+            .and_then(|findings| findings.first())
+            .and_then(|finding| finding["target"].as_str()),
+        Some(target_value)
+    );
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn doctor_does_not_call_an_empty_store_healthy() {
+    let store = empty_store();
+    let output = run_args(&["doctor"], &store);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No actionable finding was observed"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("LOOKS HEALTHY"), "{stdout}");
+    let _ = fs::remove_file(store);
 }
 
 #[test]
@@ -1145,6 +1278,9 @@ fn typed_views_have_distinct_bounded_formats_and_json_envelopes() {
         let stdout = String::from_utf8_lossy(&human.stdout);
         assert!(stdout.starts_with(heading), "{command}: {stdout}");
         assert!(stdout.len() < 20_000, "{command} is unbounded");
+        if command == "inventory" {
+            assert!(stdout.contains("owner: "), "{command}: {stdout}");
+        }
 
         let markdown = run_args(&[command, "--format", "markdown"], &store);
         assert!(markdown.status.success(), "{command} markdown failed");
@@ -1162,18 +1298,21 @@ fn typed_views_have_distinct_bounded_formats_and_json_envelopes() {
             document["data"][data_key].is_array(),
             "{command} data shape"
         );
+        if command == "inventory" {
+            assert!(document["data"][data_key][0]["owner"].is_string());
+        }
     }
     let _ = fs::remove_file(store);
 }
 
 #[test]
-fn first_run_doctor_auto_analyzes_and_uses_a_private_default_store() {
+fn first_run_analyze_refreshes_and_uses_a_private_default_store() {
     let (home, _) = refresh_home();
     fs::write(home.join("config.toml"), "model = \"synthetic-model\"\n").unwrap();
     let state_home = temp_store_path("first-run-state").with_extension("state");
     let expected_store = state_home.join("codexlens/codexlens.db");
     let output = Command::new(env!("CARGO_BIN_EXE_codexlens"))
-        .args(["doctor", "--codex-home"])
+        .args(["analyze", "--codex-home"])
         .arg(&home)
         .env("XDG_STATE_HOME", &state_home)
         .env_remove("HOME")
@@ -1187,9 +1326,7 @@ fn first_run_doctor_auto_analyzes_and_uses_a_private_default_store() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stdout.contains("WHAT TO FIX FIRST"));
-    assert!(stdout.contains("COST"));
-    assert!(stdout.contains("CONFIG WORTH PRUNING"));
+    assert!(stdout.contains("Finding counts:"), "{stdout}");
     assert!(stderr.contains("Refreshed store:"));
     assert!(expected_store.is_file());
     #[cfg(unix)]
@@ -1218,6 +1355,29 @@ fn first_run_doctor_auto_analyzes_and_uses_a_private_default_store() {
 
     let _ = fs::remove_dir_all(home);
     let _ = fs::remove_dir_all(state_home);
+}
+
+#[test]
+fn analyze_validates_reporting_filters_before_refreshing_the_store() {
+    let (home, _) = refresh_home();
+    let store = fixture_store();
+    let before = fs::read(&store).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["analyze", "--codex-home"])
+        .arg(&home)
+        .args(["--store"])
+        .arg(&store)
+        .args(["--since", "not-a-timestamp"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("reporting period"));
+    assert_eq!(fs::read(&store).unwrap(), before);
+
+    let _ = fs::remove_dir_all(home);
+    let _ = fs::remove_file(store);
 }
 
 #[test]
@@ -1250,7 +1410,8 @@ fn doctor_does_not_report_opaque_renderer_payload_as_a_wrapper_failure() {
     let doctor = run_args(&["doctor", "--format", "json"], &store);
     let document = parse_json_report(&doctor, "doctor");
     assert_eq!(document["data"]["top_fixes"].as_array().unwrap().len(), 0);
-    assert_eq!(document["data"]["looks_healthy"], true);
+    assert_eq!(document["data"]["looks_healthy"], false);
+    assert_eq!(document["data"]["analysis_sufficient"], false);
 
     let _ = fs::remove_dir_all(home);
     let _ = fs::remove_file(store);
@@ -1273,6 +1434,27 @@ fn typed_views_honor_scope_and_archive_subagent_selection() {
     let project_stdout = String::from_utf8_lossy(&project.stdout);
     assert!(project_stdout.contains("AGENTS.md"));
     assert!(!project_stdout.contains("global-config"));
+
+    let project_usage = run_args(
+        &[
+            "inventory",
+            "--scope",
+            "project:/fixture/project",
+            "--format",
+            "json",
+        ],
+        &store,
+    );
+    let project_document = parse_json_report(&project_usage, "inventory");
+    let project_surface = project_document["data"]["rows"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row["id"] == "project-used-instruction")
+        })
+        .expect("project surface row");
+    assert_eq!(project_surface["observed_uses"], 0);
+    assert_eq!(project_surface["usage_state"], "unused");
 
     let selection_store = fixture_store();
     {
@@ -1340,7 +1522,7 @@ fn typed_views_report_missing_stores_and_reject_relative_codex_homes() {
     }
 
     let output = Command::new(env!("CARGO_BIN_EXE_codexlens"))
-        .args(["doctor", "--codex-home", "relative-codex-home"])
+        .args(["analyze", "--codex-home", "relative-codex-home"])
         .arg("--store")
         .arg(&missing)
         .stdin(Stdio::null())
@@ -1936,6 +2118,54 @@ fn all_read_only_reports_share_period_selection_and_json_coverage() {
 }
 
 #[test]
+fn period_filtered_global_inventory_recomputes_surface_usage() {
+    let store = fixture_store();
+    Store::open(&store)
+        .unwrap()
+        .replace_surfaces(&[Surface {
+            id: "apply-patch-skill".to_owned(),
+            kind: SurfaceKind::Skill,
+            name: "apply_patch".to_owned(),
+            path: Some(PathBuf::from("/synthetic/skills/apply_patch/SKILL.md")),
+            scope: SurfaceScope::Global,
+            enabled: Some(true),
+            load_mode: SurfaceLoadMode::OnDemand,
+            static_bytes: Some(32),
+            startup_bytes: Some(32),
+            observed_uses: 2,
+            observed_sessions: 2,
+            usage_state: SurfaceUsageState::Used,
+            limitations: Vec::new(),
+        }])
+        .unwrap();
+
+    let unfiltered = parse_json_report(
+        &run_args(
+            &["inventory", "--scope", "global", "--format", "json"],
+            &store,
+        ),
+        "inventory",
+    );
+    let period = parse_json_report(
+        &run_args_with_flags(
+            &["inventory", "--scope", "global", "--format", "json"],
+            &[
+                "--since",
+                "2026-01-03T00:00:00Z",
+                "--until",
+                "2026-01-04T00:00:00Z",
+            ],
+            &store,
+        ),
+        "inventory",
+    );
+    assert_eq!(unfiltered["data"]["rows"][0]["observed_uses"], 4);
+    assert_eq!(period["data"]["rows"][0]["observed_uses"], 2);
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
 fn monitor_command_updates_a_local_store_and_honors_max_polls() {
     let source = temp_rollout_path("monitor");
     let store = temp_store_path("monitor-store");
@@ -2437,7 +2667,7 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
 
     assert!(readme.contains("## CLI surface"));
     assert!(readme.contains("explicit refresh workflow"));
-    assert!(readme.contains("Read views analyze"));
+    assert!(readme.contains("Run `analyze` or `refresh`"));
     assert!(readme.contains("Phase 5 compressed rollout reader milestone"));
     assert!(readme.contains("Phase 5 safe optimize apply"));
     assert!(readme.contains("Phase 6"));
@@ -3075,6 +3305,38 @@ fn reporting_command_surface_stays_read_only_and_private() {
 }
 
 #[test]
+fn unfrozen_reporting_does_not_refresh_or_read_raw_inputs() {
+    let (home, source) = refresh_home();
+    let store = temp_store_path("unfrozen-reporting");
+    let refreshed = run_refresh(&home, &store);
+    assert!(
+        refreshed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&refreshed.stderr)
+    );
+    let store_before = fs::read(&store).unwrap();
+    fs::write(&source, b"synthetic raw input changed after analyze\n").unwrap();
+    let source_after = fs::read(&source).unwrap();
+
+    let output = run_args_with_flags(
+        &["doctor"],
+        &["--codex-home", home.to_str().unwrap()],
+        &store,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("Refreshed store:"));
+    assert_file_unchanged(&store, &store_before, "unfrozen report store");
+    assert_file_unchanged(&source, &source_after, "unfrozen report source");
+
+    let _ = fs::remove_dir_all(home);
+    let _ = fs::remove_file(store);
+}
+
+#[test]
 fn refresh_and_frozen_reporting_are_explicit_and_read_only() {
     let (home, source) = refresh_home();
     let store = temp_store_path("refresh-store");
@@ -3347,6 +3609,16 @@ fn machine_readable_output_is_versioned_deterministic_and_canonical() {
             assert!(data["cost"].is_object());
             assert!(data["config_pruning"].is_object());
             assert!(data["looks_healthy"].is_boolean());
+            for field in [
+                "period_start",
+                "period_end",
+                "session_count",
+                "freshness",
+                "finding_counts",
+                "groups",
+            ] {
+                assert!(data.get(field).is_some(), "missing doctor field {field}");
+            }
         } else {
             for field in [
                 "period_start",
@@ -3431,12 +3703,14 @@ fn json_doctor_matches_human_counts_scopes_evidence_and_order() {
             "id",
             "title",
             "scope",
+            "owner",
             "target",
             "impact",
             "confidence",
             "occurrences",
             "distinct_sessions",
             "action",
+            "follow_up",
             "limitations",
         ] {
             assert!(opportunity.get(field).is_some(), "missing {field}");
@@ -3836,6 +4110,29 @@ fn optimize_json_omits_redacted_diff_without_leaking_secret() {
             .windows("diff-secret".len())
             .any(|window| { window == "diff-secret".as_bytes() })
     );
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn optimize_human_omits_redacted_diff_without_leaking_secret() {
+    let (store, target, project_root) = rendered_diff_store_with_content("token=diff-secret\n");
+    let output = run_args(&["optimize", "--diff"], &store);
+    assert!(
+        output.status.success(),
+        "optimize failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("Diff omitted: redaction is required"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("diff-secret"), "{stdout}");
+    assert!(!stderr.contains("diff-secret"), "{stderr}");
 
     let _ = fs::remove_file(store);
     let _ = fs::remove_file(target);

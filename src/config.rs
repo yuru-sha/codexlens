@@ -607,6 +607,29 @@ pub fn discover_surfaces(
     surfaces
 }
 
+/// Recompute surface usage after reporting filters have selected a subset of sessions.
+pub fn recompute_surface_usage(data: &mut CanonicalData) {
+    let mut surfaces = std::mem::take(&mut data.surfaces);
+    for surface in &mut surfaces {
+        surface.observed_uses = 0;
+        surface.observed_sessions = 0;
+        surface.usage_state = SurfaceUsageState::Unknown;
+        surface
+            .limitations
+            .retain(|limitation| limitation != "usage evidence is incomplete");
+    }
+    let usage_evidence_complete = data.diagnostics.is_empty() && !data.sessions.is_empty();
+    apply_usage(
+        &mut surfaces,
+        data,
+        &SurfaceInventoryOptions {
+            include_subagents: true,
+            usage_evidence_complete,
+        },
+    );
+    data.surfaces = surfaces;
+}
+
 fn add_config_declarations(
     surfaces: &mut BTreeMap<String, Surface>,
     config_path: &Path,

@@ -13,17 +13,20 @@ use crate::model::{
 use super::{
     AnalysisOptions, EvidenceRef, EvidenceRole, Finding, FindingConfidence, FindingScope,
     FindingSeverity, FindingType, analyze_failures, analyze_rework, bounded_excerpt, evidence_for,
-    majority_scope, normalize_fact, push_evidence, redact_sensitive,
+    majority_project, majority_scope, normalize_fact, push_evidence, redact_sensitive,
 };
 
 pub const MAX_VIEW_EVIDENCE: usize = 3;
+pub const MAX_VIEW_LIMITATIONS: usize = 3;
 pub const HEAVY_STARTUP_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ViewOpportunity {
     pub id: String,
     pub title: String,
     pub scope: FindingScope,
+    pub owner: String,
     pub target: String,
     pub impact: String,
     pub severity: FindingSeverity,
@@ -31,6 +34,7 @@ pub struct ViewOpportunity {
     pub occurrences: usize,
     pub distinct_sessions: usize,
     pub action: String,
+    pub follow_up: String,
     pub evidence: Vec<EvidenceRef>,
     pub limitations: Vec<String>,
 }
@@ -42,9 +46,11 @@ pub struct InventoryReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct InventoryRow {
     pub id: String,
     pub scope: FindingScope,
+    pub owner: String,
     pub kind: SurfaceKind,
     pub name: String,
     pub path: Option<PathBuf>,
@@ -66,6 +72,7 @@ pub struct OverheadReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OverheadRow {
     pub scope: FindingScope,
     pub project: Option<PathBuf>,
@@ -79,11 +86,14 @@ pub struct OverheadRow {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum UsageKind {
     Tool,
     Skill,
     Model,
     Surface,
+    Prompt,
+    Subagent,
 }
 
 impl UsageKind {
@@ -93,6 +103,8 @@ impl UsageKind {
             Self::Skill => "skill",
             Self::Model => "model",
             Self::Surface => "surface",
+            Self::Prompt => "prompt",
+            Self::Subagent => "subagent",
         }
     }
 }
@@ -114,6 +126,7 @@ pub struct UsageReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct UsageRow {
     pub kind: UsageKind,
     pub name: String,
@@ -158,6 +171,7 @@ pub struct PromptReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PromptRow {
     pub class: PromptClass,
     pub scope: FindingScope,
@@ -175,6 +189,7 @@ pub struct FailureReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FailureRow {
     pub category: String,
     pub tool: String,
@@ -189,6 +204,7 @@ pub struct StuckReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StuckRow {
     pub path: String,
     pub session_id: Option<String>,
@@ -217,9 +233,11 @@ pub fn inventory(data: &CanonicalData) -> InventoryReport {
                     .push("Usage evidence is unavailable; unused was not inferred".to_owned());
             }
             ensure_limitations(&mut limitations);
+            let scope = surface_scope(&surface.scope);
             InventoryRow {
                 id: surface.id.clone(),
-                scope: surface_scope(&surface.scope),
+                owner: owner_for_scope(&scope),
+                scope,
                 kind: surface.kind,
                 name: surface.name.clone(),
                 path: surface.path.clone(),
@@ -400,9 +418,11 @@ pub fn usage(data: &CanonicalData) -> UsageReport {
                 call_names_by_id.insert(call_id.clone(), name.clone());
             }
         }
+        let scope = majority_scope(data, std::iter::once(session_id.as_str()));
         let aggregate = aggregates
-            .entry((UsageKind::Tool, name.clone(), String::new()))
+            .entry((UsageKind::Tool, name.clone(), scope.to_string()))
             .or_insert_with(|| UsageAggregate::new(UsageKind::Tool, name));
+        aggregate.scope = Some(scope);
         aggregate.occurrences = aggregate.occurrences.saturating_add(1);
         aggregate.sessions.insert(session_id.clone());
         add_evidence(
@@ -444,9 +464,11 @@ pub fn usage(data: &CanonicalData) -> UsageReport {
                 || ("unknown_tool".to_owned(), false),
                 |name| (name.clone(), true),
             );
+        let scope = majority_scope(data, std::iter::once(session_id.as_str()));
         let aggregate = aggregates
-            .entry((UsageKind::Tool, name.clone(), String::new()))
+            .entry((UsageKind::Tool, name.clone(), scope.to_string()))
             .or_insert_with(|| UsageAggregate::new(UsageKind::Tool, name));
+        aggregate.scope = Some(scope);
         if !matched_call {
             aggregate.occurrences = aggregate.occurrences.saturating_add(1);
         }
@@ -493,9 +515,11 @@ pub fn usage(data: &CanonicalData) -> UsageReport {
         if !token_seen.insert(key) {
             continue;
         }
+        let scope = majority_scope(data, std::iter::once(session_id.as_str()));
         let aggregate = aggregates
-            .entry((UsageKind::Model, model.clone(), String::new()))
+            .entry((UsageKind::Model, model.clone(), scope.to_string()))
             .or_insert_with(|| UsageAggregate::new(UsageKind::Model, model.clone()));
+        aggregate.scope = Some(scope);
         aggregate.sessions.insert(session_id.clone());
         aggregate.input_tokens = aggregate
             .input_tokens
@@ -524,9 +548,11 @@ pub fn usage(data: &CanonicalData) -> UsageReport {
         let Some(model) = session.model.as_deref() else {
             continue;
         };
+        let scope = majority_scope(data, std::iter::once(session.id.as_str()));
         let aggregate = aggregates
-            .entry((UsageKind::Model, model.to_owned(), String::new()))
+            .entry((UsageKind::Model, model.to_owned(), scope.to_string()))
             .or_insert_with(|| UsageAggregate::new(UsageKind::Model, model.to_owned()));
+        aggregate.scope = Some(scope);
         aggregate.occurrences = aggregate.occurrences.saturating_add(1);
         aggregate.sessions.insert(session.id.clone());
         add_evidence(
@@ -536,6 +562,108 @@ pub fn usage(data: &CanonicalData) -> UsageReport {
                 session.provenance.clone(),
                 EvidenceRole::Observation,
                 Some(model),
+                &options,
+            ),
+        );
+    }
+
+    for row in prompts(data).rows {
+        let scope_key = row.scope.to_string();
+        let aggregate = aggregates
+            .entry((UsageKind::Prompt, row.class.as_str().to_owned(), scope_key))
+            .or_insert_with(|| {
+                UsageAggregate::new(UsageKind::Prompt, row.class.as_str().to_owned())
+            });
+        aggregate.scope = Some(row.scope);
+        aggregate.occurrences = aggregate.occurrences.saturating_add(row.occurrences);
+        aggregate.reported_sessions = aggregate.reported_sessions.max(row.distinct_sessions);
+        extend_evidence(&mut aggregate.evidence, row.evidence);
+        aggregate.limitations.extend(row.limitations);
+    }
+
+    for session in data
+        .sessions
+        .iter()
+        .filter(|session| session.parent_id.is_some())
+    {
+        let scope = majority_scope(data, std::iter::once(session.id.as_str()));
+        let name = session
+            .originator
+            .as_deref()
+            .or(session.model.as_deref())
+            .unwrap_or("unknown_subagent")
+            .to_owned();
+        let aggregate = aggregates
+            .entry((UsageKind::Subagent, name.clone(), scope.to_string()))
+            .or_insert_with(|| UsageAggregate::new(UsageKind::Subagent, name));
+        aggregate.scope = Some(scope);
+        aggregate.occurrences = aggregate.occurrences.saturating_add(1);
+        aggregate.sessions.insert(session.id.clone());
+        add_evidence(
+            &mut aggregate.evidence,
+            evidence_for(
+                Some(session.id.clone()),
+                session.provenance.clone(),
+                EvidenceRole::Observation,
+                Some("subagent session"),
+                &options,
+            ),
+        );
+    }
+
+    let mut subagent_token_seen = BTreeSet::new();
+    for usage in &data.token_usage {
+        let Some(session_id) = usage.session_id.as_ref() else {
+            continue;
+        };
+        let Some(session) = data
+            .sessions
+            .iter()
+            .find(|session| session.id == *session_id && session.parent_id.is_some())
+        else {
+            continue;
+        };
+        let key = (
+            session_id.clone(),
+            usage.turn_id.clone(),
+            usage.input_tokens,
+            usage.cached_input_tokens,
+            usage.output_tokens,
+            usage.reasoning_output_tokens,
+        );
+        if !subagent_token_seen.insert(key) {
+            continue;
+        }
+        let scope = majority_scope(data, std::iter::once(session.id.as_str()));
+        let name = session
+            .originator
+            .as_deref()
+            .or(session.model.as_deref())
+            .unwrap_or("unknown_subagent")
+            .to_owned();
+        let aggregate = aggregates
+            .entry((UsageKind::Subagent, name.clone(), scope.to_string()))
+            .or_insert_with(|| UsageAggregate::new(UsageKind::Subagent, name));
+        aggregate.scope = Some(scope);
+        aggregate.input_tokens = aggregate
+            .input_tokens
+            .saturating_add(usage.input_tokens.unwrap_or_default());
+        aggregate.cached_input_tokens = aggregate
+            .cached_input_tokens
+            .saturating_add(usage.cached_input_tokens.unwrap_or_default());
+        aggregate.output_tokens = aggregate
+            .output_tokens
+            .saturating_add(usage.output_tokens.unwrap_or_default());
+        aggregate.reasoning_output_tokens = aggregate
+            .reasoning_output_tokens
+            .saturating_add(usage.reasoning_output_tokens.unwrap_or_default());
+        add_evidence(
+            &mut aggregate.evidence,
+            evidence_for(
+                Some(session_id.clone()),
+                usage.provenance.clone(),
+                EvidenceRole::Observation,
+                Some("subagent token usage"),
                 &options,
             ),
         );
@@ -611,7 +739,7 @@ pub fn usage(data: &CanonicalData) -> UsageReport {
             .then_with(|| left.scope.to_string().cmp(&right.scope.to_string()))
     });
     UsageReport {
-        measure: "Observed tool, Skill, model, and configured-surface effort ranked by counts, tokens, duration, and coverage".to_owned(),
+        measure: "Observed tool, Skill, model, prompt, subagent, and configured-surface effort ranked by counts, tokens, duration, and coverage".to_owned(),
         coverage,
         rows,
     }
@@ -619,7 +747,7 @@ pub fn usage(data: &CanonicalData) -> UsageReport {
 
 pub fn prompts(data: &CanonicalData) -> PromptReport {
     let options = AnalysisOptions::default();
-    let mut grouped = BTreeMap::<PromptClass, PromptAggregate>::new();
+    let mut grouped = BTreeMap::<(PromptClass, String), PromptAggregate>::new();
     for message in &data.messages {
         if !matches!(message.role, Some(crate::model::MessageRole::User)) {
             continue;
@@ -632,7 +760,24 @@ pub fn prompts(data: &CanonicalData) -> PromptReport {
             continue;
         };
         let class = classify_prompt(content);
-        let aggregate = grouped.entry(class).or_default();
+        let (scope, unknown_attribution) = match message.session_id.as_deref() {
+            Some(session_id) if data.sessions.iter().any(|session| session.id == session_id) => {
+                (majority_scope(data, std::iter::once(session_id)), false)
+            }
+            _ => (FindingScope::Path("unknown_prompt_scope".to_owned()), true),
+        };
+        let aggregate = grouped
+            .entry((class, scope.to_string()))
+            .or_insert_with(|| PromptAggregate {
+                scope: Some(scope),
+                ..PromptAggregate::default()
+            });
+        if unknown_attribution {
+            aggregate.limitations.push(
+                "Prompt could not be attributed to a known session, global scope, or project"
+                    .to_owned(),
+            );
+        }
         aggregate.occurrences = aggregate.occurrences.saturating_add(1);
         if let Some(session_id) = message.session_id.as_ref() {
             aggregate.sessions.insert(session_id.clone());
@@ -652,14 +797,19 @@ pub fn prompts(data: &CanonicalData) -> PromptReport {
         measure: "User prompts classified by bounded lexical role into steer, correct, question, and instruct".to_owned(),
         rows: grouped
             .into_iter()
-            .map(|(class, aggregate)| PromptRow {
-                class,
-                scope: majority_scope(data, aggregate.sessions.iter().map(String::as_str)),
-                occurrences: aggregate.occurrences,
-                distinct_sessions: aggregate.sessions.len(),
-                verdict: prompt_verdict(class).to_owned(),
-                evidence: bounded_evidence(aggregate.evidence),
-                limitations: vec!["Classification uses user role, bounded markers, and punctuation; intent is not inferred".to_owned()],
+            .map(|((class, _), aggregate)| {
+                let mut limitations = aggregate.limitations;
+                limitations.push("Classification uses user role, bounded markers, and punctuation; intent is not inferred".to_owned());
+                ensure_limitations(&mut limitations);
+                PromptRow {
+                    class,
+                    scope: aggregate.scope.unwrap_or(FindingScope::Global),
+                    occurrences: aggregate.occurrences,
+                    distinct_sessions: aggregate.sessions.len(),
+                    verdict: prompt_verdict(class).to_owned(),
+                    evidence: bounded_evidence(aggregate.evidence),
+                    limitations,
+                }
             })
             .collect(),
     }
@@ -677,15 +827,13 @@ pub fn failures_with_options(data: &CanonicalData, options: &AnalysisOptions) ->
             if transient_failure_category(&category) {
                 return None;
             }
+            let target = finding_target(data, &finding);
             let action = if finding.observed_commands.is_empty() {
                 finding.suggested_action.clone()
             } else {
-                format!(
-                    "Fix the recurring {category} prerequisite for {}",
-                    finding_target(&finding)
-                )
+                format!("Fix the recurring {category} prerequisite for {}", target)
             };
-            let opportunity = finding_opportunity(&finding, finding_target(&finding), action);
+            let opportunity = finding_opportunity(data, &finding, target, action);
             if opportunity.evidence.is_empty() {
                 return None;
             }
@@ -717,10 +865,12 @@ pub fn stuck_with_options(data: &CanonicalData, options: &AnalysisOptions) -> St
                 .affected_paths
                 .first()
                 .cloned()
-                .unwrap_or_else(|| finding_target(&finding));
+                .unwrap_or_else(|| finding_target(data, &finding));
+            let target = finding_target(data, &finding);
             let opportunity = finding_opportunity(
+                data,
                 &finding,
-                path.clone(),
+                target,
                 format!("Fix the failure/edit loop at {path}; verify the next change before repeating it"),
             );
             let row = StuckRow {
@@ -764,35 +914,43 @@ pub fn waste_with_options(data: &CanonicalData, options: &AnalysisOptions) -> Wa
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|| row.name.clone());
-        let bytes = row.startup_bytes.unwrap_or_default();
-        let impact = if row.usage_state == SurfaceUsageState::Unused {
-            format!(
+        let impact = match (row.usage_state, row.startup_bytes) {
+            (SurfaceUsageState::Unused, Some(bytes)) => format!(
                 "No observed use for a configured {} surface; startup estimate is {bytes} bytes",
                 row.kind.as_str()
-            )
-        } else {
-            format!(
-                "{} bytes are estimated at startup for a configured {} surface",
-                bytes,
+            ),
+            (SurfaceUsageState::Unused, None) => format!(
+                "No observed use for a configured {} surface; startup estimate is unknown",
                 row.kind.as_str()
-            )
+            ),
+            (_, Some(bytes)) => format!(
+                "{bytes} bytes are estimated at startup for a configured {} surface",
+                row.kind.as_str()
+            ),
+            (_, None) => format!(
+                "Startup estimate is unknown for a configured {} surface",
+                row.kind.as_str()
+            ),
         };
-        let severity = if bytes >= HEAVY_STARTUP_BYTES.saturating_mul(2) {
-            FindingSeverity::High
-        } else {
-            FindingSeverity::Medium
-        };
+        let severity = row
+            .startup_bytes
+            .filter(|bytes| *bytes >= HEAVY_STARTUP_BYTES.saturating_mul(2))
+            .map_or(FindingSeverity::Medium, |_| FindingSeverity::High);
         let confidence = match row.usage_state {
             SurfaceUsageState::Unused | SurfaceUsageState::Used => FindingConfidence::High,
             SurfaceUsageState::Rare => FindingConfidence::Medium,
             SurfaceUsageState::Unknown => FindingConfidence::Low,
         };
         let mut limitations = row.limitations;
+        if row.startup_bytes.is_none() {
+            limitations.push("startup estimate is unavailable; cost was not quantified".to_owned());
+        }
         ensure_limitations(&mut limitations);
         opportunities.push(ViewOpportunity {
             id: format!("surface:{}", row.id),
             title: format!("Actionable configuration surface: {}", row.name),
-            scope: row.scope,
+            owner: owner_for_scope(&row.scope),
+            scope: row.scope.clone(),
             target,
             impact,
             severity,
@@ -800,6 +958,14 @@ pub fn waste_with_options(data: &CanonicalData, options: &AnalysisOptions) -> Wa
             occurrences: row.observed_uses,
             distinct_sessions: row.observed_sessions,
             action,
+            follow_up: follow_up_for_evidence(
+                data,
+                "inventory",
+                &row.scope,
+                row.evidence
+                    .iter()
+                    .filter_map(|evidence| evidence.session_id.as_deref()),
+            ),
             evidence: bounded_evidence(row.evidence),
             limitations,
         });
@@ -824,9 +990,11 @@ pub fn waste_with_options(data: &CanonicalData, options: &AnalysisOptions) -> Wa
 
 #[derive(Debug, Default)]
 struct PromptAggregate {
+    scope: Option<FindingScope>,
     occurrences: usize,
     sessions: BTreeSet<String>,
     evidence: Vec<EvidenceRef>,
+    limitations: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -1019,9 +1187,26 @@ fn bounded_evidence(mut evidence: Vec<EvidenceRef>) -> Vec<EvidenceRef> {
 }
 
 fn ensure_limitations(limitations: &mut Vec<String>) {
-    if limitations.is_empty() {
-        limitations.push("Result is based on the selected canonical evidence".to_owned());
+    let mut unique = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut omitted = 0usize;
+    for limitation in limitations.drain(..) {
+        let limitation = bounded_excerpt(&limitation, 512);
+        if !seen.insert(limitation.clone()) {
+            omitted = omitted.saturating_add(1);
+        } else if unique.len() < MAX_VIEW_LIMITATIONS.saturating_sub(1) {
+            unique.push(limitation);
+        } else {
+            omitted = omitted.saturating_add(1);
+        }
     }
+    if unique.is_empty() {
+        unique.push("Result is based on the selected canonical evidence".to_owned());
+    }
+    if omitted > 0 {
+        unique.push(format!("{omitted} additional limitation(s) omitted"));
+    }
+    *limitations = unique;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1321,7 +1506,10 @@ fn transient_failure_category(category: &str) -> bool {
     )
 }
 
-fn finding_target(finding: &Finding) -> String {
+fn finding_target(data: &CanonicalData, finding: &Finding) -> String {
+    if let Some(recommendation) = crate::advisor::recommend_scope(data, finding) {
+        return recommendation.target_path.to_string_lossy().into_owned();
+    }
     if let Some(path) = finding.affected_paths.first() {
         return path.clone();
     }
@@ -1333,7 +1521,12 @@ fn finding_target(finding: &Finding) -> String {
     }
 }
 
-fn finding_opportunity(finding: &Finding, target: String, action: String) -> ViewOpportunity {
+fn finding_opportunity(
+    data: &CanonicalData,
+    finding: &Finding,
+    target: String,
+    action: String,
+) -> ViewOpportunity {
     let target = bounded_excerpt(&target, 512);
     let action = bounded_excerpt(&action, 512);
     let mut limitations = finding.limitations.clone();
@@ -1342,6 +1535,7 @@ fn finding_opportunity(finding: &Finding, target: String, action: String) -> Vie
         id: format!("{}:{}", finding.kind.as_str(), finding.key),
         title: bounded_excerpt(&finding.summary, 256),
         scope: finding.scope.clone(),
+        owner: owner_for_scope(&finding.scope),
         target,
         impact: bounded_excerpt(&finding.summary, 512),
         severity: finding.severity,
@@ -1349,8 +1543,113 @@ fn finding_opportunity(finding: &Finding, target: String, action: String) -> Vie
         occurrences: finding.occurrences,
         distinct_sessions: finding.distinct_sessions,
         action,
+        follow_up: follow_up_for_finding(data, finding),
         evidence: bounded_evidence(finding.evidence.clone()),
         limitations,
+    }
+}
+
+fn owner_for_scope(scope: &FindingScope) -> String {
+    bounded_excerpt(
+        &match scope {
+            FindingScope::Global => "global instruction owner".to_owned(),
+            FindingScope::Project(path) | FindingScope::Instruction(path) => {
+                path.display().to_string()
+            }
+            FindingScope::Path(path) => path.clone(),
+        },
+        512,
+    )
+}
+
+fn follow_up_for(command: &str, scope: &FindingScope) -> String {
+    let command = focused_command(command);
+    follow_up_for_scope_arg(command, quoted_scope_arg(scope))
+}
+
+pub fn follow_up_for_finding(data: &CanonicalData, finding: &Finding) -> String {
+    let command = match finding.kind.as_str() {
+        "failure" => "failures",
+        "stuck" => "stuck",
+        "rework" => "rework",
+        "correction" => "corrections",
+        "gap" => "instructions",
+        "verification" => "verification",
+        "knowledge" => "knowledge",
+        "overscoped" | "duplicate" | "stale" | "truncated" => "instructions",
+        _ => "doctor",
+    };
+    follow_up_for_evidence(
+        data,
+        command,
+        &finding.scope,
+        finding
+            .evidence
+            .iter()
+            .filter_map(|evidence| evidence.session_id.as_deref()),
+    )
+}
+
+fn follow_up_for_evidence<'a, I>(
+    data: &CanonicalData,
+    command: &str,
+    scope: &FindingScope,
+    session_ids: I,
+) -> String
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    if let FindingScope::Instruction(_) = scope {
+        let session_ids = session_ids.into_iter().collect::<BTreeSet<_>>();
+        if let Some(project) = majority_project(data, session_ids) {
+            return follow_up_for(command, &FindingScope::Project(project));
+        }
+        return follow_up_for_scope_arg(focused_command(command), "projects".to_owned());
+    }
+    follow_up_for(command, scope)
+}
+
+fn follow_up_for_scope_arg(command: &str, scope_arg: String) -> String {
+    let follow_up = format!("codexlens {command} --scope {scope_arg}");
+    if follow_up.len() <= 512 {
+        follow_up
+    } else {
+        format!("codexlens {command} --scope projects")
+    }
+}
+
+fn focused_command(command: &str) -> &str {
+    match command {
+        "failure" => "failures",
+        "correction" => "corrections",
+        "gap" => "instructions",
+        _ => command,
+    }
+}
+
+fn quoted_scope_arg(scope: &FindingScope) -> String {
+    let value = match scope {
+        FindingScope::Global => "global".to_owned(),
+        FindingScope::Project(path) => format!("project:{}", path.display()),
+        FindingScope::Instruction(path) => format!(
+            "project:{}",
+            path.parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .display()
+        ),
+        FindingScope::Path(_) => "all".to_owned(),
+    };
+    shell_quote(&value)
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "-_.:/".contains(character))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
@@ -1368,12 +1667,12 @@ fn opportunity_order(left: &ViewOpportunity, right: &ViewOpportunity) -> std::cm
 mod tests {
     use super::*;
     use std::io::Cursor;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use crate::model::{
-        CanonicalData, InstructionSnapshot, InstructionSnapshotAccuracy, InstructionSnapshotSource,
-        OutcomeSource, Surface, SurfaceKind, SurfaceLoadMode, SurfaceScope, SurfaceUsageState,
-        TokenUsage, ToolCall, ToolOutcome, ToolResult,
+        CanonicalData, InstructionScope, InstructionSnapshot, InstructionSnapshotAccuracy,
+        InstructionSnapshotSource, Message, OutcomeSource, Surface, SurfaceKind, SurfaceLoadMode,
+        SurfaceScope, SurfaceUsageState, TokenUsage, ToolCall, ToolOutcome, ToolResult,
     };
     use crate::normalize::normalize_rollout;
     use crate::rollout::{PlainJsonlReader, parse_rollout_reader};
@@ -1745,6 +2044,231 @@ mod tests {
             .expect("model usage");
         assert_eq!(model.input_tokens, 100);
         assert!(usage.rows.iter().all(|row| !row.evidence.is_empty()));
+    }
+
+    #[test]
+    fn waste_does_not_turn_an_unknown_startup_estimate_into_zero() {
+        let mut data = view_fixture();
+        data.surfaces = vec![surface(
+            "unknown-startup",
+            SurfaceKind::Rule,
+            "unknown.rules",
+            "/fixture/project/unknown.rules",
+            SurfaceScope::Project("/fixture/project".into()),
+            SurfaceLoadMode::PathConditional,
+            None,
+            SurfaceUsageState::Unused,
+            0,
+        )];
+
+        let opportunity = waste(&data)
+            .opportunities
+            .into_iter()
+            .find(|opportunity| opportunity.id == "surface:unknown-startup")
+            .expect("unknown startup opportunity");
+        assert!(opportunity.impact.contains("unknown"));
+        assert!(!opportunity.impact.contains("0 bytes"));
+        assert!(
+            opportunity
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("startup estimate"))
+        );
+    }
+
+    #[test]
+    fn prompts_keep_global_and_project_rows_for_the_same_class() {
+        let mut data = view_fixture();
+        let global_session = data.sessions[0].id.clone();
+        let project_session = data.sessions[1].id.clone();
+        data.sessions[0].cwd = None;
+        data.sessions[0].project = None;
+        let mut global_prompt = data.messages[0].clone();
+        global_prompt.session_id = Some(global_session);
+        let mut project_prompt = Message {
+            session_id: Some(project_session.clone()),
+            ..global_prompt.clone()
+        };
+        project_prompt.provenance.line = Some(99);
+        data.messages = vec![global_prompt, project_prompt];
+
+        let rows = prompts(&data).rows;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| {
+            row.class == PromptClass::Question && row.scope == FindingScope::Global
+        }));
+        assert!(rows.iter().any(|row| {
+            row.class == PromptClass::Question
+                && row.scope == FindingScope::Project("/fixture/project".into())
+        }));
+    }
+
+    #[test]
+    fn prompts_keep_unknown_session_scope_explicit() {
+        let mut data = view_fixture();
+        data.messages = (0..12)
+            .map(|index| {
+                let mut prompt = data.messages[0].clone();
+                prompt.session_id = None;
+                prompt.provenance.line = Some(index + 1);
+                prompt
+            })
+            .collect();
+
+        let row = prompts(&data).rows.into_iter().next().expect("prompt row");
+        assert_eq!(row.scope, FindingScope::Path("unknown_prompt_scope".into()));
+        assert!(row.limitations.len() <= 3);
+        assert!(
+            row.limitations
+                .iter()
+                .any(|limitation| limitation.contains("could not be attributed"))
+        );
+        assert!(
+            row.limitations
+                .iter()
+                .any(|limitation| limitation.contains("omitted"))
+        );
+    }
+
+    #[test]
+    fn follow_up_commands_quote_paths_and_use_focused_commands() {
+        let project = FindingScope::Project(PathBuf::from("/fixture/project with space"));
+        assert_eq!(
+            follow_up_for("failure", &project),
+            "codexlens failures --scope 'project:/fixture/project with space'"
+        );
+        let instruction =
+            FindingScope::Instruction(PathBuf::from("/fixture/project with space/AGENTS.md"));
+        assert_eq!(
+            follow_up_for("gap", &instruction),
+            "codexlens instructions --scope 'project:/fixture/project with space'"
+        );
+    }
+
+    #[test]
+    fn finding_follow_up_uses_the_session_project_for_nested_instruction_scope() {
+        let data = view_fixture();
+        let finding = Finding {
+            kind: FindingType::Failure,
+            severity: FindingSeverity::Medium,
+            confidence: FindingConfidence::High,
+            scope: FindingScope::Instruction(PathBuf::from("/fixture/project/nested/AGENTS.md")),
+            key: "synthetic-nested-instruction".to_owned(),
+            summary: "synthetic nested instruction finding".to_owned(),
+            evidence: vec![EvidenceRef {
+                session_id: Some("view-session-a".to_owned()),
+                source: SourceRef::rollout(PathBuf::from("views.jsonl"), 1),
+                role: EvidenceRole::Observation,
+                excerpt: None,
+            }],
+            occurrences: 1,
+            distinct_sessions: 1,
+            affected_paths: Vec::new(),
+            observed_commands: Vec::new(),
+            sequence: Vec::new(),
+            suggested_action: "synthetic action".to_owned(),
+            limitations: Vec::new(),
+            verification_status: None,
+        };
+
+        assert_eq!(
+            follow_up_for_finding(&data, &finding),
+            "codexlens failures --scope project:/fixture/project"
+        );
+    }
+
+    #[test]
+    fn finding_target_prefers_the_evidence_resolved_instruction_file() {
+        let data =
+            crate::advisor::test_support::data_with_join(vec![crate::advisor::test_support::file(
+                "/fixture/project/AGENTS.md",
+                InstructionScope::ProjectRoot,
+                "Synthetic project guidance.",
+            )]);
+        let finding = crate::advisor::test_support::finding(
+            FindingScope::Project(PathBuf::from("/fixture/project")),
+            FindingType::Failure,
+            Some("/fixture/project/src/lib.rs"),
+        );
+
+        assert_eq!(
+            finding_target(&data, &finding),
+            "/fixture/project/AGENTS.md"
+        );
+    }
+
+    #[test]
+    fn usage_reports_prompt_and_subagent_signals() {
+        let mut data = view_fixture();
+        let parent_id = data.sessions[0].id.clone();
+        let mut child = data.sessions[0].clone();
+        child.id = "view-subagent".to_owned();
+        child.parent_id = Some(parent_id);
+        child.originator = Some("synthetic-subagent".to_owned());
+        data.sessions.push(child);
+        data.token_usage.push(TokenUsage {
+            session_id: Some("view-subagent".to_owned()),
+            turn_id: Some("view-subagent-turn".to_owned()),
+            timestamp: Some("2026-01-05T00:00:06.000Z".to_owned()),
+            input_tokens: Some(7),
+            cached_input_tokens: Some(2),
+            output_tokens: Some(3),
+            reasoning_output_tokens: Some(1),
+            sequence: 99,
+            provenance: crate::model::SourceRef::rollout("views.jsonl".into(), 99),
+        });
+
+        let rows = usage(&data).rows;
+        let prompts = rows
+            .iter()
+            .filter(|row| row.kind == UsageKind::Prompt)
+            .collect::<Vec<_>>();
+        assert!(!prompts.is_empty(), "prompt usage signal is missing");
+        assert!(prompts.iter().any(|row| row.name == "question"));
+        let subagent = rows.iter().find(|row| row.kind == UsageKind::Subagent);
+        assert!(subagent.is_some(), "subagent usage signal is missing");
+        assert!(
+            subagent
+                .is_some_and(|row| { row.name == "synthetic-subagent" && row.output_tokens == 3 })
+        );
+    }
+
+    #[test]
+    fn usage_keeps_the_same_tool_and_model_separate_by_scope() {
+        let mut data = view_fixture();
+        let global_session = data.sessions[0].id.clone();
+        let project_session = data.sessions[1].id.clone();
+        data.sessions[0].cwd = None;
+        data.sessions[0].project = None;
+        data.tool_calls = vec![ToolCall {
+            id: Some("scope-tool-global".to_owned()),
+            call_id: Some("scope-call-global".to_owned()),
+            session_id: Some(global_session.clone()),
+            turn_id: Some("view-turn-a".to_owned()),
+            tool_name: Some("exec_command".to_owned()),
+            input_summary: None,
+            command: Some("cargo test".to_owned()),
+            cwd: None,
+            status: None,
+            provenance: crate::model::SourceRef::rollout("views.jsonl".into(), 98),
+        }];
+        let mut project_call = data.tool_calls[0].clone();
+        project_call.session_id = Some(project_session);
+        project_call.provenance.line = Some(100);
+        data.tool_calls.push(project_call);
+        data.tool_calls[0].session_id = Some(global_session);
+
+        let rows = usage(&data)
+            .rows
+            .into_iter()
+            .filter(|row| row.kind == UsageKind::Tool && row.name == "exec_command")
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| row.scope == FindingScope::Global));
+        assert!(
+            rows.iter()
+                .any(|row| { row.scope == FindingScope::Project("/fixture/project".into()) })
+        );
     }
 
     #[test]
