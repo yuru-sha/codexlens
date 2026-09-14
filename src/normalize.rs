@@ -1600,17 +1600,19 @@ fn tool_result_from_payload(
     turn_id: Option<String>,
     provenance: SourceRef,
 ) -> ToolResult {
-    let stdout = payload
-        .get("stdout")
-        .or_else(|| payload.get("output"))
-        .map(value_summary);
+    let renderer_output = payload.get("output").map(value_summary);
+    let stdout = payload.get("stdout").map(value_summary);
     let stderr = payload.get("stderr").map(value_summary);
     let exit_code = payload
         .get("exit_code")
         .or_else(|| payload.get("exit"))
         .and_then(value_i64);
     let status = string_field(payload, &["status"]);
-    let renderer = parse_renderer_status(stdout.as_deref(), stderr.as_deref());
+    let renderer = parse_renderer_status(&[
+        renderer_output.as_deref(),
+        stdout.as_deref(),
+        stderr.as_deref(),
+    ]);
     let (outcome, outcome_source) = classify_outcome(
         exit_code,
         status.as_deref(),
@@ -1628,7 +1630,7 @@ fn tool_result_from_payload(
         turn_id,
         command: payload.get("command").and_then(result_command_value),
         cwd: string_field(payload, &["cwd"]),
-        stdout,
+        stdout: stdout.or(renderer_output),
         stderr,
         duration_ms: payload
             .get("duration_ms")
@@ -1992,9 +1994,6 @@ fn classify_outcome(
     if let RendererParse::Known(status) = renderer {
         return (status.outcome(), OutcomeSource::ParsedRenderer);
     }
-    if matches!(renderer, RendererParse::Malformed) {
-        return (ToolOutcome::Unknown, OutcomeSource::Unknown);
-    }
     if output_indicates_failure(stdout, stderr) {
         return (ToolOutcome::Failed, OutcomeSource::OutputText);
     }
@@ -2057,13 +2056,9 @@ impl RendererStatus {
     }
 }
 
-fn parse_renderer_status(stdout: Option<&str>, stderr: Option<&str>) -> RendererParse {
+fn parse_renderer_status(outputs: &[Option<&str>]) -> RendererParse {
     let mut malformed = false;
-    for parsed in [stdout, stderr]
-        .into_iter()
-        .flatten()
-        .map(parse_renderer_text)
-    {
+    for parsed in outputs.iter().copied().flatten().map(parse_renderer_text) {
         match parsed {
             RendererParse::Known(status) => return RendererParse::Known(status),
             RendererParse::Malformed => malformed = true,
@@ -3057,7 +3052,7 @@ mod tests {
             "../tests/fixtures/rollout/tool-result-envelopes.jsonl"
         ));
 
-        assert_eq!(data.tool_results.len(), 7);
+        assert_eq!(data.tool_results.len(), 8);
         assert_eq!(data.tool_results[0].exit_code, Some(0));
         assert_eq!(data.tool_results[0].outcome, ToolOutcome::Succeeded);
         assert_eq!(
@@ -3095,6 +3090,22 @@ mod tests {
         assert_eq!(
             data.tool_results[6].outcome_source,
             OutcomeSource::ParsedRenderer
+        );
+        assert_eq!(data.tool_results[7].outcome, ToolOutcome::Unknown);
+        assert_eq!(data.tool_results[7].outcome_source, OutcomeSource::Unknown);
+    }
+
+    #[test]
+    fn malformed_renderer_output_does_not_hide_explicit_stderr_failure() {
+        let data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-malformed-renderer-session"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","output":"Process exited with code\nrenderer body","stderr":"permission denied"}}"#,
+        );
+
+        assert_eq!(data.tool_results[0].outcome, ToolOutcome::Failed);
+        assert_eq!(
+            data.tool_results[0].outcome_source,
+            OutcomeSource::OutputText
         );
     }
 
@@ -3138,11 +3149,8 @@ mod tests {
         assert_eq!(data.tool_results[0].outcome, ToolOutcome::Failed);
         assert_eq!(data.tool_results[0].outcome_source, OutcomeSource::Status);
         assert!(!data.tool_results[0].matched_call);
-        assert_eq!(data.tool_results[1].outcome, ToolOutcome::Failed);
-        assert_eq!(
-            data.tool_results[1].outcome_source,
-            OutcomeSource::OutputText
-        );
+        assert_eq!(data.tool_results[1].outcome, ToolOutcome::Unknown);
+        assert_eq!(data.tool_results[1].outcome_source, OutcomeSource::Unknown);
         assert!(!data.tool_results[1].matched_call);
         assert_eq!(data.token_usage.len(), 1);
     }

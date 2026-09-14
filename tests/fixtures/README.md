@@ -32,7 +32,11 @@ before rollout metadata supplies the canonical identity.
 containing nested shell/patch source, and non-shell wrapper failures.
 
 `rollout/tool-result-envelopes.jsonl` covers parsed renderer success, failure,
-timeout, malformed envelopes, and incidental failure words in successful output.
+timeout, malformed envelopes, unknown renderer text, and incidental failure
+words in successful output.
+
+`rollout/renderer-doctor.jsonl` covers a refresh-to-doctor run with repeated
+opaque renderer payload text.
 
 `rollout/string-encoded-commands.jsonl` covers JSON-encoded function and custom
 tool arguments, file patches, malformed input, and wrapper-like text.

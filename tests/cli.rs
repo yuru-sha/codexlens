@@ -1221,6 +1221,42 @@ fn first_run_doctor_auto_analyzes_and_uses_a_private_default_store() {
 }
 
 #[test]
+fn doctor_does_not_report_opaque_renderer_payload_as_a_wrapper_failure() {
+    let home = temp_store_path("renderer-doctor-home");
+    let session_directory = home.join("sessions").join("2026");
+    fs::create_dir_all(&session_directory).unwrap();
+    let source = session_directory.join("renderer-doctor.jsonl");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rollout/renderer-doctor.jsonl");
+    fs::copy(fixture, &source).unwrap();
+    let store = temp_store_path("renderer-doctor-store");
+
+    let refreshed = run_refresh(&home, &store);
+    assert!(
+        refreshed.status.success(),
+        "refresh failed: {}",
+        String::from_utf8_lossy(&refreshed.stderr)
+    );
+    let data = Store::open_read_only(&store)
+        .unwrap()
+        .load_canonical()
+        .unwrap();
+    assert_eq!(data.tool_results.len(), 2);
+    assert!(data.tool_results.iter().all(|result| {
+        result.outcome == codexlens::model::ToolOutcome::Unknown
+            && result.outcome_source == codexlens::model::OutcomeSource::Unknown
+    }));
+
+    let doctor = run_args(&["doctor", "--format", "json"], &store);
+    let document = parse_json_report(&doctor, "doctor");
+    assert_eq!(document["data"]["top_fixes"].as_array().unwrap().len(), 0);
+    assert_eq!(document["data"]["looks_healthy"], true);
+
+    let _ = fs::remove_dir_all(home);
+    let _ = fs::remove_file(store);
+}
+
+#[test]
 fn typed_views_honor_scope_and_archive_subagent_selection() {
     let store = typed_view_store();
     let global = run_args(&["inventory", "--scope", "global"], &store);
