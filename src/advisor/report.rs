@@ -728,21 +728,26 @@ fn report_coverage_filtered(
     });
     let limitations_omitted = limitations.len().saturating_sub(MAX_REPORT_EVIDENCE);
     limitations.truncate(MAX_REPORT_EVIDENCE);
-    let limitations: Vec<CoverageLimitation> = limitations
-        .into_iter()
-        .map(|limitation| {
-            let (selected_sessions, selected_records) =
-                source_impact(impact_data, &limitation.source);
-            CoverageLimitation {
-                kind: limitation.kind,
-                source: limitation.source,
-                message: limitation.message,
-                selected_sessions,
-                selected_records,
-                affected_lenses: limitation.affected_lenses,
-            }
-        })
-        .collect();
+    let limitations: Vec<CoverageLimitation> = if limitations.is_empty() {
+        Vec::new()
+    } else {
+        let source_impacts = source_impact_index(impact_data);
+        limitations
+            .into_iter()
+            .map(|limitation| {
+                let (selected_sessions, selected_records) =
+                    source_impact(&source_impacts, &limitation.source);
+                CoverageLimitation {
+                    kind: limitation.kind,
+                    source: limitation.source,
+                    message: limitation.message,
+                    selected_sessions,
+                    selected_records,
+                    affected_lenses: limitation.affected_lenses,
+                }
+            })
+            .collect()
+    };
     timestamps.sort();
     let (activity_start, activity_end) = match (timestamps.first(), timestamps.last()) {
         (Some(start), Some(end)) => (Some(start.1.clone()), Some(end.1.clone())),
@@ -930,79 +935,117 @@ fn limitation_priority(kind: &str) -> u8 {
     }
 }
 
-fn source_impact(data: &CanonicalData, source: &SourceRef) -> (usize, usize) {
-    let same_source =
-        |candidate: &SourceRef| candidate.kind == source.kind && candidate.path == source.path;
-    let mut sessions = BTreeSet::new();
-    let mut records = 0;
+#[derive(Default)]
+struct SourceImpact {
+    sessions: BTreeSet<String>,
+    records: usize,
+}
+
+type SourceImpactIndex = HashMap<(u8, std::path::PathBuf), SourceImpact>;
+
+fn source_impact_index(data: &CanonicalData) -> SourceImpactIndex {
+    let mut index = SourceImpactIndex::new();
     for session in &data.sessions {
-        if same_source(&session.provenance) {
-            sessions.insert(session.id.clone());
-        }
+        add_source_impact(&mut index, &session.provenance, Some(&session.id), false);
     }
     for turn in &data.turns {
-        if same_source(&turn.provenance) {
-            if let Some(session_id) = &turn.session_id {
-                sessions.insert(session_id.clone());
-            }
-        }
+        add_source_impact(
+            &mut index,
+            &turn.provenance,
+            turn.session_id.as_deref(),
+            false,
+        );
     }
     for record in &data.records {
-        if same_source(&record.provenance) {
-            records += 1;
-            if let Some(session_id) = &record.session_id {
-                sessions.insert(session_id.clone());
-            }
-        }
+        add_source_impact(
+            &mut index,
+            &record.provenance,
+            record.session_id.as_deref(),
+            true,
+        );
     }
     for message in &data.messages {
-        if same_source(&message.provenance) {
-            if let Some(session_id) = &message.session_id {
-                sessions.insert(session_id.clone());
-            }
-        }
+        add_source_impact(
+            &mut index,
+            &message.provenance,
+            message.session_id.as_deref(),
+            false,
+        );
     }
     for call in &data.tool_calls {
-        if same_source(&call.provenance) {
-            if let Some(session_id) = &call.session_id {
-                sessions.insert(session_id.clone());
-            }
-        }
+        add_source_impact(
+            &mut index,
+            &call.provenance,
+            call.session_id.as_deref(),
+            false,
+        );
     }
     for result in &data.tool_results {
-        if same_source(&result.provenance) {
-            if let Some(session_id) = &result.session_id {
-                sessions.insert(session_id.clone());
-            }
-        }
+        add_source_impact(
+            &mut index,
+            &result.provenance,
+            result.session_id.as_deref(),
+            false,
+        );
     }
     for operation in &data.file_operations {
-        if same_source(&operation.provenance) {
-            if let Some(session_id) = &operation.session_id {
-                sessions.insert(session_id.clone());
-            }
-        }
+        add_source_impact(
+            &mut index,
+            &operation.provenance,
+            operation.session_id.as_deref(),
+            false,
+        );
     }
     for usage in &data.token_usage {
-        if same_source(&usage.provenance) {
-            if let Some(session_id) = &usage.session_id {
-                sessions.insert(session_id.clone());
-            }
-        }
+        add_source_impact(
+            &mut index,
+            &usage.provenance,
+            usage.session_id.as_deref(),
+            false,
+        );
     }
     for snapshot in &data.instruction_snapshots {
-        if same_source(&snapshot.provenance) {
-            if let Some(session_id) = &snapshot.session_id {
-                sessions.insert(session_id.clone());
-            }
-        }
+        add_source_impact(
+            &mut index,
+            &snapshot.provenance,
+            snapshot.session_id.as_deref(),
+            false,
+        );
     }
     for join in &data.instruction_joins {
-        if same_source(&join.provenance) {
-            sessions.insert(join.session_id.clone());
-        }
+        add_source_impact(&mut index, &join.provenance, Some(&join.session_id), false);
     }
-    (sessions.len(), records)
+    index
+}
+
+fn add_source_impact(
+    index: &mut SourceImpactIndex,
+    source: &SourceRef,
+    session_id: Option<&str>,
+    is_record: bool,
+) {
+    let impact = index
+        .entry((source_kind_key(source.kind), source.path.clone()))
+        .or_default();
+    if let Some(session_id) = session_id {
+        impact.sessions.insert(session_id.to_owned());
+    }
+    if is_record {
+        impact.records += 1;
+    }
+}
+
+fn source_impact(index: &SourceImpactIndex, source: &SourceRef) -> (usize, usize) {
+    index
+        .get(&(source_kind_key(source.kind), source.path.clone()))
+        .map_or((0, 0), |impact| (impact.sessions.len(), impact.records))
+}
+
+fn source_kind_key(kind: SourceKind) -> u8 {
+    match kind {
+        SourceKind::Rollout => 0,
+        SourceKind::State => 1,
+    }
 }
 
 fn session_count(data: &CanonicalData) -> usize {
