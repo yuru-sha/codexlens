@@ -2701,6 +2701,22 @@ mod tests {
     }
 
     #[test]
+    fn ingestion_commands_keep_workflow_specific_options() {
+        assert!(Cli::try_parse_from(["codexlens", "refresh", "--format", "json"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "codexlens",
+                "monitor",
+                "--source",
+                "fixture.jsonl",
+                "--scope",
+                "project"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn reporting_commands_accept_session_selection_options() {
         let Command::Sessions { store } = Cli::try_parse_from([
             "codexlens",
