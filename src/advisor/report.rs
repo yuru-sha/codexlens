@@ -8,7 +8,7 @@ use crate::analysis::{
     EvidenceRef, EvidenceRole, Finding, FindingScope, VerificationStatus, bounded_excerpt,
     sort_findings,
 };
-use crate::model::{CanonicalData, SourceKind, SourceRef};
+use crate::model::{CanonicalData, DiagnosticKind, SourceKind, SourceRef};
 use crate::period::{
     PeriodCoverage, ReportingPeriod, SourceKey, Timestamp, event_timestamp, record_timestamps,
 };
@@ -63,6 +63,16 @@ pub struct DoctorReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoverageLimitation {
+    pub kind: String,
+    pub source: SourceRef,
+    pub message: String,
+    pub selected_sessions: usize,
+    pub selected_records: usize,
+    pub affected_lenses: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportCoverage {
     pub scope: String,
     pub status: String,
@@ -73,6 +83,10 @@ pub struct ReportCoverage {
     pub invalid_activity_timestamps: usize,
     pub session_count: usize,
     pub record_count: usize,
+    #[serde(default)]
+    pub limitations: Vec<CoverageLimitation>,
+    #[serde(default)]
+    pub limitations_omitted: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,7 +325,7 @@ fn freshness_json(freshness: &StoreFreshness) -> serde_json::Value {
 }
 
 fn coverage_json(coverage: &ReportCoverage) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "scope": coverage.scope,
         "status": coverage.status,
         "activity_start": coverage.activity_start,
@@ -321,6 +335,32 @@ fn coverage_json(coverage: &ReportCoverage) -> serde_json::Value {
         "invalid_activity_timestamps": coverage.invalid_activity_timestamps,
         "session_count": coverage.session_count,
         "record_count": coverage.record_count,
+    });
+    let limitations = coverage_limitations_json(coverage);
+    value["limitations"] = limitations["limitations"].clone();
+    value["limitations_omitted"] = limitations["limitations_omitted"].clone();
+    value
+}
+
+fn coverage_limitation_json(limitation: &CoverageLimitation) -> serde_json::Value {
+    serde_json::json!({
+        "kind": limitation.kind,
+        "source": source_json(&limitation.source),
+        "message": bounded_excerpt(&limitation.message, MAX_PROPOSAL_TEXT_BYTES),
+        "selected_sessions": limitation.selected_sessions,
+        "selected_records": limitation.selected_records,
+        "affected_lenses": bounded_json_strings(&limitation.affected_lenses),
+    })
+}
+
+pub fn coverage_limitations_json(coverage: &ReportCoverage) -> serde_json::Value {
+    serde_json::json!({
+        "limitations": coverage
+            .limitations
+            .iter()
+            .map(coverage_limitation_json)
+            .collect::<Vec<_>>(),
+        "limitations_omitted": coverage.limitations_omitted,
     })
 }
 
@@ -567,101 +607,128 @@ pub fn report_sessions_with_limit(
 }
 
 pub fn report_coverage(data: &CanonicalData) -> ReportCoverage {
-    report_coverage_filtered(data, None)
+    report_coverage_filtered(data, None, data)
 }
 
 pub fn report_coverage_with_period(
     data: &CanonicalData,
     period: &ReportingPeriod,
 ) -> ReportCoverage {
-    report_coverage_filtered(data, Some(period))
+    report_coverage_filtered(data, Some(period), data)
+}
+
+/// Compute period coverage from the unprojected data while attributing each
+/// limitation to the data that the report will actually analyze.
+pub fn report_coverage_for_period_selection(
+    data: &CanonicalData,
+    period: &ReportingPeriod,
+    selected_data: &CanonicalData,
+) -> ReportCoverage {
+    report_coverage_filtered(data, Some(period), selected_data)
 }
 
 fn report_coverage_filtered(
     data: &CanonicalData,
     period: Option<&ReportingPeriod>,
+    impact_data: &CanonicalData,
 ) -> ReportCoverage {
     let record_times = record_timestamps(data);
-    let mut timestamps = Vec::<(Timestamp, String)>::new();
-    let mut missing_activity_timestamps = 0;
-    let mut invalid_activity_timestamps = 0;
+    let mut observations = CoverageObservations::new(period, impact_data);
 
     for session in &data.sessions {
-        for timestamp in [session.created_at.as_deref(), session.updated_at.as_deref()] {
-            observe_timestamp(
-                timestamp,
-                &mut timestamps,
-                &mut missing_activity_timestamps,
-                &mut invalid_activity_timestamps,
-                period,
-            );
-        }
+        observations.observe_timestamp(
+            session.created_at.as_deref(),
+            &session.provenance,
+            "session.created_at",
+            "missing_activity_timestamp",
+        );
+        observations.observe_timestamp(
+            session.updated_at.as_deref(),
+            &session.provenance,
+            "session.updated_at",
+            "missing_activity_timestamp",
+        );
     }
     for turn in &data.turns {
-        for timestamp in [turn.started_at.as_deref(), turn.completed_at.as_deref()] {
-            observe_timestamp(
-                timestamp,
-                &mut timestamps,
-                &mut missing_activity_timestamps,
-                &mut invalid_activity_timestamps,
-                period,
-            );
-        }
+        observations.observe_timestamp(
+            turn.started_at.as_deref(),
+            &turn.provenance,
+            "turn.started_at",
+            "missing_lifecycle_timestamp",
+        );
+        observations.observe_timestamp(
+            turn.completed_at.as_deref(),
+            &turn.provenance,
+            "turn.completed_at",
+            "missing_lifecycle_timestamp",
+        );
         for event in &turn.lifecycle {
-            observe_event_timestamp(
+            observations.observe_event_timestamp(
                 event.timestamp.as_deref(),
                 &event.provenance,
                 &record_times,
-                &mut timestamps,
-                &mut missing_activity_timestamps,
-                &mut invalid_activity_timestamps,
-                period,
+                &format!("turn.lifecycle.{}", event.kind),
+                "missing_lifecycle_timestamp",
             );
         }
     }
     for record in &data.records {
-        observe_timestamp(
+        observations.observe_timestamp(
             record.timestamp.as_deref(),
-            &mut timestamps,
-            &mut missing_activity_timestamps,
-            &mut invalid_activity_timestamps,
-            period,
+            &record.provenance,
+            "record.timestamp",
+            "missing_activity_timestamp",
         );
     }
     for message in &data.messages {
-        observe_event_timestamp(
+        observations.observe_event_timestamp(
             message.timestamp.as_deref(),
             &message.provenance,
             &record_times,
-            &mut timestamps,
-            &mut missing_activity_timestamps,
-            &mut invalid_activity_timestamps,
-            period,
+            "message.timestamp",
+            "missing_activity_timestamp",
         );
     }
     for operation in &data.file_operations {
-        observe_event_timestamp(
+        observations.observe_event_timestamp(
             operation.timestamp.as_deref(),
             &operation.provenance,
             &record_times,
-            &mut timestamps,
-            &mut missing_activity_timestamps,
-            &mut invalid_activity_timestamps,
-            period,
+            "file_operation.timestamp",
+            "missing_activity_timestamp",
         );
     }
     for usage in &data.token_usage {
-        observe_event_timestamp(
+        observations.observe_event_timestamp(
             usage.timestamp.as_deref(),
             &usage.provenance,
             &record_times,
-            &mut timestamps,
-            &mut missing_activity_timestamps,
-            &mut invalid_activity_timestamps,
-            period,
+            "token_usage.timestamp",
+            "missing_activity_timestamp",
         );
     }
+    for diagnostic in &data.diagnostics {
+        observations.add_diagnostic(diagnostic);
+    }
 
+    let CoverageObservations {
+        mut timestamps,
+        missing_activity_timestamps,
+        invalid_activity_timestamps,
+        mut limitations,
+        period: _,
+        impact_data: _,
+    } = observations;
+    limitations.sort_by(|left, right| {
+        limitation_priority(&left.kind)
+            .cmp(&limitation_priority(&right.kind))
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.source.path.cmp(&right.source.path))
+            .then_with(|| left.source.line.cmp(&right.source.line))
+            .then_with(|| left.message.cmp(&right.message))
+    });
+    let limitations_omitted = limitations.len().saturating_sub(MAX_REPORT_EVIDENCE);
+    limitations.truncate(MAX_REPORT_EVIDENCE);
     timestamps.sort();
     let (activity_start, activity_end) = match (timestamps.first(), timestamps.last()) {
         (Some(start), Some(end)) => (Some(start.1.clone()), Some(end.1.clone())),
@@ -670,16 +737,19 @@ fn report_coverage_filtered(
     let valid_activity_timestamps = timestamps.len();
     let session_count = session_count(data);
     let record_count = data.records.len();
+    let has_limitations = !limitations.is_empty() || limitations_omitted > 0;
     let status = if session_count == 0
         && record_count == 0
         && valid_activity_timestamps == 0
         && missing_activity_timestamps == 0
         && invalid_activity_timestamps == 0
+        && !has_limitations
     {
         "empty"
     } else if valid_activity_timestamps == 0
         || missing_activity_timestamps > 0
         || invalid_activity_timestamps > 0
+        || has_limitations
     {
         "partial"
     } else {
@@ -696,47 +766,227 @@ fn report_coverage_filtered(
         invalid_activity_timestamps,
         session_count,
         record_count,
+        limitations,
+        limitations_omitted,
     }
 }
 
-fn observe_timestamp(
-    timestamp: Option<&str>,
-    valid: &mut Vec<(Timestamp, String)>,
-    missing: &mut usize,
-    invalid: &mut usize,
-    period: Option<&ReportingPeriod>,
-) {
-    let Some(timestamp) = timestamp else {
-        *missing += 1;
-        return;
-    };
-    let Some(parsed) = Timestamp::parse(timestamp) else {
-        *invalid += 1;
-        return;
-    };
-    if period.is_some_and(|period| !period.contains(parsed)) {
-        return;
-    }
-    valid.push((parsed, timestamp.to_owned()));
+struct CoverageObservations<'a> {
+    period: Option<&'a ReportingPeriod>,
+    impact_data: &'a CanonicalData,
+    timestamps: Vec<(Timestamp, String)>,
+    missing_activity_timestamps: usize,
+    invalid_activity_timestamps: usize,
+    limitations: Vec<CoverageLimitation>,
 }
 
-fn observe_event_timestamp(
-    value: Option<&str>,
-    source: &SourceRef,
-    record_times: &HashMap<SourceKey, Option<Timestamp>>,
-    valid: &mut Vec<(Timestamp, String)>,
-    missing: &mut usize,
-    invalid: &mut usize,
-    period: Option<&ReportingPeriod>,
-) {
-    if let Some(value) = value {
-        observe_timestamp(Some(value), valid, missing, invalid, period);
-    } else if let Some(timestamp) = event_timestamp(None, source, record_times) {
-        let formatted = timestamp.format();
-        observe_timestamp(Some(&formatted), valid, missing, invalid, period);
-    } else {
-        observe_timestamp(None, valid, missing, invalid, period);
+impl<'a> CoverageObservations<'a> {
+    fn new(period: Option<&'a ReportingPeriod>, impact_data: &'a CanonicalData) -> Self {
+        Self {
+            period,
+            impact_data,
+            timestamps: Vec::new(),
+            missing_activity_timestamps: 0,
+            invalid_activity_timestamps: 0,
+            limitations: Vec::new(),
+        }
     }
+
+    fn observe_timestamp(
+        &mut self,
+        timestamp: Option<&str>,
+        source: &SourceRef,
+        field: &str,
+        missing_kind: &str,
+    ) {
+        let Some(timestamp) = timestamp else {
+            self.missing_activity_timestamps += 1;
+            self.add_limitation(
+                missing_kind,
+                source,
+                format!("missing {field} timestamp"),
+                timestamp_lenses(),
+            );
+            return;
+        };
+        let Some(parsed) = Timestamp::parse(timestamp) else {
+            self.invalid_activity_timestamps += 1;
+            self.add_limitation(
+                "invalid_timestamp",
+                source,
+                format!("{field} timestamp is invalid"),
+                timestamp_lenses(),
+            );
+            return;
+        };
+        if self.period.is_some_and(|period| !period.contains(parsed)) {
+            return;
+        }
+        self.timestamps.push((parsed, timestamp.to_owned()));
+    }
+
+    fn observe_event_timestamp(
+        &mut self,
+        value: Option<&str>,
+        source: &SourceRef,
+        record_times: &HashMap<SourceKey, Option<Timestamp>>,
+        field: &str,
+        missing_kind: &str,
+    ) {
+        if let Some(value) = value {
+            self.observe_timestamp(Some(value), source, field, missing_kind);
+        } else if let Some(timestamp) = event_timestamp(None, source, record_times) {
+            let formatted = timestamp.format();
+            self.observe_timestamp(Some(&formatted), source, field, missing_kind);
+        } else {
+            self.observe_timestamp(None, source, field, missing_kind);
+        }
+    }
+
+    fn add_diagnostic(&mut self, diagnostic: &crate::model::CanonicalDiagnostic) {
+        self.add_limitation(
+            diagnostic.kind.as_str(),
+            &diagnostic.source,
+            diagnostic.message.clone(),
+            diagnostic_lenses(diagnostic.kind),
+        );
+    }
+
+    fn add_limitation(
+        &mut self,
+        kind: &str,
+        source: &SourceRef,
+        message: String,
+        affected_lenses: &[&str],
+    ) {
+        let (selected_sessions, selected_records) = source_impact(self.impact_data, source);
+        self.limitations.push(CoverageLimitation {
+            kind: kind.to_owned(),
+            source: source.clone(),
+            message,
+            selected_sessions,
+            selected_records,
+            affected_lenses: affected_lenses
+                .iter()
+                .map(|lens| (*lens).to_owned())
+                .collect(),
+        });
+    }
+}
+
+const TIMESTAMP_LENSES: &[&str] = &["corrections", "rework", "stuck", "verification", "usage"];
+const METADATA_LENSES: &[&str] = &["inventory", "overhead", "usage", "waste", "instructions"];
+const SOURCE_LENSES: &[&str] = &[
+    "failures",
+    "corrections",
+    "rework",
+    "stuck",
+    "verification",
+    "knowledge",
+    "instructions",
+    "inventory",
+    "overhead",
+    "usage",
+    "waste",
+    "prompts",
+];
+
+fn timestamp_lenses() -> &'static [&'static str] {
+    TIMESTAMP_LENSES
+}
+
+fn diagnostic_lenses(kind: DiagnosticKind) -> &'static [&'static str] {
+    match kind {
+        DiagnosticKind::MetadataConflict => METADATA_LENSES,
+        DiagnosticKind::MalformedJson
+        | DiagnosticKind::OversizedLine
+        | DiagnosticKind::Unreadable
+        | DiagnosticKind::StateSchemaMismatch
+        | DiagnosticKind::StateQuery
+        | DiagnosticKind::UnsupportedReader => SOURCE_LENSES,
+    }
+}
+
+fn limitation_priority(kind: &str) -> u8 {
+    match kind {
+        "missing_activity_timestamp" | "missing_lifecycle_timestamp" | "invalid_timestamp" => 1,
+        _ => 0,
+    }
+}
+
+fn source_impact(data: &CanonicalData, source: &SourceRef) -> (usize, usize) {
+    let same_source =
+        |candidate: &SourceRef| candidate.kind == source.kind && candidate.path == source.path;
+    let mut sessions = BTreeSet::new();
+    let mut records = 0;
+    for session in &data.sessions {
+        if same_source(&session.provenance) {
+            sessions.insert(session.id.clone());
+        }
+    }
+    for turn in &data.turns {
+        if same_source(&turn.provenance) {
+            if let Some(session_id) = &turn.session_id {
+                sessions.insert(session_id.clone());
+            }
+        }
+    }
+    for record in &data.records {
+        if same_source(&record.provenance) {
+            records += 1;
+            if let Some(session_id) = &record.session_id {
+                sessions.insert(session_id.clone());
+            }
+        }
+    }
+    for message in &data.messages {
+        if same_source(&message.provenance) {
+            if let Some(session_id) = &message.session_id {
+                sessions.insert(session_id.clone());
+            }
+        }
+    }
+    for call in &data.tool_calls {
+        if same_source(&call.provenance) {
+            if let Some(session_id) = &call.session_id {
+                sessions.insert(session_id.clone());
+            }
+        }
+    }
+    for result in &data.tool_results {
+        if same_source(&result.provenance) {
+            if let Some(session_id) = &result.session_id {
+                sessions.insert(session_id.clone());
+            }
+        }
+    }
+    for operation in &data.file_operations {
+        if same_source(&operation.provenance) {
+            if let Some(session_id) = &operation.session_id {
+                sessions.insert(session_id.clone());
+            }
+        }
+    }
+    for usage in &data.token_usage {
+        if same_source(&usage.provenance) {
+            if let Some(session_id) = &usage.session_id {
+                sessions.insert(session_id.clone());
+            }
+        }
+    }
+    for snapshot in &data.instruction_snapshots {
+        if same_source(&snapshot.provenance) {
+            if let Some(session_id) = &snapshot.session_id {
+                sessions.insert(session_id.clone());
+            }
+        }
+    }
+    for join in &data.instruction_joins {
+        if same_source(&join.provenance) {
+            sessions.insert(join.session_id.clone());
+        }
+    }
+    (sessions.len(), records)
 }
 
 fn session_count(data: &CanonicalData) -> usize {
@@ -954,7 +1204,7 @@ pub fn render_report_metadata(coverage: &ReportCoverage, freshness: &StoreFreshn
         _ => "unknown".to_owned(),
     };
     let scope = coverage.scope.replace('_', " ");
-    format!(
+    let mut output = format!(
         "Coverage: {} ({}; not necessarily all historical activity or current raw inputs; refresh explicitly, archives via --include-archived)\nActivity: {period}\nActivity timestamps: {} valid, {} missing, {} invalid\nSessions: {}\nRecords: {}\nLatest ingestion: {}\nStore freshness: {} ({} source files)\n",
         scope,
         coverage.status,
@@ -966,7 +1216,34 @@ pub fn render_report_metadata(coverage: &ReportCoverage, freshness: &StoreFreshn
         freshness.latest_ingested_at.as_deref().unwrap_or("unknown"),
         freshness,
         freshness.source_count,
-    )
+    );
+    output.push_str(&render_coverage_limitations(coverage));
+    output
+}
+
+pub fn render_coverage_limitations(coverage: &ReportCoverage) -> String {
+    if coverage.limitations.is_empty() && coverage.limitations_omitted == 0 {
+        return "Limitations: none\n".to_owned();
+    }
+    let mut output = String::from("Limitations:\n");
+    for limitation in &coverage.limitations {
+        output.push_str(&format!(
+            "Limitation {} at {}: {} (selected sessions: {}; selected records: {}; affected lenses: {})\n",
+            limitation.kind,
+            bounded_excerpt(&source_label(&limitation.source), MAX_PROPOSAL_TEXT_BYTES),
+            bounded_excerpt(&limitation.message, MAX_PROPOSAL_TEXT_BYTES),
+            limitation.selected_sessions,
+            limitation.selected_records,
+            limitation.affected_lenses.join(", "),
+        ));
+    }
+    if coverage.limitations_omitted > 0 {
+        output.push_str(&format!(
+            "Limitations omitted: {} additional limitation(s)\n",
+            coverage.limitations_omitted
+        ));
+    }
+    output
 }
 
 fn source_label(source: &SourceRef) -> String {
@@ -1013,10 +1290,13 @@ pub fn render_proposal_summary(rendered: &RenderedDiff) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::advisor::test_support::{finding, proposal};
+    use crate::advisor::test_support::{data_with_join, finding, proposal, source};
     use crate::advisor::{ProposalAction, RenderedDiff};
     use crate::analysis::{FindingScope, FindingType, VerificationStatus};
-    use crate::model::{Record, RecordKind, Session};
+    use crate::model::{
+        CanonicalDiagnostic, DiagnosticKind, Record, RecordKind, Session, SourceRef, Turn,
+        TurnLifecycleEvent,
+    };
     use crate::period::{ReportingPeriod, select_report_data};
     use crate::store::StoreFreshness;
     use std::path::PathBuf;
@@ -1083,6 +1363,8 @@ mod tests {
             invalid_activity_timestamps: 0,
             session_count: 1,
             record_count: 2,
+            limitations: Vec::new(),
+            limitations_omitted: 0,
         };
 
         let report = doctor_with_coverage(
@@ -1189,6 +1471,110 @@ mod tests {
             DEFAULT_SESSION_LIMIT
         );
         assert_eq!(document["data"]["omitted_count"], 1);
+    }
+
+    #[test]
+    fn coverage_surfaces_bounded_limitations_with_source_and_lens_impact() {
+        let mut data = data_with_join(Vec::new());
+        data.records = vec![
+            record_with_timestamp("session", Some("2026-01-01T00:00:00Z")),
+            record_with_timestamp("session", Some("not-a-timestamp")),
+        ];
+        data.turns.push(Turn {
+            id: "turn".to_owned(),
+            session_id: Some("session".to_owned()),
+            started_at: None,
+            completed_at: Some("2026-01-01T00:00:01Z".to_owned()),
+            cwd: None,
+            model: None,
+            reasoning_effort: None,
+            sequence: 1,
+            lifecycle: vec![TurnLifecycleEvent {
+                kind: "turn_started".to_owned(),
+                timestamp: None,
+                sequence: 1,
+                provenance: source(3),
+            }],
+            provenance: source(2),
+        });
+        data.diagnostics = vec![
+            CanonicalDiagnostic {
+                kind: DiagnosticKind::OversizedLine,
+                source: source(4),
+                message: "synthetic oversized line".to_owned(),
+            },
+            CanonicalDiagnostic {
+                kind: DiagnosticKind::Unreadable,
+                source: SourceRef::rollout("unreadable.jsonl".into(), 1),
+                message: "synthetic unreadable source".to_owned(),
+            },
+            CanonicalDiagnostic {
+                kind: DiagnosticKind::MetadataConflict,
+                source: SourceRef::state("state.sqlite".into()),
+                message: "synthetic metadata conflict".to_owned(),
+            },
+        ];
+
+        let coverage = report_coverage(&data);
+        assert_eq!(coverage.status, "partial");
+        let kinds = coverage
+            .limitations
+            .iter()
+            .map(|limitation| limitation.kind.as_str())
+            .collect::<BTreeSet<_>>();
+        for kind in [
+            "missing_lifecycle_timestamp",
+            "invalid_timestamp",
+            "oversized_line",
+            "unreadable",
+            "metadata_conflict",
+        ] {
+            assert!(kinds.contains(kind), "missing limitation kind {kind}");
+        }
+        let invalid = coverage
+            .limitations
+            .iter()
+            .find(|limitation| limitation.kind == "invalid_timestamp")
+            .unwrap();
+        assert_eq!(invalid.source.line, Some(1));
+        assert_eq!(invalid.selected_sessions, 1);
+        assert_eq!(invalid.selected_records, 2);
+        assert!(invalid.affected_lenses.iter().any(|lens| lens == "rework"));
+        assert!(
+            render_report_metadata(&coverage, &StoreFreshness::recorded(1, None))
+                .contains("Limitations:\n")
+        );
+
+        let document: serde_json::Value = serde_json::from_str(
+            &render_json_sessions(&data, &StoreFreshness::recorded(1, None)).unwrap(),
+        )
+        .unwrap();
+        let limitations = document["data"]["coverage"]["limitations"]
+            .as_array()
+            .unwrap();
+        assert!(limitations.iter().any(|limitation| {
+            limitation["kind"] == "oversized_line"
+                && limitation["source"]["line"] == 4
+                && limitation["selected_sessions"] == 1
+                && limitation["selected_records"] == 2
+        }));
+    }
+
+    #[test]
+    fn complete_and_empty_coverage_have_no_limitations() {
+        let complete = report_coverage(&CanonicalData {
+            records: vec![record_with_timestamp(
+                "session",
+                Some("2026-01-01T00:00:00Z"),
+            )],
+            ..CanonicalData::default()
+        });
+        assert_eq!(complete.status, "observed");
+        assert!(complete.limitations.is_empty());
+
+        let empty = report_coverage(&CanonicalData::default());
+        assert_eq!(empty.status, "empty");
+        assert!(empty.limitations.is_empty());
     }
 
     #[test]

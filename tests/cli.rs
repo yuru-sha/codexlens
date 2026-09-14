@@ -378,6 +378,74 @@ fn coverage_timestamp_fallback_store() -> PathBuf {
     path
 }
 
+fn coverage_limitation_store() -> PathBuf {
+    let path = fixture_store();
+    let mut store = Store::open(&path).unwrap();
+    let limitation_fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rollout/coverage-limitations.jsonl");
+    store
+        .ingest_rollout_file(&limitation_fixture, &RolloutParseOptions::default())
+        .unwrap();
+    let changed = store
+        .connection()
+        .execute(
+            "UPDATE turns SET started_at = NULL WHERE turn_key = (SELECT turn_key FROM turns ORDER BY turn_key LIMIT 1)",
+            [],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let changed = store
+        .connection()
+        .execute(
+            "UPDATE records SET timestamp = 'not-a-timestamp' WHERE record_key = (SELECT record_key FROM records ORDER BY record_key LIMIT 1)",
+            [],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    store
+        .connection()
+        .execute(
+            "INSERT INTO diagnostics (diagnostic_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, kind, message) VALUES (?1, ?2, ?3, ?4, ?5, NULL, 1, ?6, ?7)",
+            params![
+                "coverage-oversized",
+                "synthetic-coverage-source",
+                limitation_fixture.to_string_lossy().as_ref(),
+                7,
+                "rollout",
+                "oversized_line",
+                "synthetic oversized line",
+            ],
+        )
+        .unwrap();
+    for (key, path, line, kind, message, source_kind) in [
+        (
+            "coverage-unreadable",
+            "unreadable.jsonl",
+            Some(1),
+            "unreadable",
+            "synthetic unreadable source",
+            "rollout",
+        ),
+        (
+            "coverage-conflict",
+            "state.sqlite",
+            None,
+            "metadata_conflict",
+            "synthetic metadata conflict",
+            "state",
+        ),
+    ] {
+        store
+            .connection()
+            .execute(
+                "INSERT INTO diagnostics (diagnostic_key, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, kind, message) VALUES (?1, ?2, ?3, ?4, ?5, NULL, 1, ?6, ?7)",
+                params![key, "synthetic-coverage-source", path, line, source_kind, kind, message],
+            )
+            .unwrap();
+    }
+    path
+}
+
 fn boundary_turn_coverage_store() -> PathBuf {
     let path = temp_store_path("boundary-turn-coverage");
     let mut store = Store::open(&path).unwrap();
@@ -3366,6 +3434,99 @@ fn reporting_metadata_exposes_store_coverage_and_separates_ingestion_time() {
     );
     assert_eq!(sessions["coverage"], coverage.clone());
     let _ = fs::remove_file(store);
+}
+
+#[test]
+fn coverage_limitations_are_visible_in_table_markdown_and_json() {
+    let partial_store = coverage_limitation_store();
+    let table = run_args(&["doctor"], &partial_store);
+    assert!(
+        table.status.success(),
+        "{}",
+        String::from_utf8_lossy(&table.stderr)
+    );
+    let table_stdout = String::from_utf8_lossy(&table.stdout);
+    assert!(table_stdout.contains("Limitations:"), "{table_stdout}");
+    assert!(table_stdout.contains("oversized_line"), "{table_stdout}");
+    assert!(table_stdout.contains("selected records"), "{table_stdout}");
+
+    let markdown = run_args(&["doctor", "--format", "markdown"], &partial_store);
+    assert!(markdown.status.success());
+    let markdown_stdout = String::from_utf8_lossy(&markdown.stdout);
+    assert!(
+        markdown_stdout.starts_with("# WHAT TO FIX FIRST"),
+        "{markdown_stdout}"
+    );
+    assert!(
+        markdown_stdout.contains("metadata_conflict"),
+        "{markdown_stdout}"
+    );
+
+    let json = parse_json_report(
+        &run_args(&["doctor", "--format", "json"], &partial_store),
+        "doctor",
+    );
+    let limitations = json["coverage"]["limitations"].as_array().unwrap();
+    for kind in [
+        "missing_lifecycle_timestamp",
+        "invalid_timestamp",
+        "oversized_line",
+        "unreadable",
+        "metadata_conflict",
+    ] {
+        assert!(
+            limitations
+                .iter()
+                .any(|limitation| limitation["kind"] == kind),
+            "{kind}: {limitations:?}"
+        );
+    }
+    let oversized = limitations
+        .iter()
+        .find(|limitation| limitation["kind"] == "oversized_line")
+        .unwrap();
+    assert_eq!(oversized["source"]["line"], 7);
+    assert!(oversized["selected_sessions"].as_u64().unwrap() > 0);
+    assert!(oversized["selected_records"].as_u64().unwrap() > 0);
+    assert!(
+        oversized["affected_lenses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|lens| lens == "usage")
+    );
+    assert!(json["coverage"]["limitations_omitted"].is_number());
+    let _ = fs::remove_file(partial_store);
+
+    let complete_store = coverage_timestamp_fallback_store();
+    let complete_json = parse_json_report(
+        &run_args(&["doctor", "--format", "json"], &complete_store),
+        "doctor",
+    );
+    assert_eq!(complete_json["coverage"]["status"], "observed");
+    assert_eq!(complete_json["coverage"]["limitations"], json!([]));
+    for format in ["table", "markdown"] {
+        let args = if format == "table" {
+            vec!["doctor"]
+        } else {
+            vec!["doctor", "--format", format]
+        };
+        let output = run_args(&args, &complete_store);
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Limitations: none"));
+    }
+    let _ = fs::remove_file(complete_store);
+
+    let empty = empty_store();
+    let empty_json =
+        parse_json_report(&run_args(&["doctor", "--format", "json"], &empty), "doctor");
+    assert_eq!(empty_json["coverage"]["status"], "empty");
+    assert_eq!(empty_json["coverage"]["limitations"], json!([]));
+    let empty_table = run_args(&["doctor"], &empty);
+    assert!(String::from_utf8_lossy(&empty_table.stdout).contains("Limitations: none"));
+    let empty_markdown = run_args(&["doctor", "--format", "markdown"], &empty);
+    assert!(String::from_utf8_lossy(&empty_markdown.stdout).contains("Limitations: none"));
+    let _ = fs::remove_file(empty);
 }
 
 #[test]

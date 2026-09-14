@@ -86,7 +86,9 @@ Every view returns:
     "archived_included": false,
     "subagents_included": false,
     "activity_start": null,
-    "activity_end": null
+    "activity_end": null,
+    "limitations": [],
+    "limitations_omitted": 0
   },
   "data": {}
 }
@@ -96,6 +98,10 @@ View-specific `data` must use named fields, not rendered text. A finding row
 must include `id`, `title`, `scope`, `target`, `impact`, `confidence`,
 `occurrences`, `distinct_sessions`, `action`, `evidence`, and `limitations`.
 Paths and excerpts are bounded and redacted before serialization.
+
+Coverage limitations are reported as bounded metadata with source provenance,
+selected session and record counts, and the affected lens names. They do not
+create findings from unknown evidence.
 
 ## `optimize`
 

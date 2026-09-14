@@ -72,6 +72,9 @@ extensions are kept explicit:
   cover multi-session spans, explicit empty/partial coverage, missing and
   invalid activity timestamps, distinct ingestion time, and deterministic JSON
   metadata.
+- `coverage_limitations_are_visible_in_table_markdown_and_json` covers
+  complete, partial, and empty coverage plus bounded ingestion diagnostics,
+  timestamp limitations, lens impact, and source-line provenance.
 - `reporting_period_filter_is_half_open_and_visible_in_human_and_json`,
   `empty_reporting_period_has_no_selected_activity`,
   `reporting_period_rejects_invalid_and_reversed_bounds`,
@@ -321,9 +324,20 @@ meaning or type of an existing field still requires a new schema version.
   "missing_activity_timestamps": non-negative integer,
   "invalid_activity_timestamps": non-negative integer,
   "session_count": non-negative integer,
-  "record_count": non-negative integer
+  "record_count": non-negative integer,
+  "limitations": [CoverageLimitation],
+  "limitations_omitted": non-negative integer
 }
 ```
+
+Each `CoverageLimitation` has `kind`, a provenance-preserving `source` with
+the canonical source kind, path, optional line, ingestion timestamp, and
+parser schema version, a bounded `message`, `selected_sessions`,
+`selected_records`, and bounded `affected_lenses`. Limitation kinds include
+`missing_lifecycle_timestamp`, `invalid_timestamp`, `oversized_line`,
+`unreadable`, and `metadata_conflict`; other persisted ingestion diagnostics
+retain their canonical kind. The list is bounded; `limitations_omitted` makes
+truncation explicit.
 
 The report covers exactly the selected derived store. It does not claim to
 cover all historical activity or currently available raw inputs. `refresh` is
@@ -339,6 +353,12 @@ field observations, not distinct instants: they include session
 the canonical record, message, file-operation, and token-usage timestamps.
 Missing fields increment `missing_activity_timestamps`; present values that do
 not pass the existing timestamp parser increment `invalid_activity_timestamps`.
+Missing turn lifecycle fields and invalid timestamp fields are also surfaced as
+actionable coverage limitations with their source provenance. Ingestion
+diagnostics are surfaced in the same metadata with the canonical source and
+line when available. Coverage limitations are metadata, not failure,
+rework, or usage findings: unknown or incomplete evidence is excluded from
+positive claims while unrelated valid evidence remains reportable.
 For messages, lifecycle events, file operations, and token usage, a missing
 event timestamp resolves from its canonical source-record timestamp when that
 record timestamp is valid. A resolved fallback is counted as a valid activity
