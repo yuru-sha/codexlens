@@ -609,14 +609,13 @@ fn call_file_operations(
     data: &CanonicalData,
     call: &ToolCall,
 ) -> Vec<(FileOperation, (String, String, String, String))> {
+    if is_wrapper_tool(call.tool_name.as_deref()) {
+        return Vec::new();
+    }
     let command = call
         .command
         .as_deref()
-        .or_else(|| {
-            (!is_wrapper_tool(call.tool_name.as_deref()))
-                .then_some(call.input_summary.as_deref())
-                .flatten()
-        })
+        .or(call.input_summary.as_deref())
         .unwrap_or_default();
     let cwd = call.cwd.clone().or_else(|| {
         context_cwd(data, call.session_id.as_deref(), call.turn_id.as_deref()).map(str::to_owned)
@@ -2245,6 +2244,16 @@ mod tests {
             .unwrap();
         assert_eq!(opaque_result.provenance.line, Some(9));
         assert!(!opaque_result.is_duplicate);
+
+        let structured_wrapper = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-structured-wrapper-b"))
+            .unwrap();
+        assert_eq!(
+            structured_wrapper.command.as_deref(),
+            Some("*** Update File: src/wrapper.rs")
+        );
 
         assert!(
             !data
