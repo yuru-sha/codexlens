@@ -192,7 +192,6 @@ pub(super) fn build_events(data: &AnalysisContext<'_>) -> Vec<FailureEvent> {
             .command
             .as_deref()
             .or_else(|| call.and_then(|call| call.command.as_deref()))
-            .or_else(|| call.and_then(|call| call.input_summary.as_deref()))
             .unwrap_or_default();
         let output = combined_result_output(result);
         let family = command_family(command);
@@ -364,5 +363,23 @@ mod tests {
                 .collect::<Vec<_>>()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn arbitrary_tool_input_is_not_used_as_a_failure_command() {
+        let parsed = parse_rollout_reader(
+            Path::new("fixture-failure-boundary.jsonl"),
+            PlainJsonlReader::new(Cursor::new(
+                br#"{"type":"session_meta","payload":{"id":"fixture-failure-boundary"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-failure-call","name":"exec_command","input":"cargo test"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-failure-call","exit_code":1,"status":"failed"}}"#,
+            )),
+        );
+        let data = normalize_rollout(&parsed);
+
+        let events = build_events(&AnalysisContext::new(&data));
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].family, "unknown_command");
     }
 }

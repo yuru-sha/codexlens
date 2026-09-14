@@ -893,9 +893,7 @@ fn surface_action(surface: &Surface, heavy_threshold: usize) -> Option<String> {
 
 fn is_heavy(surface: &Surface, threshold: usize) -> bool {
     surface.load_mode == SurfaceLoadMode::StartupFull
-        && surface
-            .startup_bytes
-            .is_some_and(|bytes| bytes >= threshold)
+        && surface.startup_bytes.is_some_and(|bytes| bytes > threshold)
 }
 
 fn heavy_startup_threshold(data: &CanonicalData) -> usize {
@@ -1000,24 +998,7 @@ fn surface_name_matches(kind: SurfaceKind, tool: Option<&str>, name: &str) -> bo
     let Some(tool) = tool.map(str::trim).filter(|tool| !tool.is_empty()) else {
         return false;
     };
-    let tool = tool.to_ascii_lowercase();
-    let name = name.to_ascii_lowercase();
-    match kind {
-        SurfaceKind::Skill => tool == name || tool.strip_prefix("skill:") == Some(name.as_str()),
-        SurfaceKind::McpServer => tool
-            .strip_prefix("mcp__")
-            .and_then(|value| value.split_once("__"))
-            .is_some_and(|(server, _)| server == name),
-        SurfaceKind::Plugin => tool
-            .strip_prefix("plugin:")
-            .or_else(|| tool.strip_prefix("plugin/"))
-            .is_some_and(|value| value == name),
-        SurfaceKind::Hook => tool
-            .strip_prefix("hook:")
-            .or_else(|| tool.strip_prefix("hook/"))
-            .is_some_and(|value| value == name),
-        _ => false,
-    }
+    crate::config::tool_matches_surface(kind, tool, name)
 }
 
 fn extend_evidence(target: &mut Vec<EvidenceRef>, values: Vec<EvidenceRef>) {
@@ -1485,6 +1466,21 @@ mod tests {
                 1,
             ),
         ];
+        for index in 0..8 {
+            let id = format!("baseline-rule-{index}");
+            let path = format!("/fixture/project/{id}.rules");
+            data.surfaces.push(surface(
+                &id,
+                SurfaceKind::Rule,
+                &id,
+                &path,
+                SurfaceScope::Project("/fixture/project".into()),
+                SurfaceLoadMode::StartupFull,
+                Some(0),
+                SurfaceUsageState::Used,
+                2,
+            ));
+        }
         data.instruction_snapshots = ["a", "b"]
             .into_iter()
             .enumerate()
@@ -1584,6 +1580,63 @@ mod tests {
             serde_json::to_vec(&waste_report).unwrap(),
             serde_json::to_vec(&waste(&reordered)).unwrap()
         );
+    }
+
+    #[test]
+    fn inventory_heavy_excludes_the_percentile_boundary() {
+        let mut data = view_fixture();
+        data.surfaces = vec![
+            surface(
+                "lower-rule",
+                SurfaceKind::Rule,
+                "lower.rules",
+                "/fixture/project/lower.rules",
+                SurfaceScope::Project("/fixture/project".into()),
+                SurfaceLoadMode::StartupFull,
+                Some(2048),
+                SurfaceUsageState::Used,
+                1,
+            ),
+            surface(
+                "percentile-rule",
+                SurfaceKind::Rule,
+                "percentile.rules",
+                "/fixture/project/percentile.rules",
+                SurfaceScope::Project("/fixture/project".into()),
+                SurfaceLoadMode::StartupFull,
+                Some(8192),
+                SurfaceUsageState::Used,
+                1,
+            ),
+        ];
+
+        let row = inventory(&data)
+            .rows
+            .into_iter()
+            .find(|row| row.id == "percentile-rule")
+            .expect("percentile row");
+        assert!(row.action.is_none());
+    }
+
+    #[test]
+    fn surface_matching_uses_canonical_identifier_forms() {
+        assert!(surface_name_matches(
+            SurfaceKind::Skill,
+            Some("skill/deploy"),
+            "deploy"
+        ));
+        for tool in ["docs/search", "docs::search", "mcp__docs__search"] {
+            assert!(surface_name_matches(
+                SurfaceKind::McpServer,
+                Some(tool),
+                "docs"
+            ));
+        }
+        assert!(!surface_name_matches(
+            SurfaceKind::McpServer,
+            Some("other/search"),
+            "docs"
+        ));
     }
 
     #[test]

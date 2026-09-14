@@ -1,0 +1,9 @@
+{"timestamp":"2025-12-01T00:00:00.000Z","type":"session_meta","payload":{"id":"main-old","cwd":"/fixture/old"}}
+{"timestamp":"2025-12-01T00:00:01.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"main-recent","cwd":"/fixture/main"}}
+{"timestamp":"2026-01-30T00:00:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"selection-call","name":"exec_command","input":{"argv":["cargo","test"]}}}
+{"timestamp":"2026-01-30T00:00:01.000Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"selection-call","command":["cargo","test"],"exit_code":0,"status":"completed"}}
+{"timestamp":"2026-01-30T00:00:02.000Z","type":"future_record","payload":{"fixture":true,"version":2}}
+{not valid json
+{"timestamp":"2026-01-29T00:00:00.000Z","type":"session_meta","payload":{"id":"child-recent","parent_id":"main-recent","cwd":"/fixture/child"}}
+{"timestamp":"2026-01-29T00:00:01.000Z","type":"event_msg","payload":{"type":"task_started"}}

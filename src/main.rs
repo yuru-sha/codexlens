@@ -30,7 +30,10 @@ use codexlens::discovery::{
 use codexlens::instructions::InstructionCaptureOptions;
 use codexlens::model::CanonicalData;
 use codexlens::normalize::normalize_rollout;
-use codexlens::period::{PeriodCoverage, PeriodCoverageState, ReportingPeriod, select_report_data};
+use codexlens::period::{
+    DEFAULT_SESSION_DAYS, PeriodCoverage, PeriodCoverageState, ReportingPeriod,
+    SessionSelectionOptions, select_eligible_session_data, select_report_data_with_options,
+};
 use codexlens::rollout::{RolloutParseOptions, parse_rollout};
 use codexlens::state::read_state_database;
 use codexlens::store::{IngestOptions, IngestReport, SCHEMA_VERSION, Store, StoreFreshness};
@@ -202,6 +205,8 @@ struct StoreOptions {
     scope: ScopeFilter,
     #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
     format: OutputFormat,
+    #[arg(long, value_name = "DAYS")]
+    days: Option<u64>,
     #[arg(
         long,
         help = "Read exactly this derived store without refreshing raw inputs"
@@ -1159,6 +1164,7 @@ fn render_sessions_table(
     ));
     if sessions.is_empty() {
         output.push_str("No selected sessions.\n");
+        output.push_str("Omitted sessions: 0\n");
         return output;
     }
     output.push('\n');
@@ -1191,7 +1197,10 @@ fn render_sessions_table(
                 .map(|path| bounded_path(Path::new(path))),
         );
     }
-    append_omitted(&mut output, sessions.len());
+    output.push_str(&format!(
+        "Omitted sessions: {}\n",
+        sessions.len().saturating_sub(CLI_VIEW_ROW_LIMIT)
+    ));
     output
 }
 
@@ -2076,6 +2085,7 @@ fn load_reporting(
 ) -> Result<(CanonicalData, StoreFreshness, Option<ReportingSelection>)> {
     let period = ReportingPeriod::from_bounds(options.since.as_deref(), options.until.as_deref())
         .map_err(anyhow::Error::new)?;
+    let selection_options = session_selection_options(options)?;
     let store_path = options.store_path()?;
     if !options.frozen {
         let refresh = RefreshOptions {
@@ -2093,18 +2103,13 @@ fn load_reporting(
         })?;
         report_auto_refresh(&outcome, &store_path);
     }
-    let (mut data, freshness) = load_store(&store_path)?;
-    select_sessions(
-        &mut data,
-        options.include_archived,
-        options.include_subagents,
-    );
+    let (data, freshness) = load_store(&store_path)?;
+    let selected = select_report_data_with_options(&data, period.as_ref(), &selection_options);
     let Some(period) = period else {
-        return Ok((data, freshness, None));
+        return Ok((selected.data, freshness, None));
     };
-    // Inspect source timestamps before boundary projection turns intentional trims into None.
-    let mut report_coverage = report_coverage_with_period(&data, &period);
-    let selected = select_report_data(&data, Some(&period));
+    let eligible_data = select_eligible_session_data(&data, &selection_options);
+    let mut report_coverage = report_coverage_with_period(&eligible_data, &period);
     report_coverage.session_count = selected.coverage.included_sessions;
     report_coverage.record_count = selected.coverage.included_records;
     report_coverage.status = match selected.coverage.state {
@@ -2145,54 +2150,15 @@ fn report_auto_refresh(outcome: &RefreshOutcome, store: &Path) {
     eprintln!("Store freshness: {}", outcome.freshness);
 }
 
-fn select_sessions(data: &mut CanonicalData, include_archived: bool, include_subagents: bool) {
-    let sessions = data
-        .sessions
-        .iter()
-        .filter(|session| {
-            (include_archived || !session_is_archived(session))
-                && (include_subagents || session.parent_id.is_none())
-        })
-        .map(|session| session.id.clone())
-        .collect::<BTreeSet<_>>();
-    let known_session_ids = data
-        .sessions
-        .iter()
-        .map(|session| session.id.clone())
-        .collect::<BTreeSet<_>>();
-    let allowed = |session_id: Option<&String>| {
-        session_id.is_none_or(|session_id| {
-            !known_session_ids.contains(session_id) || sessions.contains(session_id)
-        })
-    };
-    data.sessions
-        .retain(|session| sessions.contains(&session.id));
-    data.turns.retain(|turn| allowed(turn.session_id.as_ref()));
-    data.records
-        .retain(|record| allowed(record.session_id.as_ref()));
-    data.messages
-        .retain(|message| allowed(message.session_id.as_ref()));
-    data.tool_calls
-        .retain(|call| allowed(call.session_id.as_ref()));
-    data.tool_results
-        .retain(|result| allowed(result.session_id.as_ref()));
-    data.file_operations
-        .retain(|operation| allowed(operation.session_id.as_ref()));
-    data.token_usage
-        .retain(|usage| allowed(usage.session_id.as_ref()));
-    data.instruction_snapshots
-        .retain(|snapshot| allowed(snapshot.session_id.as_ref()));
-    data.instruction_joins
-        .retain(|join| sessions.contains(&join.session_id));
-}
-
-fn session_is_archived(session: &codexlens::model::Session) -> bool {
-    session.archive_state == Some(true)
-        || session.rollout_path.as_deref().is_some_and(|path| {
-            Path::new(path)
-                .components()
-                .any(|component| component.as_os_str() == "archived_sessions")
-        })
+fn session_selection_options(options: &StoreOptions) -> Result<SessionSelectionOptions> {
+    if options.days.is_some() && (options.since.is_some() || options.until.is_some()) {
+        bail!("--days cannot be combined with --since or --until");
+    }
+    Ok(SessionSelectionOptions {
+        days: options.days.unwrap_or(DEFAULT_SESSION_DAYS),
+        include_archived: options.include_archived,
+        include_subagents: options.include_subagents,
+    })
 }
 
 fn load_store(path: &Path) -> Result<(CanonicalData, StoreFreshness)> {
@@ -2337,7 +2303,7 @@ fn render_optimize_human_with_period(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, OutputFormat};
+    use super::{Cli, Command, OutputFormat, session_selection_options};
     use clap::Parser;
 
     #[test]
@@ -2393,6 +2359,40 @@ mod tests {
             Cli::try_parse_from(args).unwrap();
         }
         Cli::try_parse_from(["codexlens", "doctor", "--frozen"]).unwrap();
+    }
+
+    #[test]
+    fn reporting_commands_accept_session_selection_options() {
+        let Command::Sessions { store } = Cli::try_parse_from([
+            "codexlens",
+            "sessions",
+            "--include-archived",
+            "--include-subagents",
+            "--days",
+            "7",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected sessions command");
+        };
+        assert!(store.include_archived);
+        assert!(store.include_subagents);
+        assert_eq!(store.days, Some(7));
+        let Command::Sessions { store } = Cli::try_parse_from([
+            "codexlens",
+            "sessions",
+            "--days",
+            "7",
+            "--since",
+            "2026-01-01T00:00:00Z",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected sessions command");
+        };
+        assert!(session_selection_options(&store).is_err());
     }
 
     #[test]
