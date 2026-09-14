@@ -1741,10 +1741,19 @@ fn scope_matches(filter: &ScopeFilter, scope: &FindingScope) -> bool {
         ScopeFilter::Projects => !matches!(scope, FindingScope::Global),
         ScopeFilter::Project(root) => match scope {
             FindingScope::Global => false,
-            FindingScope::Project(path) | FindingScope::Instruction(path) => path.starts_with(root),
-            FindingScope::Path(path) => Path::new(path).starts_with(root),
+            FindingScope::Project(path) | FindingScope::Instruction(path) => {
+                scope_path_matches(root, path)
+            }
+            FindingScope::Path(path) => scope_path_matches(root, Path::new(path)),
         },
     }
+}
+
+fn scope_path_matches(root: &Path, path: &Path) -> bool {
+    path.starts_with(root)
+        || fs::canonicalize(path)
+            .ok()
+            .is_some_and(|canonical| canonical.starts_with(root))
 }
 
 const CLI_VIEW_ROW_LIMIT: usize = 50;
