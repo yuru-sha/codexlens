@@ -23,6 +23,9 @@ structured status, unmatched tool results, and repeated token snapshots.
 `rollout/tool-result-envelopes.jsonl` covers parsed renderer success, failure,
 timeout, malformed envelopes, and incidental failure words in successful output.
 
+`rollout/string-encoded-commands.jsonl` covers JSON-encoded function and custom
+tool arguments, file patches, malformed input, and wrapper-like text.
+
 `state/` contains synthetic SQL schemas for state adapter and store migration
 tests. `store/` contains synthetic rollout input and a version-one schema.
 
