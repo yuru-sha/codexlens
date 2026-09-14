@@ -6,7 +6,7 @@ user contract.
 
 ## Global options
 
-Every command except `query` accepts:
+Every analysis, view, doctor, and optimize command accepts:
 
 ```text
 --codex-home PATH       default: CODEX_HOME, otherwise platform default
@@ -25,6 +25,11 @@ ingestion set; it changes only rendered rows and rankings.
 The default store directory is created with owner-only permissions. An
 explicit relative `--store` is allowed for tests and deliberate project-local
 use. `--codex-home` must be an absolute directory.
+
+`refresh` and `monitor` are explicit ingestion workflows with their own
+command-specific options. They do not accept the reporting-only options above
+such as `--scope`, `--frozen`, or `--format`; they keep their operational
+progress output in the default human-readable form.
 
 ## Pipeline
 
@@ -107,3 +112,7 @@ CLI tests must cover first-run auto-analysis, default store location, scope
 filtering, archive/sub-agent selection, bounded human output, JSON purity,
 read-only query behavior, and an end-to-end optimize plan over a synthetic
 configuration and two synthetic sessions.
+
+The explicit `refresh` and `monitor` ingestion workflows are tested with their
+command-specific option sets; reporting-only options are not part of those
+commands.
