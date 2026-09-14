@@ -677,14 +677,15 @@ pub fn failures_with_options(data: &CanonicalData, options: &AnalysisOptions) ->
             if transient_failure_category(&category) {
                 return None;
             }
-            let opportunity = finding_opportunity(
-                &finding,
-                finding_target(&finding),
+            let action = if finding.observed_commands.is_empty() {
+                finding.suggested_action.clone()
+            } else {
                 format!(
                     "Fix the recurring {category} prerequisite for {}",
                     finding_target(&finding)
-                ),
-            );
+                )
+            };
+            let opportunity = finding_opportunity(&finding, finding_target(&finding), action);
             if opportunity.evidence.is_empty() {
                 return None;
             }
@@ -1235,7 +1236,6 @@ fn event_timestamp_is_known(
 fn canonical_tool_name(name: &str) -> String {
     let normalized = name.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "shell" | "exec" | "exec_command" => "exec_command".to_owned(),
         "" => "unknown_tool".to_owned(),
         _ => bounded_excerpt(&normalized, 128),
     }
@@ -1640,6 +1640,36 @@ mod tests {
     }
 
     #[test]
+    fn wrapper_tool_names_are_not_merged_into_shell_usage() {
+        assert_eq!(canonical_tool_name("exec_command"), "exec_command");
+        assert_eq!(canonical_tool_name("exec"), "exec");
+        assert_eq!(canonical_tool_name("js"), "js");
+        assert_eq!(canonical_tool_name("wait"), "wait");
+    }
+
+    #[test]
+    fn failure_view_does_not_recommend_shell_prerequisites_for_wrappers() {
+        let parsed = parse_rollout_reader(
+            Path::new("wrapper-tools.jsonl"),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../../tests/fixtures/rollout/wrapper-tools.jsonl"
+            ))),
+        );
+        let report = failures(&normalize_rollout(&parsed));
+        let wrapper_rows = report
+            .rows
+            .iter()
+            .filter(|row| row.command_family == "no_canonical_command")
+            .collect::<Vec<_>>();
+        assert!(!wrapper_rows.is_empty());
+        assert!(wrapper_rows.iter().all(|row| {
+            row.opportunity
+                .action
+                .contains("no shell-command prerequisite")
+        }));
+    }
+
+    #[test]
     fn prompts_and_usage_have_distinct_classified_rows() {
         let mut data = view_fixture();
         data.tool_calls = vec![ToolCall {
@@ -1647,7 +1677,7 @@ mod tests {
             call_id: Some("call-a".to_owned()),
             session_id: Some("view-session-a".to_owned()),
             turn_id: Some("view-turn-a".to_owned()),
-            tool_name: Some("exec".to_owned()),
+            tool_name: Some("exec_command".to_owned()),
             input_summary: None,
             command: Some("cargo test".to_owned()),
             cwd: Some("/fixture/project".to_owned()),
