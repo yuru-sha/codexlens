@@ -106,6 +106,12 @@ and renderer output are not commands. Values such as `exec_command const`,
 `exec_command s:`, and `s:12000});` are invalid canonical names and must be
 rejected before storage.
 
+Wrapper tools are a separate boundary: preserve names such as `exec`, `js`,
+and `wait` as observed tool names. Wrapper source and renderer text are not
+canonical commands. When a wrapper does not expose one safely structured
+nested call, retain the bounded input and provenance as an opaque tool call;
+do not infer a shell command or synthesize a nested result.
+
 ### 3.2 Session selection
 
 A session is a main session when `parent_id` is absent and a sub-agent when

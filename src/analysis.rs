@@ -585,6 +585,7 @@ struct FailureEvent {
     tool: String,
     family: String,
     category: String,
+    has_canonical_command: bool,
     structured: bool,
     description: String,
     position: Position,
