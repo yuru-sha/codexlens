@@ -1,6 +1,6 @@
 //! Doctor report and proposal summary presentation.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -716,34 +716,31 @@ fn report_coverage_filtered(
         missing_activity_timestamps,
         invalid_activity_timestamps,
         mut limitations,
+        limitations_omitted,
         period: _,
     } = observations;
-    limitations.sort_by(|left, right| {
-        limitation_priority(&left.kind)
-            .cmp(&limitation_priority(&right.kind))
-            .then_with(|| left.kind.cmp(&right.kind))
-            .then_with(|| left.source.path.cmp(&right.source.path))
-            .then_with(|| left.source.line.cmp(&right.source.line))
-            .then_with(|| left.message.cmp(&right.message))
-    });
-    let limitations_omitted = limitations.len().saturating_sub(MAX_REPORT_EVIDENCE);
+    limitations.sort_by(compare_limitations);
     limitations.truncate(MAX_REPORT_EVIDENCE);
     let limitations: Vec<CoverageLimitation> = if limitations.is_empty() {
         Vec::new()
     } else {
-        let source_impacts = source_impact_index(impact_data);
+        let source_impacts = source_impact_index(impact_data, &limitations);
         limitations
             .into_iter()
             .map(|limitation| {
                 let (selected_sessions, selected_records) =
-                    source_impact(&source_impacts, &limitation.source);
+                    source_impact(&source_impacts, limitation.source);
                 CoverageLimitation {
-                    kind: limitation.kind,
-                    source: limitation.source,
+                    kind: limitation.kind.to_owned(),
+                    source: limitation.source.clone(),
                     message: limitation.message,
                     selected_sessions,
                     selected_records,
-                    affected_lenses: limitation.affected_lenses,
+                    affected_lenses: limitation
+                        .affected_lenses
+                        .iter()
+                        .map(|lens| (*lens).to_owned())
+                        .collect(),
                 }
             })
             .collect()
@@ -790,38 +787,40 @@ fn report_coverage_filtered(
     }
 }
 
-struct CoverageObservations<'a> {
-    period: Option<&'a ReportingPeriod>,
+struct CoverageObservations<'period, 'source> {
+    period: Option<&'period ReportingPeriod>,
     timestamps: Vec<(Timestamp, String)>,
     missing_activity_timestamps: usize,
     invalid_activity_timestamps: usize,
-    limitations: Vec<PendingCoverageLimitation>,
+    limitations: Vec<PendingCoverageLimitation<'source>>,
+    limitations_omitted: usize,
 }
 
-struct PendingCoverageLimitation {
-    kind: String,
-    source: SourceRef,
+struct PendingCoverageLimitation<'source> {
+    kind: &'static str,
+    source: &'source SourceRef,
     message: String,
-    affected_lenses: Vec<String>,
+    affected_lenses: &'static [&'static str],
 }
 
-impl<'a> CoverageObservations<'a> {
-    fn new(period: Option<&'a ReportingPeriod>) -> Self {
+impl<'period, 'source> CoverageObservations<'period, 'source> {
+    fn new(period: Option<&'period ReportingPeriod>) -> Self {
         Self {
             period,
             timestamps: Vec::new(),
             missing_activity_timestamps: 0,
             invalid_activity_timestamps: 0,
             limitations: Vec::new(),
+            limitations_omitted: 0,
         }
     }
 
     fn observe_timestamp(
         &mut self,
         timestamp: Option<&str>,
-        source: &SourceRef,
+        source: &'source SourceRef,
         field: &str,
-        missing_kind: &str,
+        missing_kind: &'static str,
     ) {
         let Some(timestamp) = timestamp else {
             self.missing_activity_timestamps += 1;
@@ -852,10 +851,10 @@ impl<'a> CoverageObservations<'a> {
     fn observe_event_timestamp(
         &mut self,
         value: Option<&str>,
-        source: &SourceRef,
+        source: &'source SourceRef,
         record_times: &HashMap<SourceKey, Option<Timestamp>>,
         field: &str,
-        missing_kind: &str,
+        missing_kind: &'static str,
     ) {
         if let Some(value) = value {
             self.observe_timestamp(Some(value), source, field, missing_kind);
@@ -867,7 +866,7 @@ impl<'a> CoverageObservations<'a> {
         }
     }
 
-    fn add_diagnostic(&mut self, diagnostic: &crate::model::CanonicalDiagnostic) {
+    fn add_diagnostic(&mut self, diagnostic: &'source crate::model::CanonicalDiagnostic) {
         self.add_limitation(
             diagnostic.kind.as_str(),
             &diagnostic.source,
@@ -878,21 +877,35 @@ impl<'a> CoverageObservations<'a> {
 
     fn add_limitation(
         &mut self,
-        kind: &str,
-        source: &SourceRef,
+        kind: &'static str,
+        source: &'source SourceRef,
         message: String,
-        affected_lenses: &[&str],
+        affected_lenses: &'static [&'static str],
     ) {
         self.limitations.push(PendingCoverageLimitation {
-            kind: kind.to_owned(),
-            source: source.clone(),
+            kind,
+            source,
             message,
-            affected_lenses: affected_lenses
-                .iter()
-                .map(|lens| (*lens).to_owned())
-                .collect(),
+            affected_lenses,
         });
+        if self.limitations.len() > MAX_REPORT_EVIDENCE {
+            self.limitations.sort_by(compare_limitations);
+            self.limitations.pop();
+            self.limitations_omitted += 1;
+        }
     }
+}
+
+fn compare_limitations(
+    left: &PendingCoverageLimitation<'_>,
+    right: &PendingCoverageLimitation<'_>,
+) -> std::cmp::Ordering {
+    limitation_priority(left.kind)
+        .cmp(&limitation_priority(right.kind))
+        .then_with(|| left.kind.cmp(right.kind))
+        .then_with(|| left.source.path.cmp(&right.source.path))
+        .then_with(|| left.source.line.cmp(&right.source.line))
+        .then_with(|| left.message.cmp(&right.message))
 }
 
 const TIMESTAMP_LENSES: &[&str] = &["corrections", "rework", "stuck", "verification", "usage"];
@@ -943,14 +956,35 @@ struct SourceImpact {
 
 type SourceImpactIndex = HashMap<(u8, std::path::PathBuf), SourceImpact>;
 
-fn source_impact_index(data: &CanonicalData) -> SourceImpactIndex {
+fn source_impact_index(
+    data: &CanonicalData,
+    limitations: &[PendingCoverageLimitation<'_>],
+) -> SourceImpactIndex {
     let mut index = SourceImpactIndex::new();
+    let mut target_paths = HashMap::<u8, HashSet<std::path::PathBuf>>::new();
+    for limitation in limitations {
+        let kind = source_kind_key(limitation.source.kind);
+        target_paths
+            .entry(kind)
+            .or_default()
+            .insert(limitation.source.path.clone());
+        index
+            .entry((kind, limitation.source.path.clone()))
+            .or_default();
+    }
     for session in &data.sessions {
-        add_source_impact(&mut index, &session.provenance, Some(&session.id), false);
+        add_source_impact(
+            &mut index,
+            &target_paths,
+            &session.provenance,
+            Some(&session.id),
+            false,
+        );
     }
     for turn in &data.turns {
         add_source_impact(
             &mut index,
+            &target_paths,
             &turn.provenance,
             turn.session_id.as_deref(),
             false,
@@ -959,6 +993,7 @@ fn source_impact_index(data: &CanonicalData) -> SourceImpactIndex {
     for record in &data.records {
         add_source_impact(
             &mut index,
+            &target_paths,
             &record.provenance,
             record.session_id.as_deref(),
             true,
@@ -967,6 +1002,7 @@ fn source_impact_index(data: &CanonicalData) -> SourceImpactIndex {
     for message in &data.messages {
         add_source_impact(
             &mut index,
+            &target_paths,
             &message.provenance,
             message.session_id.as_deref(),
             false,
@@ -975,6 +1011,7 @@ fn source_impact_index(data: &CanonicalData) -> SourceImpactIndex {
     for call in &data.tool_calls {
         add_source_impact(
             &mut index,
+            &target_paths,
             &call.provenance,
             call.session_id.as_deref(),
             false,
@@ -983,6 +1020,7 @@ fn source_impact_index(data: &CanonicalData) -> SourceImpactIndex {
     for result in &data.tool_results {
         add_source_impact(
             &mut index,
+            &target_paths,
             &result.provenance,
             result.session_id.as_deref(),
             false,
@@ -991,6 +1029,7 @@ fn source_impact_index(data: &CanonicalData) -> SourceImpactIndex {
     for operation in &data.file_operations {
         add_source_impact(
             &mut index,
+            &target_paths,
             &operation.provenance,
             operation.session_id.as_deref(),
             false,
@@ -999,6 +1038,7 @@ fn source_impact_index(data: &CanonicalData) -> SourceImpactIndex {
     for usage in &data.token_usage {
         add_source_impact(
             &mut index,
+            &target_paths,
             &usage.provenance,
             usage.session_id.as_deref(),
             false,
@@ -1007,26 +1047,41 @@ fn source_impact_index(data: &CanonicalData) -> SourceImpactIndex {
     for snapshot in &data.instruction_snapshots {
         add_source_impact(
             &mut index,
+            &target_paths,
             &snapshot.provenance,
             snapshot.session_id.as_deref(),
             false,
         );
     }
     for join in &data.instruction_joins {
-        add_source_impact(&mut index, &join.provenance, Some(&join.session_id), false);
+        add_source_impact(
+            &mut index,
+            &target_paths,
+            &join.provenance,
+            Some(&join.session_id),
+            false,
+        );
     }
     index
 }
 
 fn add_source_impact(
     index: &mut SourceImpactIndex,
+    target_paths: &HashMap<u8, HashSet<std::path::PathBuf>>,
     source: &SourceRef,
     session_id: Option<&str>,
     is_record: bool,
 ) {
-    let impact = index
-        .entry((source_kind_key(source.kind), source.path.clone()))
-        .or_default();
+    let kind = source_kind_key(source.kind);
+    if !target_paths
+        .get(&kind)
+        .is_some_and(|paths| paths.contains(&source.path))
+    {
+        return;
+    }
+    let Some(impact) = index.get_mut(&(kind, source.path.clone())) else {
+        return;
+    };
     if let Some(session_id) = session_id {
         impact.sessions.insert(session_id.to_owned());
     }
