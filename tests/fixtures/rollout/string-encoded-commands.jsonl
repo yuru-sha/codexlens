@@ -1,0 +1,19 @@
+{"timestamp":"2026-01-02T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-string-commands-session","cwd":"/fixture/project"}}
+{"timestamp":"2026-01-02T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"fixture-string-commands-turn","cwd":"/fixture/project"}}
+{"timestamp":"2026-01-02T00:00:02.000Z","type":"response_item","payload":{"type":"function_call","call_id":"fixture-string-function-call","name":"exec_command","arguments":"{\"cmd\":\"cargo run\"}"}}
+{"timestamp":"2026-01-02T00:00:03.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-string-argv-call","name":"exec_command","input":"{\"argv\":[\"cargo\",\"check\"]}"}}
+{"timestamp":"2026-01-02T00:00:04.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-string-command-array-call","name":"exec_command","input":"{\"command\":[\"cargo\",\"build\"]}"}}
+{"timestamp":"2026-01-02T00:00:05.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-string-file-call","name":"apply_patch","input":"unstructured input","arguments":"{\"command\":\"*** Update File: src/lib.rs\\n@@\\n-old\\n+new\\n\"}"}}
+{"timestamp":"2026-01-02T00:00:06.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec_command","input":"{\"cmd\":\"cargo check\"}"}}
+{"timestamp":"2026-01-02T00:00:07.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","command":["cargo","check"],"exit_code":0,"status":"completed"}}
+{"timestamp":"2026-01-02T00:00:08.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-string-second-file-call","name":"apply_patch","input":"unstructured input","arguments":"{\"command\":\"*** Update File: src/second.rs\\n@@\\n-old\\n+new\\n\"}"}}
+{"timestamp":"2026-01-02T00:00:09.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-string-fallback-call","name":"exec_command","input":"unstructured input","arguments":"{\"cmd\":\"cargo fmt\"}"}}
+{"timestamp":"2026-01-02T00:00:10.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-string-malformed-call","name":"exec_command","input":"{\"cmd\":\"cargo test\""}}
+{"timestamp":"2026-01-02T00:00:11.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-string-wrapper-call","name":"exec_command","input":"exec_command s:12000});"}}
+{"timestamp":"2026-01-02T00:00:12.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-string-natural-call","name":"exec_command","input":"Please run cargo test"}}
+{"timestamp":"2026-01-02T00:00:13.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"fixture-string-function-call","exit_code":1,"status":"failed","output":"fixture failure"}}
+{"timestamp":"2026-01-02T00:00:14.000Z","type":"event_msg","payload":{"type":"turn_complete"}}
+{"timestamp":"2026-01-02T00:00:15.000Z","type":"session_meta","payload":{"id":"fixture-string-commands-session-2","cwd":"/fixture/project"}}
+{"timestamp":"2026-01-02T00:00:16.000Z","type":"turn_context","payload":{"turn_id":"fixture-string-commands-turn-2","cwd":"/fixture/project"}}
+{"timestamp":"2026-01-02T00:00:17.000Z","type":"response_item","payload":{"type":"function_call","call_id":"fixture-string-function-call-2","name":"exec_command","arguments":"{\"cmd\":\"cargo run\"}"}}
+{"timestamp":"2026-01-02T00:00:18.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"fixture-string-function-call-2","exit_code":1,"status":"failed","output":"fixture failure"}}

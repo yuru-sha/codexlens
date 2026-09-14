@@ -10,11 +10,12 @@ use crate::instructions::{
 use crate::model::{
     CanonicalData, CanonicalDiagnostic, DiagnosticKind, FileOperation, MAX_MESSAGE_BYTES,
     MAX_TOOL_OUTPUT_BYTES, MAX_TOOL_SUMMARY_BYTES, Message, MessageRole, OutcomeSource, Record,
-    RecordKind, Session, SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult, Turn,
-    TurnLifecycleEvent, merge_session_fields, normalize_path,
+    RecordKind, Session, SourceKind, SourceRef, TokenUsage, ToolCall, ToolOutcome, ToolResult,
+    Turn, TurnLifecycleEvent, merge_session_fields, normalize_path,
 };
 use crate::rollout::{
     KnownRecordType, ParseDiagnostic, RolloutInstructionContext, RolloutParseResult, RolloutRecord,
+    rollout_id_from_path,
 };
 use crate::state::StateReadResult;
 
@@ -179,41 +180,34 @@ fn normalize_records_with_resolver(
                     source.clone(),
                     &mut data.diagnostics,
                 ) {
-                    if matched_state_session_id
-                        .as_deref()
-                        .is_some_and(|state_id| state_id != candidate.id)
-                    {
-                        data.diagnostics.push(CanonicalDiagnostic {
-                            kind: DiagnosticKind::MetadataConflict,
-                            source: source.clone(),
-                            session_id: Some(candidate.id.clone()),
-                            message: bounded(&format!(
-                                "state and rollout session identities differ: state={:?}, rollout={:?}",
-                                matched_state_session_id, candidate.id
-                            )),
+                    let previous_session_id = current_session_id.clone();
+                    let previous_was_state_fallback =
+                        previous_session_id.as_deref().is_some_and(|id| {
+                            sessions
+                                .get(id)
+                                .is_some_and(|session| session.provenance.kind == SourceKind::State)
                         });
-                    }
-                    if let Some(state_session) =
-                        state.iter().find(|session| session.id == candidate.id)
-                    {
-                        if state_session
-                            .rollout_path
+                    let session_id = merge_rollout_session(
+                        &mut sessions,
+                        candidate,
+                        state,
+                        &mut data.diagnostics,
+                    );
+                    if previous_was_state_fallback {
+                        if let Some(previous_session_id) = previous_session_id
                             .as_deref()
-                            .is_some_and(|path| !same_path(Path::new(path), &source.path))
+                            .filter(|previous| *previous != session_id)
                         {
-                            data.diagnostics.push(CanonicalDiagnostic {
-                                kind: DiagnosticKind::MetadataConflict,
-                                source: source.clone(),
-                                session_id: Some(candidate.id.clone()),
-                                message: bounded(
-                                    "state and rollout session paths differ; state metadata was retained as enrichment",
-                                ),
-                            });
+                            rekey_session_references(
+                                &mut data,
+                                &mut sessions,
+                                previous_session_id,
+                                &session_id,
+                            );
                         }
                     }
-                    current_session_id = Some(candidate.id.clone());
+                    current_session_id = Some(session_id);
                     current_turn_id = None;
-                    merge_rollout_session(&mut sessions, candidate, state, &mut data.diagnostics);
                 }
             }
             crate::rollout::RolloutRecordKind::Known {
@@ -612,11 +606,15 @@ fn call_file_operations(
     data: &CanonicalData,
     call: &ToolCall,
 ) -> Vec<(FileOperation, (String, String, String, String))> {
-    let command = call
-        .command
-        .as_deref()
-        .or(call.input_summary.as_deref())
-        .unwrap_or_default();
+    if is_wrapper_tool(call.tool_name.as_deref()) {
+        return Vec::new();
+    }
+    let tool = normalize_token(call.tool_name.as_deref().unwrap_or_default()).to_ascii_lowercase();
+    let command = match call.command.as_deref() {
+        Some(command) => command,
+        None if !is_shell_tool(&tool) => call.input_summary.as_deref().unwrap_or_default(),
+        _ => "",
+    };
     let cwd = call.cwd.clone().or_else(|| {
         context_cwd(data, call.session_id.as_deref(), call.turn_id.as_deref()).map(str::to_owned)
     });
@@ -664,76 +662,61 @@ fn append_observed_file_operations(
     if session_id.is_none() {
         return;
     }
-    let text = command_payload_text(command);
     let tool = normalize_token(tool_name).to_ascii_lowercase();
-    let explicit_tool = matches!(
-        tool.as_str(),
-        "apply_patch" | "edit_file" | "write_file" | "create_file" | "replace_file"
-    );
+    let file_tool = is_file_operation_tool(&tool);
+    let shell_tool = is_shell_tool(&tool);
+    let wrapper_tool = is_wrapper_tool(Some(tool_name));
     let mut observed = Vec::new();
-    let mut patch_operation = None;
-    for line in text.lines() {
-        let Some((operation, path)) = [
-            ("*** Update File:", "edit"),
-            ("*** Add File:", "create"),
-            ("*** Delete File:", "delete"),
-        ]
-        .iter()
-        .find_map(|(marker, operation)| {
-            line.trim()
-                .strip_prefix(marker)
-                .map(|path| (*operation, path.trim().to_owned()))
-        }) else {
-            continue;
-        };
-        patch_operation = Some(operation);
-        if !path.is_empty() {
-            observed.push((operation.to_owned(), path));
-        }
-    }
-    if observed.is_empty() && explicit_tool {
-        if let Some(path) = json_string_field(command, &["path", "file_path", "filename"])
-            .filter(|path| likely_file_path(path))
-            .or_else(|| {
-                let path = command.trim();
-                likely_file_path(path).then(|| path.to_owned())
-            })
-        {
-            observed.push((
-                if tool == "create_file" {
-                    "create".to_owned()
-                } else {
-                    patch_operation.unwrap_or("edit").to_owned()
-                },
-                path,
-            ));
-        }
-    }
-    if observed.is_empty() {
-        let tokens = text.split_whitespace().collect::<Vec<_>>();
-        for (index, token) in tokens.iter().enumerate() {
-            let operation = token.starts_with('>').then_some("write");
-            let Some(operation) = operation else {
+    if !shell_tool && !wrapper_tool {
+        let text = command_payload_text(command);
+        let mut patch_operation = None;
+        for line in text.lines() {
+            let Some((operation, path)) =
+                PATCH_FILE_MARKERS.iter().find_map(|(marker, operation)| {
+                    line.trim()
+                        .strip_prefix(marker)
+                        .map(|path| (*operation, path.trim().to_owned()))
+                })
+            else {
                 continue;
             };
-            let path = if *token == ">" || *token == ">>" {
-                tokens.get(index + 1).copied()
-            } else {
-                token.strip_prefix('>')
-            };
-            if let Some(path) = path.filter(|path| !path.is_empty()) {
+            patch_operation = Some(operation);
+            if likely_file_path(&path) {
+                observed.push((operation.to_owned(), path));
+            }
+        }
+        if observed.is_empty() && file_tool {
+            if let Some(path) = json_string_field(command, &["path", "file_path", "filename"])
+                .filter(|path| likely_file_path(path))
+                .or_else(|| {
+                    let path = command.trim();
+                    likely_file_path(path).then(|| path.to_owned())
+                })
+            {
                 observed.push((
-                    operation.to_owned(),
-                    path.trim_matches(|c| c == '\'' || c == '"').to_owned(),
+                    if tool == "create_file" {
+                        "create".to_owned()
+                    } else {
+                        patch_operation.unwrap_or("edit").to_owned()
+                    },
+                    path,
                 ));
             }
         }
     }
+    if shell_tool && !has_patch_marker(command) {
+        observed.extend(
+            shell_redirection_targets(command)
+                .into_iter()
+                .map(|path| ("write".to_owned(), path)),
+        );
+    } else if !shell_tool && observed.is_empty() {
+        return;
+    }
     for (operation, path) in observed {
-        let path = normalize_path(&path);
-        if path.is_empty() {
+        let Some(path) = normalize_file_operation_path(&path) else {
             continue;
-        }
+        };
         operations.push(FileOperation {
             session_id: session_id.clone(),
             turn_id: turn_id.clone(),
@@ -743,6 +726,168 @@ fn append_observed_file_operations(
             provenance: provenance.clone(),
         });
     }
+}
+
+const PATCH_FILE_MARKERS: [(&str, &str); 3] = [
+    ("*** Update File:", "edit"),
+    ("*** Add File:", "create"),
+    ("*** Delete File:", "delete"),
+];
+
+fn has_patch_marker(text: &str) -> bool {
+    text.lines().any(|line| {
+        PATCH_FILE_MARKERS
+            .iter()
+            .any(|(marker, _)| line.trim().starts_with(marker))
+    })
+}
+
+fn is_file_operation_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "apply_patch" | "edit_file" | "write_file" | "create_file" | "replace_file"
+    )
+}
+
+fn is_shell_tool(tool: &str) -> bool {
+    matches!(tool, "exec_command" | "shell")
+}
+
+fn shell_redirection_targets(command: &str) -> Vec<String> {
+    if serde_json::from_str::<Value>(command).is_ok() {
+        return Vec::new();
+    }
+    let chars = command.chars().collect::<Vec<_>>();
+    let mut targets = Vec::new();
+    let mut index = 0;
+    let mut quote = None;
+    while index < chars.len() {
+        let character = chars[index];
+        if let Some(delimiter) = quote {
+            if character == '\\' && delimiter == '"' {
+                index = (index + 2).min(chars.len());
+                continue;
+            }
+            if character == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            index += 1;
+            continue;
+        }
+        if character != '>' {
+            index += 1;
+            continue;
+        }
+        let mut target_start = index + 1;
+        if chars.get(target_start) == Some(&'>') {
+            target_start += 1;
+        }
+        while chars
+            .get(target_start)
+            .is_some_and(|character| character.is_whitespace())
+        {
+            target_start += 1;
+        }
+        if chars.get(target_start) == Some(&'&') {
+            index = target_start + 1;
+            continue;
+        }
+        let (target, next_index) = shell_redirection_target(&chars, target_start);
+        if let Some(target) = target {
+            if normalize_file_operation_path(&target).is_some() {
+                targets.push(target);
+            }
+        }
+        index = next_index.max(index + 1);
+    }
+    targets
+}
+
+fn shell_redirection_target(chars: &[char], start: usize) -> (Option<String>, usize) {
+    let Some(&first) = chars.get(start) else {
+        return (None, chars.len());
+    };
+    if shell_redirection_boundary(first) {
+        return (None, start + 1);
+    }
+    if matches!(first, '\'' | '"') {
+        let mut index = start + 1;
+        while index < chars.len() {
+            if chars[index] == '\\' && first == '"' {
+                index = (index + 2).min(chars.len());
+                continue;
+            }
+            if chars[index] == first {
+                let next = index + 1;
+                let fragmented = chars
+                    .get(next)
+                    .is_some_and(|character| !shell_redirection_boundary(*character));
+                return (
+                    (!fragmented).then(|| chars[start + 1..index].iter().collect()),
+                    next,
+                );
+            }
+            index += 1;
+        }
+        return (None, chars.len());
+    }
+    let mut end = start;
+    while chars
+        .get(end)
+        .is_some_and(|character| !shell_redirection_boundary(*character))
+    {
+        end += 1;
+    }
+    (Some(chars[start..end].iter().collect()), end)
+}
+
+fn shell_redirection_boundary(character: char) -> bool {
+    character.is_whitespace() || matches!(character, ';' | '|' | '&' | '<' | '>' | '(' | ')')
+}
+
+fn normalize_file_operation_path(path: &str) -> Option<String> {
+    let path = path.trim();
+    let path = match (path.chars().next(), path.chars().last()) {
+        (Some(first), Some(last)) if matches!(first, '\'' | '"') => {
+            if first != last {
+                return None;
+            }
+            let start = first.len_utf8();
+            let end = path.len().checked_sub(last.len_utf8())?;
+            path.get(start..end)?
+        }
+        (Some(_), Some('\'' | '"')) => return None,
+        _ => path,
+    }
+    .trim();
+    if path.is_empty()
+        || path
+            .chars()
+            .any(|character| character == '\n' || character == '\r')
+        || path.starts_with(['{', '['])
+    {
+        return None;
+    }
+    let normalized = normalize_path(path);
+    let lower = normalized.to_ascii_lowercase();
+    if normalized.is_empty()
+        || lower == "/dev/null"
+        || lower.starts_with("/dev/null/")
+        || normalized == "="
+        || normalized.starts_with('&')
+        || normalized == "const"
+        || (lower.starts_with("s:") && lower.ends_with("});"))
+        || lower.ends_with("});")
+        || normalized.contains(['<', '>'])
+    {
+        return None;
+    }
+    Some(normalized)
 }
 
 fn operation_identity_path(path: &str, cwd: Option<&str>) -> String {
@@ -756,10 +901,8 @@ fn operation_identity_path(path: &str, cwd: Option<&str>) -> String {
 
 fn likely_file_path(path: &str) -> bool {
     let path = path.trim();
-    !path.is_empty()
-        && !path.contains(['\n', '\r'])
-        && !path.starts_with(['{', '['])
-        && (!path.chars().any(char::is_whitespace) || path.starts_with(['/', '.', '~']))
+    (!path.chars().any(char::is_whitespace) || path.starts_with(['/', '.', '~']))
+        && normalize_file_operation_path(path).is_some()
 }
 
 fn canonical_command_value(value: &Value) -> String {
@@ -793,11 +936,16 @@ fn structured_command_value(value: &Value) -> Option<String> {
 }
 
 fn structured_input_command(payload: &Map<String, Value>) -> Option<String> {
-    payload
-        .get("input")
-        .or_else(|| payload.get("arguments"))
-        .filter(|value| value.is_object() || value.is_array())
-        .and_then(structured_command_value)
+    ["input", "arguments"].iter().find_map(|key| {
+        payload.get(*key).and_then(|value| match value {
+            Value::String(encoded) => serde_json::from_str::<Value>(encoded)
+                .ok()
+                .filter(|value| value.is_object() || value.is_array())
+                .and_then(|value| structured_command_value(&value)),
+            value if value.is_object() || value.is_array() => structured_command_value(value),
+            _ => None,
+        })
+    })
 }
 
 fn result_command_value(value: &Value) -> Option<String> {
@@ -948,12 +1096,127 @@ fn matching_state_session<'a>(
     state: &'a [Session],
 ) -> Option<&'a Session> {
     let path = path?;
-    state.iter().find(|session| {
-        session.rollout_path.as_deref().is_some_and(|rollout_path| {
-            let rollout_path = std::path::Path::new(rollout_path);
-            same_path(rollout_path, path)
+    state
+        .iter()
+        .find(|session| rollout_path_matches(session.rollout_path.as_deref(), path))
+}
+
+fn matching_state_session_for_candidate<'a>(
+    candidate: &Session,
+    state: &'a [Session],
+) -> Option<&'a Session> {
+    state
+        .iter()
+        .find(|session| session.id == candidate.id)
+        .or_else(|| {
+            state.iter().find(|session| {
+                candidate.rollout_path.as_deref().is_some_and(|path| {
+                    rollout_path_matches(session.rollout_path.as_deref(), Path::new(path))
+                })
+            })
         })
-    })
+        .or_else(|| {
+            state
+                .iter()
+                .find(|session| identities_match(candidate, session))
+        })
+}
+
+fn rekey_session_references(
+    data: &mut CanonicalData,
+    sessions: &mut BTreeMap<String, Session>,
+    from: &str,
+    to: &str,
+) {
+    if from == to {
+        return;
+    }
+    let update = |session_id: &mut Option<String>| {
+        if session_id.as_deref() == Some(from) {
+            *session_id = Some(to.to_owned());
+        }
+    };
+    for session in data.sessions.iter_mut() {
+        update(&mut session.parent_id);
+    }
+    for session in sessions.values_mut() {
+        update(&mut session.parent_id);
+    }
+    for turn in &mut data.turns {
+        update(&mut turn.session_id);
+    }
+    for record in &mut data.records {
+        update(&mut record.session_id);
+    }
+    for message in &mut data.messages {
+        update(&mut message.session_id);
+    }
+    for tool_call in &mut data.tool_calls {
+        update(&mut tool_call.session_id);
+    }
+    for tool_result in &mut data.tool_results {
+        update(&mut tool_result.session_id);
+    }
+    for operation in &mut data.file_operations {
+        update(&mut operation.session_id);
+    }
+    for usage in &mut data.token_usage {
+        update(&mut usage.session_id);
+    }
+    for snapshot in &mut data.instruction_snapshots {
+        update(&mut snapshot.session_id);
+    }
+    for join in &mut data.instruction_joins {
+        if join.session_id == from {
+            join.session_id = to.to_owned();
+        }
+    }
+}
+
+fn identities_match(left: &Session, right: &Session) -> bool {
+    if left.id == right.id {
+        return true;
+    }
+    if let (Some(left), Some(right)) = (left.thread_id.as_deref(), right.thread_id.as_deref()) {
+        return left == right;
+    }
+    let has_fallback_thread = left.thread_id.is_none() || right.thread_id.is_none();
+    left.rollout_id
+        .as_deref()
+        .zip(right.rollout_id.as_deref())
+        .is_some_and(|(left, right)| left == right)
+        || left
+            .session_id
+            .as_deref()
+            .zip(right.session_id.as_deref())
+            .is_some_and(|(left, right)| left == right && has_fallback_thread)
+}
+
+fn same_rollout_source(left: &Session, right: &Session) -> bool {
+    rollout_paths_match(left, right)
+        && ((left.rollout_id.is_some() || right.rollout_id.is_some())
+            || left.provenance.kind == SourceKind::State
+            || right.provenance.kind == SourceKind::State)
+}
+
+fn same_rollout_identity(left: &Session, right: &Session) -> bool {
+    rollout_paths_match(left, right)
+        && left
+            .rollout_id
+            .as_deref()
+            .zip(right.rollout_id.as_deref())
+            .is_some_and(|(left, right)| left == right)
+}
+
+fn rollout_paths_match(left: &Session, right: &Session) -> bool {
+    left.rollout_path
+        .as_deref()
+        .zip(right.rollout_path.as_deref())
+        .is_some_and(|(left, right)| rollout_path_matches(Some(left), Path::new(right)))
+}
+
+fn rollout_path_matches(left: Option<&str>, right: &Path) -> bool {
+    left.is_some_and(|left| same_path(Path::new(left), right))
 }
 
 fn source_is_archived(path: &Path) -> bool {
@@ -980,22 +1243,84 @@ fn merge_rollout_session(
     candidate: Session,
     state: &[Session],
     diagnostics: &mut Vec<CanonicalDiagnostic>,
-) {
-    if let Some(existing) = sessions.get_mut(&candidate.id) {
-        if existing.provenance.path == candidate.provenance.path {
-            merge_session(existing, &candidate, diagnostics);
-            return;
+) -> String {
+    let state_session = matching_state_session_for_candidate(&candidate, state);
+    if let Some(state_session) = state_session {
+        if !same_rollout_identity(&candidate, state_session)
+            && !identities_match(&candidate, state_session)
+        {
+            diagnostics.push(CanonicalDiagnostic {
+                kind: DiagnosticKind::MetadataConflict,
+                source: state_session.provenance.clone(),
+                session_id: Some(candidate.id.clone()),
+                message: bounded(&format!(
+                    "state and rollout session identities differ: state={:?}, rollout={:?}",
+                    state_session.id, candidate.id
+                )),
+            });
+        }
+        if state_session
+            .rollout_path
+            .as_deref()
+            .is_some_and(|path| !rollout_path_matches(Some(path), &candidate.provenance.path))
+        {
+            diagnostics.push(CanonicalDiagnostic {
+            kind: DiagnosticKind::MetadataConflict,
+            source: candidate.provenance.clone(),
+            session_id: Some(candidate.id.clone()),
+            message: bounded(
+                "state and rollout session paths differ; state metadata was retained as enrichment",
+            ),
+            });
+        }
+    }
+    let existing_id = sessions
+        .get(&candidate.id)
+        .map(|session| session.id.clone())
+        .or_else(|| {
+            sessions
+                .iter()
+                .find(|(_, session)| same_rollout_source(session, &candidate))
+                .map(|(id, _)| id.clone())
+        });
+    if let Some(existing_id) = existing_id {
+        let mut existing = sessions
+            .remove(&existing_id)
+            .expect("existing session was found in the session map");
+        if same_rollout_source(&existing, &candidate) {
+            if existing.provenance.kind == SourceKind::State
+                && candidate.provenance.kind == SourceKind::Rollout
+            {
+                let mut merged = candidate.clone();
+                merge_session(&mut merged, &existing, diagnostics);
+                if let Some(state_session) = state_session {
+                    merge_session(&mut merged, state_session, diagnostics);
+                }
+                let id = merged.id.clone();
+                sessions.insert(id.clone(), merged);
+                return id;
+            }
+            merge_session(&mut existing, &candidate, diagnostics);
+            if let Some(state_session) = state_session {
+                merge_session(&mut existing, state_session, diagnostics);
+            }
+            let id = existing.id.clone();
+            sessions.insert(id.clone(), existing);
+            return id;
         }
         let mut merged = candidate.clone();
-        merge_session(&mut merged, existing, diagnostics);
-        *existing = merged;
-        return;
+        merge_session(&mut merged, &existing, diagnostics);
+        let id = merged.id.clone();
+        sessions.insert(id.clone(), merged);
+        return id;
     }
     let mut merged = candidate.clone();
-    if let Some(state_session) = state.iter().find(|session| session.id == candidate.id) {
+    if let Some(state_session) = state_session {
         merge_session(&mut merged, state_session, diagnostics);
     }
-    sessions.insert(merged.id.clone(), merged);
+    let id = merged.id.clone();
+    sessions.insert(id.clone(), merged);
+    id
 }
 
 fn merge_session(
@@ -1023,31 +1348,51 @@ fn session_from_payload(
     diagnostics: &mut Vec<CanonicalDiagnostic>,
 ) -> Option<Session> {
     let payload = payload?.as_object()?;
-    let id = string_field(payload, &["id"]);
-    let session_id = string_field(payload, &["session_id"]);
-    let thread_id = string_field(payload, &["thread_id"]);
-    let identity = [id.as_ref(), session_id.as_ref(), thread_id.as_ref()]
-        .into_iter()
-        .flatten()
-        .next()
-        .cloned();
-    if let Some(identity) = identity.as_ref() {
-        if [id.as_ref(), session_id.as_ref(), thread_id.as_ref()]
-            .into_iter()
-            .flatten()
-            .any(|candidate| candidate != identity)
-        {
+    let id = string_field(payload, &["id"]).filter(|value| !value.is_empty());
+    let explicit_session_id =
+        string_field(payload, &["session_id"]).filter(|value| !value.is_empty());
+    let explicit_thread_id =
+        string_field(payload, &["thread_id"]).filter(|value| !value.is_empty());
+    let rollout_id = string_field(payload, &["rollout_id"])
+        .filter(|value| !value.is_empty())
+        .or_else(|| rollout_id_from_path(&source.path));
+    let thread_id = explicit_thread_id.clone().or(id.clone());
+    let session_id = explicit_session_id;
+    let identity = thread_id
+        .clone()
+        .or_else(|| session_id.clone())
+        .or_else(|| rollout_id.clone());
+    if let (Some(id), Some(thread_id)) = (id.as_ref(), thread_id.as_ref()) {
+        if id != thread_id && explicit_thread_id.is_some() {
             diagnostics.push(CanonicalDiagnostic {
                 kind: DiagnosticKind::MetadataConflict,
                 source: source.clone(),
-                session_id: Some(identity.clone()),
-                message: "session metadata contains conflicting identity fields".to_owned(),
+                session_id: identity.clone(),
+                message: "session metadata contains conflicting thread identity fields".to_owned(),
+            });
+        }
+    }
+    let parent_thread_id =
+        string_field(payload, &["parent_thread_id"]).filter(|value| !value.is_empty());
+    let parent_id_alias = string_field(payload, &["parent_id"]).filter(|value| !value.is_empty());
+    if let (Some(parent_thread_id), Some(parent_id)) =
+        (parent_thread_id.as_ref(), parent_id_alias.as_ref())
+    {
+        if parent_thread_id != parent_id {
+            diagnostics.push(CanonicalDiagnostic {
+                kind: DiagnosticKind::MetadataConflict,
+                source: source.clone(),
+                session_id: identity.clone(),
+                message: "session metadata contains conflicting parent identity fields".to_owned(),
             });
         }
     }
     let id = identity?;
     Some(Session {
         id,
+        rollout_id,
+        session_id,
+        thread_id,
         created_at: string_field(payload, &["timestamp", "created_at"])
             .or_else(|| envelope_timestamp.map(str::to_owned)),
         updated_at: string_field(payload, &["updated_at"]),
@@ -1066,7 +1411,7 @@ fn session_from_payload(
             .or_else(|| source_is_archived(&source.path).then_some(true)),
         title: string_field(payload, &["title"]),
         preview: string_field(payload, &["preview", "first_user_message"]),
-        parent_id: string_field(payload, &["parent_thread_id", "parent_id"]),
+        parent_id: parent_thread_id.or(parent_id_alias),
         cli_version: string_field(payload, &["cli_version"]),
         originator: string_field(payload, &["originator"]),
         history_mode: string_field(payload, &["history_mode"]),
@@ -1224,6 +1569,13 @@ fn tool_call_from_payload(
     }
 }
 
+fn is_wrapper_tool(tool: Option<&str>) -> bool {
+    matches!(
+        tool.map(normalize_token).as_deref(),
+        Some("exec" | "js" | "wait")
+    )
+}
+
 fn tool_call_from_event(
     payload: &Map<String, Value>,
     nested_type: Option<&str>,
@@ -1258,12 +1610,17 @@ fn tool_result_from_payload(
         .or_else(|| payload.get("exit"))
         .and_then(value_i64);
     let status = string_field(payload, &["status"]);
+    let renderer = parse_renderer_status(stdout.as_deref(), stderr.as_deref());
     let (outcome, outcome_source) = classify_outcome(
         exit_code,
         status.as_deref(),
+        renderer,
         stdout.as_deref(),
         stderr.as_deref(),
     );
+    let exit_code =
+        exit_code.or_else(|| (status.is_none()).then(|| renderer.exit_code()).flatten());
+    let status = status.or_else(|| (exit_code.is_none()).then(|| renderer.status()).flatten());
     ToolResult {
         id: string_field(payload, &["id"]),
         call_id: string_field(payload, &["call_id"]),
@@ -1612,6 +1969,7 @@ fn combined_output(result: &ToolResult) -> String {
 fn classify_outcome(
     exit_code: Option<i64>,
     status: Option<&str>,
+    renderer: RendererParse,
     stdout: Option<&str>,
     stderr: Option<&str>,
 ) -> (ToolOutcome, OutcomeSource) {
@@ -1625,13 +1983,139 @@ fn classify_outcome(
             OutcomeSource::ExitCode,
         );
     }
-    if let Some(outcome) = status.and_then(ToolOutcome::from_status) {
-        return (outcome, OutcomeSource::Status);
+    if let Some(status) = status {
+        return (
+            ToolOutcome::from_status(status).unwrap_or(ToolOutcome::Unknown),
+            OutcomeSource::Status,
+        );
+    }
+    if let RendererParse::Known(status) = renderer {
+        return (status.outcome(), OutcomeSource::ParsedRenderer);
+    }
+    if matches!(renderer, RendererParse::Malformed) {
+        return (ToolOutcome::Unknown, OutcomeSource::Unknown);
     }
     if output_indicates_failure(stdout, stderr) {
         return (ToolOutcome::Failed, OutcomeSource::OutputText);
     }
     (ToolOutcome::Unknown, OutcomeSource::Unknown)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RendererParse {
+    NotRenderer,
+    Malformed,
+    Known(RendererStatus),
+}
+
+impl RendererParse {
+    fn exit_code(self) -> Option<i64> {
+        match self {
+            Self::Known(status) => status.exit_code(),
+            Self::NotRenderer | Self::Malformed => None,
+        }
+    }
+
+    fn status(self) -> Option<String> {
+        match self {
+            Self::Known(status) => status.status().map(str::to_owned),
+            Self::NotRenderer | Self::Malformed => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RendererStatus {
+    Succeeded {
+        exit_code: Option<i64>,
+    },
+    Failed {
+        exit_code: Option<i64>,
+        status: &'static str,
+    },
+}
+
+impl RendererStatus {
+    fn outcome(self) -> ToolOutcome {
+        match self {
+            Self::Succeeded { .. } => ToolOutcome::Succeeded,
+            Self::Failed { .. } => ToolOutcome::Failed,
+        }
+    }
+
+    fn exit_code(self) -> Option<i64> {
+        match self {
+            Self::Succeeded { exit_code } | Self::Failed { exit_code, .. } => exit_code,
+        }
+    }
+
+    fn status(self) -> Option<&'static str> {
+        match self {
+            Self::Succeeded { .. } => Some("completed"),
+            Self::Failed { status, .. } => Some(status),
+        }
+    }
+}
+
+fn parse_renderer_status(stdout: Option<&str>, stderr: Option<&str>) -> RendererParse {
+    let mut malformed = false;
+    for parsed in [stdout, stderr]
+        .into_iter()
+        .flatten()
+        .map(parse_renderer_text)
+    {
+        match parsed {
+            RendererParse::Known(status) => return RendererParse::Known(status),
+            RendererParse::Malformed => malformed = true,
+            RendererParse::NotRenderer => {}
+        }
+    }
+    if malformed {
+        RendererParse::Malformed
+    } else {
+        RendererParse::NotRenderer
+    }
+}
+
+fn parse_renderer_text(output: &str) -> RendererParse {
+    let Some(line) = output.trim_start().lines().next().map(str::trim) else {
+        return RendererParse::NotRenderer;
+    };
+    let line = line.to_ascii_lowercase();
+    for prefix in ["process exited with code", "exit code"] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            let rest = rest.trim();
+            let code = rest.strip_prefix(':').unwrap_or(rest).trim().parse::<i64>();
+            return code.map_or(RendererParse::Malformed, |exit_code| {
+                if exit_code == 0 {
+                    RendererParse::Known(RendererStatus::Succeeded { exit_code: Some(0) })
+                } else {
+                    RendererParse::Known(RendererStatus::Failed {
+                        exit_code: Some(exit_code),
+                        status: "failed",
+                    })
+                }
+            });
+        }
+    }
+    match line.as_str() {
+        "script completed" => RendererParse::Known(RendererStatus::Succeeded { exit_code: None }),
+        "script failed" => RendererParse::Known(RendererStatus::Failed {
+            exit_code: None,
+            status: "failed",
+        }),
+        "script timed out" | "script timeout" => RendererParse::Known(RendererStatus::Failed {
+            exit_code: None,
+            status: "timeout",
+        }),
+        _ if line.starts_with("process exited with code")
+            || line.starts_with("exit code")
+            || line.starts_with("script ") =>
+        {
+            RendererParse::Malformed
+        }
+        _ => RendererParse::NotRenderer,
+    }
 }
 
 fn output_indicates_failure(stdout: Option<&str>, stderr: Option<&str>) -> bool {
@@ -2110,6 +2594,41 @@ mod tests {
     }
 
     #[test]
+    fn file_operations_require_typed_provenance_and_valid_targets() {
+        let data = parse(include_str!(
+            "../tests/fixtures/rollout/parser-artifacts-file-operations.jsonl"
+        ));
+
+        assert_eq!(
+            data.file_operations
+                .iter()
+                .map(|operation| operation.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "src/patched.rs",
+                "/fixture/project/quoted absolute.txt",
+                "src/quoted output.txt",
+                "src/quoted marker output.txt",
+                "/fixture/project/from-json.txt",
+            ]
+        );
+        assert!(data.file_operations.iter().all(|operation| {
+            operation.path != "/dev/null" && !operation.path.starts_with("/dev/null/")
+        }));
+
+        assert!(
+            crate::analysis::analyze_rework(&data, &crate::analysis::AnalysisOptions::default())
+                .is_empty()
+        );
+        assert!(crate::analysis::views::stuck(&data).rows.is_empty());
+        assert!(
+            crate::analysis::views::waste(&data)
+                .opportunities
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn tool_names_and_commands_only_use_valid_structured_values() {
         let data = parse(
             r#"{"type":"session_meta","payload":{"id":"fixture-tool-boundary-session"}}
@@ -2168,6 +2687,232 @@ mod tests {
             .find(|result| result.call_id.as_deref() == Some("fixture-unstructured-result"))
             .unwrap();
         assert_eq!(unstructured_result.command, None);
+    }
+
+    #[test]
+    fn keeps_wrapper_calls_opaque_without_safe_command_fields() {
+        let data = parse(include_str!(
+            "../tests/fixtures/rollout/wrapper-tools.jsonl"
+        ));
+
+        let direct = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-direct-shell-a"))
+            .unwrap();
+        assert_eq!(direct.tool_name.as_deref(), Some("exec_command"));
+        assert_eq!(direct.command.as_deref(), Some("cargo test"));
+
+        let nested_shell = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-nested-shell-a"))
+            .unwrap();
+        assert_eq!(nested_shell.tool_name.as_deref(), Some("exec"));
+        assert_eq!(nested_shell.command, None);
+        assert_eq!(nested_shell.provenance.line, Some(4));
+        assert!(
+            nested_shell
+                .input_summary
+                .as_deref()
+                .is_some_and(|input| input.contains("tools.exec_command"))
+        );
+
+        let nested_patch = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-nested-patch-a"))
+            .unwrap();
+        assert_eq!(nested_patch.tool_name.as_deref(), Some("exec"));
+        assert_eq!(nested_patch.command, None);
+        assert!(
+            nested_patch
+                .input_summary
+                .as_deref()
+                .is_some_and(|input| input.contains("tools.apply_patch"))
+        );
+
+        assert!(!data.tool_calls.iter().any(|call| {
+            call.call_id
+                .as_deref()
+                .is_some_and(|id| id.contains("/nested/"))
+        }));
+        assert!(!data.tool_results.iter().any(|result| {
+            result
+                .call_id
+                .as_deref()
+                .is_some_and(|id| id.contains("/nested/"))
+        }));
+        assert!(data.file_operations.is_empty());
+
+        let opaque_call = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-opaque-wrapper-a"))
+            .unwrap();
+        assert_eq!(opaque_call.tool_name.as_deref(), Some("exec"));
+        assert_eq!(opaque_call.command, None);
+        let opaque_result = data
+            .tool_results
+            .iter()
+            .find(|result| result.call_id.as_deref() == Some("fixture-opaque-wrapper-a"))
+            .unwrap();
+        assert_eq!(opaque_result.provenance.line, Some(9));
+        assert!(!opaque_result.is_duplicate);
+
+        let structured_wrapper = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-structured-wrapper-b"))
+            .unwrap();
+        assert_eq!(
+            structured_wrapper.command.as_deref(),
+            Some("*** Update File: src/wrapper.rs")
+        );
+
+        assert!(
+            !data
+                .tool_results
+                .iter()
+                .any(
+                    |result| result.call_id.as_deref() == Some("fixture-nested-shell-a")
+                        && result.is_duplicate
+                )
+        );
+    }
+
+    #[test]
+    fn decodes_string_encoded_tool_arguments_without_promoting_arbitrary_text() {
+        let data = parse(include_str!(
+            "../tests/fixtures/rollout/string-encoded-commands.jsonl"
+        ));
+        let call = |call_id: &str| {
+            data.tool_calls
+                .iter()
+                .find(|call| call.call_id.as_deref() == Some(call_id))
+                .unwrap()
+        };
+
+        let function_call = call("fixture-string-function-call");
+        assert_eq!(function_call.command.as_deref(), Some("cargo run"));
+        assert_eq!(function_call.input_summary.as_deref(), Some("cargo run"));
+        assert_eq!(function_call.provenance.line, Some(3));
+
+        let argv_call = call("fixture-string-argv-call");
+        assert_eq!(argv_call.command.as_deref(), Some("cargo check"));
+
+        let command_array_call = call("fixture-string-command-array-call");
+        assert_eq!(command_array_call.command.as_deref(), Some("cargo build"));
+
+        let file_call = call("fixture-string-file-call");
+        assert_eq!(
+            file_call.command.as_deref(),
+            Some("*** Update File: src/lib.rs\n@@\n-old\n+new\n")
+        );
+        assert_eq!(data.file_operations.len(), 2);
+        assert_eq!(data.file_operations[0].path, "src/lib.rs");
+        assert_eq!(data.file_operations[1].path, "src/second.rs");
+
+        let verification_call = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.is_none() && call.command.as_deref() == Some("cargo check"))
+            .unwrap();
+        assert_eq!(verification_call.command.as_deref(), Some("cargo check"));
+
+        let fallback_call = call("fixture-string-fallback-call");
+        assert_eq!(fallback_call.command.as_deref(), Some("cargo fmt"));
+
+        let second_file_call = call("fixture-string-second-file-call");
+        assert_eq!(
+            second_file_call.command.as_deref(),
+            Some("*** Update File: src/second.rs\n@@\n-old\n+new\n")
+        );
+
+        for call_id in [
+            "fixture-string-malformed-call",
+            "fixture-string-wrapper-call",
+            "fixture-string-natural-call",
+        ] {
+            let call = call(call_id);
+            assert_eq!(call.command, None, "{call_id}");
+        }
+        assert_eq!(
+            crate::analysis::classify_verification_command(
+                verification_call.command.as_deref().unwrap()
+            ),
+            Some("check".to_owned())
+        );
+
+        let failure =
+            crate::analysis::analyze_failures(&data, &crate::analysis::AnalysisOptions::default())
+                .into_iter()
+                .find(|finding| {
+                    finding.kind == crate::analysis::FindingType::Failure
+                        && finding.key.contains("|cargo run|")
+                })
+                .unwrap();
+        assert_eq!(failure.scope.as_str(), "project");
+        assert_eq!(failure.occurrences, 2);
+        assert_eq!(failure.distinct_sessions, 2);
+        assert_eq!(failure.confidence, crate::analysis::FindingConfidence::High);
+        assert_eq!(failure.evidence.len(), 2);
+        assert!(
+            failure
+                .evidence
+                .iter()
+                .all(|evidence| evidence.role == crate::analysis::EvidenceRole::Observation)
+        );
+        assert_eq!(
+            failure
+                .evidence
+                .iter()
+                .map(|evidence| evidence.source.line)
+                .collect::<Vec<_>>(),
+            vec![Some(14), Some(19)]
+        );
+        assert!(
+            failure
+                .evidence
+                .iter()
+                .all(|evidence| evidence.source.path == Path::new("fixture.jsonl"))
+        );
+
+        let verification = crate::analysis::analyze_verification(
+            &data,
+            &crate::analysis::AnalysisOptions::default(),
+        );
+        let missing = verification
+            .iter()
+            .find(|finding| finding.affected_paths == ["src/second.rs"])
+            .unwrap();
+        assert_eq!(missing.kind, crate::analysis::FindingType::Verification);
+        assert_eq!(
+            missing.scope,
+            crate::analysis::FindingScope::Project(PathBuf::from("/fixture/project"))
+        );
+        assert_eq!(missing.confidence, crate::analysis::FindingConfidence::Low);
+        assert_eq!(missing.occurrences, 1);
+        assert_eq!(missing.distinct_sessions, 1);
+        assert_eq!(missing.evidence.len(), 2);
+        assert!(
+            missing
+                .observed_commands
+                .iter()
+                .any(|command| command.contains("cargo check"))
+        );
+        assert!(missing.evidence.iter().any(|evidence| {
+            evidence.role == crate::analysis::EvidenceRole::VerificationCommand
+                && evidence.source.path == Path::new("fixture.jsonl")
+                && evidence.source.line == Some(8)
+        }));
+
+        let function_result = data
+            .tool_results
+            .iter()
+            .find(|result| result.call_id.as_deref() == Some("fixture-string-function-call"))
+            .unwrap();
+        assert_eq!(function_result.command, None);
     }
 
     #[test]
@@ -2307,6 +3052,53 @@ mod tests {
     }
 
     #[test]
+    fn parses_renderer_envelopes_before_fallback_text() {
+        let data = parse(include_str!(
+            "../tests/fixtures/rollout/tool-result-envelopes.jsonl"
+        ));
+
+        assert_eq!(data.tool_results.len(), 7);
+        assert_eq!(data.tool_results[0].exit_code, Some(0));
+        assert_eq!(data.tool_results[0].outcome, ToolOutcome::Succeeded);
+        assert_eq!(
+            data.tool_results[0].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
+        assert_eq!(data.tool_results[1].exit_code, Some(23));
+        assert_eq!(data.tool_results[1].outcome, ToolOutcome::Failed);
+        assert_eq!(
+            data.tool_results[1].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
+        assert_eq!(data.tool_results[2].outcome, ToolOutcome::Failed);
+        assert_eq!(data.tool_results[2].status.as_deref(), Some("timeout"));
+        assert_eq!(
+            data.tool_results[2].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
+        assert_eq!(data.tool_results[3].outcome, ToolOutcome::Failed);
+        assert_eq!(data.tool_results[3].status.as_deref(), Some("failed"));
+        assert_eq!(
+            data.tool_results[3].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
+        assert_eq!(data.tool_results[4].outcome, ToolOutcome::Unknown);
+        assert_eq!(data.tool_results[4].outcome_source, OutcomeSource::Unknown);
+        assert_eq!(data.tool_results[5].outcome, ToolOutcome::Succeeded);
+        assert_eq!(data.tool_results[5].status.as_deref(), Some("completed"));
+        assert_eq!(
+            data.tool_results[5].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
+        assert_eq!(data.tool_results[6].outcome, ToolOutcome::Succeeded);
+        assert_eq!(data.tool_results[6].status.as_deref(), Some("completed"));
+        assert_eq!(
+            data.tool_results[6].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
+    }
+
+    #[test]
     fn missing_optional_values_stay_unknown() {
         let data = parse(include_str!(
             "../tests/fixtures/rollout/missing-fields.jsonl"
@@ -2356,6 +3148,220 @@ mod tests {
     }
 
     #[test]
+    fn repeated_rollout_metadata_does_not_create_false_identity_conflicts() {
+        let path = Path::new(
+            "sessions/2026/01/02/rollout-2026-01-02T00-00-00-fixture-main-thread_fixture-rollout.jsonl",
+        );
+        let result = parse_rollout_reader(
+            path,
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../tests/fixtures/rollout/session-identities.jsonl"
+            ))),
+        );
+
+        let state = Session {
+            id: "fixture-state-key".to_owned(),
+            rollout_id: Some("fixture-rollout".to_owned()),
+            session_id: Some("fixture-session-tree".to_owned()),
+            thread_id: None,
+            created_at: None,
+            updated_at: None,
+            cwd: Some("/fixture/main".to_owned()),
+            project: None,
+            model: None,
+            provider: None,
+            source: None,
+            thread_source: None,
+            rollout_path: Some(path.to_string_lossy().into_owned()),
+            archive_state: None,
+            title: None,
+            preview: None,
+            parent_id: None,
+            cli_version: None,
+            originator: None,
+            history_mode: None,
+            reasoning_effort: None,
+            provenance: SourceRef::state(PathBuf::from("state.sqlite")),
+        };
+        let data = normalize_rollout_with_state(&result, &[state]);
+
+        assert_eq!(data.sessions.len(), 1);
+        assert_eq!(data.sessions[0].id, "fixture-main-thread");
+        assert_eq!(
+            data.sessions[0].rollout_id.as_deref(),
+            Some("fixture-rollout")
+        );
+        assert_eq!(
+            data.sessions[0].session_id.as_deref(),
+            Some("fixture-session-tree")
+        );
+        assert_eq!(
+            data.sessions[0].thread_id.as_deref(),
+            Some("fixture-main-thread")
+        );
+        assert!(
+            data.records
+                .iter()
+                .all(|record| record.session_id.as_deref() == Some("fixture-main-thread"))
+        );
+        assert!(
+            data.diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.kind != DiagnosticKind::MetadataConflict)
+        );
+    }
+
+    #[test]
+    fn parent_thread_identity_is_preserved_for_subagents() {
+        let result = parse_rollout_reader(
+            Path::new(
+                "sessions/2026/01/02/rollout-2026-01-02T00-01-00-fixture-child-thread_fixture-child-rollout.jsonl",
+            ),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../tests/fixtures/rollout/session-identities-child.jsonl"
+            ))),
+        );
+
+        let data = normalize_rollout(&result);
+        let session = &data.sessions[0];
+        assert_eq!(session.id, "fixture-child-thread");
+        assert_eq!(session.session_id.as_deref(), Some("fixture-session-tree"));
+        assert_eq!(session.thread_id.as_deref(), Some("fixture-child-thread"));
+        assert_eq!(session.parent_id.as_deref(), Some("fixture-main-thread"));
+    }
+
+    #[test]
+    fn state_fallback_survives_identityless_session_metadata() {
+        let result = parse_rollout_reader(
+            Path::new("fixture.jsonl"),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../tests/fixtures/rollout/identityless.jsonl"
+            ))),
+        );
+        let state = Session {
+            id: "fixture-state-session".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
+            created_at: None,
+            updated_at: None,
+            cwd: Some("/fixture/main".to_owned()),
+            project: None,
+            model: None,
+            provider: None,
+            source: None,
+            thread_source: None,
+            rollout_path: Some("fixture.jsonl".to_owned()),
+            archive_state: None,
+            title: None,
+            preview: None,
+            parent_id: None,
+            cli_version: None,
+            originator: None,
+            history_mode: None,
+            reasoning_effort: None,
+            provenance: SourceRef::state(PathBuf::from("state.sqlite")),
+        };
+
+        let data = normalize_rollout_with_state(&result, &[state]);
+
+        assert_eq!(data.sessions.len(), 1);
+        assert_eq!(data.sessions[0].id, "fixture-state-session");
+        assert!(
+            data.records
+                .iter()
+                .all(|record| record.session_id.as_deref() == Some("fixture-state-session"))
+        );
+    }
+
+    #[test]
+    fn state_fallback_rekeys_records_when_rollout_identity_arrives() {
+        let result = parse_rollout_reader(
+            Path::new("fixture.jsonl"),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../tests/fixtures/rollout/state-fallback-rekey.jsonl"
+            ))),
+        );
+        let state = Session {
+            id: "fixture-state-session".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
+            created_at: None,
+            updated_at: None,
+            cwd: None,
+            project: None,
+            model: None,
+            provider: None,
+            source: None,
+            thread_source: None,
+            rollout_path: Some("fixture.jsonl".to_owned()),
+            archive_state: None,
+            title: None,
+            preview: None,
+            parent_id: None,
+            cli_version: None,
+            originator: None,
+            history_mode: None,
+            reasoning_effort: None,
+            provenance: SourceRef::state(PathBuf::from("state.sqlite")),
+        };
+
+        let data = normalize_rollout_with_state(&result, &[state]);
+
+        assert_eq!(data.sessions.len(), 1);
+        assert_eq!(data.sessions[0].id, "fixture-rollout-session");
+        assert!(
+            data.records
+                .iter()
+                .all(|record| record.session_id.as_deref() == Some("fixture-rollout-session"))
+        );
+    }
+
+    #[test]
+    fn state_fallback_rekeys_parent_references_in_memory() {
+        let mut data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-parent"}}
+{"type":"session_meta","payload":{"id":"fixture-child","parent_id":"fixture-parent"}}"#,
+        );
+        let mut sessions = data
+            .sessions
+            .iter()
+            .cloned()
+            .map(|session| (session.id.clone(), session))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            data.sessions
+                .iter()
+                .find(|session| session.id == "fixture-child")
+                .and_then(|session| session.parent_id.as_deref()),
+            Some("fixture-parent")
+        );
+
+        rekey_session_references(
+            &mut data,
+            &mut sessions,
+            "fixture-parent",
+            "fixture-rollout-parent",
+        );
+
+        assert_eq!(
+            data.sessions
+                .iter()
+                .find(|session| session.id == "fixture-child")
+                .and_then(|session| session.parent_id.as_deref()),
+            Some("fixture-rollout-parent")
+        );
+        assert_eq!(
+            sessions
+                .get("fixture-child")
+                .and_then(|session| session.parent_id.as_deref()),
+            Some("fixture-rollout-parent")
+        );
+    }
+
+    #[test]
     fn rollout_values_win_conflicts_and_state_fills_missing_metadata() {
         let parsed = parse_rollout_reader(
             Path::new("fixture.jsonl"),
@@ -2365,6 +3371,9 @@ mod tests {
         );
         let state = Session {
             id: "fixture-conflict-session".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
             created_at: None,
             updated_at: None,
             cwd: Some("/state".to_owned()),
@@ -2407,6 +3416,9 @@ mod tests {
         );
         let state = Session {
             id: "fixture-state-session".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
             created_at: None,
             updated_at: None,
             cwd: None,
@@ -2429,7 +3441,7 @@ mod tests {
 
         let data = normalize_rollout_with_state(&parsed, &[state]);
 
-        assert_eq!(data.sessions.len(), 2);
+        assert_eq!(data.sessions.len(), 1);
         assert!(data.diagnostics.iter().any(|diagnostic| {
             diagnostic.kind == DiagnosticKind::MetadataConflict
                 && diagnostic.message.contains("identities differ")
@@ -2446,6 +3458,9 @@ mod tests {
         );
         let state = Session {
             id: "fixture-stale-session".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
             created_at: None,
             updated_at: None,
             cwd: None,

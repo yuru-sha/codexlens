@@ -1,0 +1,4 @@
+{"timestamp":"2026-01-02T00:00:00Z","type":"session_meta","payload":{"id":"fixture-main-thread","session_id":"fixture-session-tree","cwd":"/fixture/main"}}
+{"timestamp":"2026-01-02T00:00:01Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-01-02T00:00:02Z","type":"session_meta","payload":{"id":"fixture-main-thread","session_id":"fixture-session-tree","created_at":"2026-01-02T00:00:00Z","cwd":"/fixture/main"}}
+{"timestamp":"2026-01-02T00:00:03Z","type":"event_msg","payload":{"type":"task_complete"}}

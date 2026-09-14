@@ -1,0 +1,14 @@
+{"type":"session_meta","payload":{"id":"fixture-renderer-success"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-renderer-success-call","output":"Process exited with code 0\nerror and failed are mentioned in the command output."}}
+{"type":"session_meta","payload":{"id":"fixture-renderer-failure"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-renderer-failure-call","output":"Exit code: 23\ncommand output did not include an error marker."}}
+{"type":"session_meta","payload":{"id":"fixture-renderer-timeout"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-renderer-timeout-call","output":"Script timed out\nThe operation was stopped."}}
+{"type":"session_meta","payload":{"id":"fixture-renderer-failed"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-renderer-failed-call","output":"Script failed\nThe command reported a failure."}}
+{"type":"session_meta","payload":{"id":"fixture-renderer-malformed"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-renderer-malformed-call","output":"Process exited with code\nerror text from an ambiguous renderer."}}
+{"type":"session_meta","payload":{"id":"fixture-renderer-body"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-renderer-body-call","output":"Script completed\nerror: this is a successful payload containing failed as text."}}
+{"type":"session_meta","payload":{"id":"fixture-renderer-cross-stream"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-renderer-cross-stream-call","output":"Process exited with code\nambiguous stdout","stderr":"Script completed\nerror and failed are payload text."}}

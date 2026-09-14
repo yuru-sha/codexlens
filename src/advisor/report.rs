@@ -1537,6 +1537,9 @@ mod tests {
     fn coverage_counts_valid_missing_and_invalid_activity_without_ingestion_fallback() {
         let session = |id: &str, created_at: Option<&str>, updated_at: Option<&str>| Session {
             id: id.to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
             created_at: created_at.map(str::to_owned),
             updated_at: updated_at.map(str::to_owned),
             cwd: None,
@@ -1829,6 +1832,9 @@ mod tests {
         let data = CanonicalData {
             sessions: vec![Session {
                 id: "session".to_owned(),
+                rollout_id: None,
+                session_id: None,
+                thread_id: None,
                 created_at: Some("2026-01-02T00:00:00Z".to_owned()),
                 updated_at: Some("2026-01-04T00:00:00Z".to_owned()),
                 cwd: None,
@@ -1890,6 +1896,9 @@ mod tests {
         let data = CanonicalData {
             sessions: vec![Session {
                 id: "session".to_owned(),
+                rollout_id: None,
+                session_id: None,
+                thread_id: None,
                 created_at: Some("2026-01-03T09:00:00+09:00".to_owned()),
                 updated_at: None,
                 cwd: None,

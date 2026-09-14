@@ -67,7 +67,6 @@ const SAFE_COMMAND_WORDS: &[&str] = &[
 fn normalize_tool(tool: &str) -> String {
     let normalized = normalize_fragment(tool);
     match normalized.as_str() {
-        "shell" | "exec" | "exec_command" => "exec_command".to_owned(),
         "" => "unknown_tool".to_owned(),
         _ => normalized,
     }
@@ -113,36 +112,57 @@ pub(super) fn analyze(data: &AnalysisContext<'_>, options: &AnalysisOptions) -> 
                     ),
                 );
             }
+            let mut limitations = vec![
+                "This is recurring observational evidence, not proof that the command is always incorrect".to_owned(),
+            ];
+            let (observed_commands, suggested_action, summary) = if first.has_canonical_command {
+                (
+                    vec![bounded_excerpt(&first.family, options.excerpt_max_bytes)],
+                    format!(
+                        "Document the prerequisite or preferred command for {} in the applicable instructions",
+                        first.family
+                    ),
+                    format!(
+                        "Repeated failure for {} {} ({}) observed {} times across {} sessions",
+                        first.tool,
+                        first.family,
+                        first.category,
+                        events.len(),
+                        sessions.len()
+                    ),
+                )
+            } else {
+                limitations.push(
+                    "No canonical command was available; the wrapper or non-shell tool input was not safely unpacked, so no shell-command prerequisite was inferred".to_owned(),
+                );
+                (
+                    Vec::new(),
+                    "Review the wrapper or non-shell tool outcome; no shell-command prerequisite was inferred"
+                        .to_owned(),
+                    format!(
+                        "Repeated failure for {} without a canonical command ({}) observed {} times across {} sessions",
+                        first.tool,
+                        first.category,
+                        events.len(),
+                        sessions.len()
+                    ),
+                )
+            };
             Some(Finding {
                 kind: FindingType::Failure,
                 severity,
                 confidence,
                 scope,
                 key,
-                summary: format!(
-                    "Repeated failure for {} {} ({}) observed {} times across {} sessions",
-                    first.tool,
-                    first.family,
-                    first.category,
-                    events.len(),
-                    sessions.len()
-                ),
+                summary,
                 evidence,
                 occurrences: events.len(),
                 distinct_sessions: sessions.len(),
                 affected_paths: Vec::new(),
-                observed_commands: vec![bounded_excerpt(
-                    &first.family,
-                    options.excerpt_max_bytes,
-                )],
+                observed_commands,
                 sequence: Vec::new(),
-                suggested_action: format!(
-                    "Document the prerequisite or preferred command for {} in the applicable instructions",
-                    first.family
-                ),
-                limitations: vec![
-                    "This is recurring observational evidence, not proof that the command is always incorrect".to_owned(),
-                ],
+                suggested_action,
+                limitations,
                 verification_status: None,
             })
         })
@@ -188,13 +208,24 @@ pub(super) fn build_events(data: &AnalysisContext<'_>) -> Vec<FailureEvent> {
             .and_then(|call| call.tool_name.as_deref())
             .map(normalize_tool)
             .unwrap_or_else(|| "unknown_tool".to_owned());
-        let command = result
-            .command
-            .as_deref()
-            .or_else(|| call.and_then(|call| call.command.as_deref()))
-            .unwrap_or_default();
+        let command = if is_non_shell_tool(&tool) {
+            ""
+        } else {
+            result
+                .command
+                .as_deref()
+                .or_else(|| call.and_then(|call| call.command.as_deref()))
+                .unwrap_or_default()
+        };
         let output = combined_result_output(result);
-        let family = command_family(command);
+        let has_canonical_command = !command.trim().is_empty();
+        let family = if has_canonical_command {
+            command_family(command)
+        } else if is_shell_tool(&tool) {
+            "unknown_command".to_owned()
+        } else {
+            "no_canonical_command".to_owned()
+        };
         let category = failure_category(result, &output);
         let key = format!("{tool}|{family}|{category}");
         let description = failure_description(&tool, &family, &category, &output);
@@ -205,6 +236,7 @@ pub(super) fn build_events(data: &AnalysisContext<'_>) -> Vec<FailureEvent> {
             tool,
             family,
             category,
+            has_canonical_command,
             structured: result_is_structured_failure(result),
             description,
             position: position_for_source(data, &result.provenance, None),
@@ -230,6 +262,7 @@ pub(super) fn build_events(data: &AnalysisContext<'_>) -> Vec<FailureEvent> {
             tool: "event".to_owned(),
             family: "event".to_owned(),
             category,
+            has_canonical_command: false,
             structured: true,
             description: "explicit error event".to_owned(),
             position: position_for_source(data, &record.provenance, record.timestamp.as_deref()),
@@ -239,10 +272,18 @@ pub(super) fn build_events(data: &AnalysisContext<'_>) -> Vec<FailureEvent> {
     events
 }
 
+fn is_shell_tool(tool: &str) -> bool {
+    matches!(tool, "exec_command" | "shell")
+}
+
+fn is_non_shell_tool(tool: &str) -> bool {
+    matches!(tool, "exec" | "js" | "wait" | "apply_patch")
+}
+
 fn result_is_structured_failure(result: &ToolResult) -> bool {
     matches!(
         result.outcome_source,
-        OutcomeSource::ExitCode | OutcomeSource::Status
+        OutcomeSource::ExitCode | OutcomeSource::Status | OutcomeSource::ParsedRenderer
     ) || result.exit_code.is_some()
         || result.status.as_deref().is_some_and(status_is_failed)
 }
@@ -268,6 +309,9 @@ fn failure_category(result: &ToolResult, output: &str) -> String {
         return match status.as_str() {
             "cancelled" | "canceled" => "cancelled".to_owned(),
             "timeout" | "timed_out" => "timeout".to_owned(),
+            _ if result.outcome_source == OutcomeSource::ParsedRenderer => {
+                "renderer_failed".to_owned()
+            }
             _ => "failed_status".to_owned(),
         };
     }
@@ -381,5 +425,83 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].family, "unknown_command");
+    }
+
+    #[test]
+    fn wrapper_failures_do_not_become_shell_prerequisite_findings() {
+        let parsed = parse_rollout_reader(
+            Path::new("fixture-wrapper-tools.jsonl"),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../../tests/fixtures/rollout/wrapper-tools.jsonl"
+            ))),
+        );
+        let data = normalize_rollout(&parsed);
+        let context = AnalysisContext::new(&data);
+        let events = context.failure_events();
+
+        assert!(
+            events
+                .iter()
+                .any(|event| { event.tool == "exec" && event.family == "no_canonical_command" })
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| { event.tool == "js" && event.family == "no_canonical_command" })
+        );
+        assert!(!events.iter().any(|event| {
+            matches!(event.tool.as_str(), "exec" | "js" | "wait")
+                && event.family == "unknown_command"
+        }));
+
+        let findings = analyze(&context, &AnalysisOptions::default());
+        assert!(
+            findings
+                .iter()
+                .filter(|finding| { finding.key.contains("no_canonical_command") })
+                .all(|finding| {
+                    finding
+                        .suggested_action
+                        .contains("no shell-command prerequisite")
+                        && finding
+                            .limitations
+                            .iter()
+                            .any(|limitation| limitation.contains("No canonical command"))
+                })
+        );
+
+        let parsed_renderer_command = parse_rollout_reader(
+            Path::new("fixture-wrapper-renderer-command.jsonl"),
+            PlainJsonlReader::new(Cursor::new(
+                br#"{"type":"session_meta","payload":{"id":"fixture-wrapper-renderer"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-wrapper-renderer-call","name":"exec","input":"return 1;"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-wrapper-renderer-call","command":"cargo test","exit_code":1,"status":"failed"}}"#,
+            )),
+        );
+        let renderer_data = normalize_rollout(&parsed_renderer_command);
+        let renderer_context = AnalysisContext::new(&renderer_data);
+        let renderer_events = renderer_context.failure_events();
+        assert_eq!(renderer_events[0].family, "no_canonical_command");
+    }
+
+    #[test]
+    fn parsed_renderer_failures_are_structured_and_malformed_results_are_ignored() {
+        let parsed = parse_rollout_reader(
+            Path::new("fixture-renderer.jsonl"),
+            PlainJsonlReader::new(Cursor::new(include_bytes!(
+                "../../tests/fixtures/rollout/tool-result-envelopes.jsonl"
+            ))),
+        );
+        let data = normalize_rollout(&parsed);
+        let events = build_events(&AnalysisContext::new(&data));
+
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.category.as_str())
+                .collect::<Vec<_>>(),
+            vec!["exit_code_23", "timeout", "renderer_failed"]
+        );
+        assert!(events.iter().all(|event| event.structured));
     }
 }

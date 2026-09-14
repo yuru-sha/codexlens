@@ -97,6 +97,9 @@ pub(crate) fn data_with_join(files: Vec<InstructionFile>) -> CanonicalData {
     CanonicalData {
         sessions: vec![crate::model::Session {
             id: "session".to_owned(),
+            rollout_id: None,
+            session_id: None,
+            thread_id: None,
             created_at: Some("2026-01-01T00:00:00Z".to_owned()),
             updated_at: Some("2026-01-01T00:01:00Z".to_owned()),
             cwd: Some("/fixture/project/src".to_owned()),
