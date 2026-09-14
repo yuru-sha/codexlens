@@ -6,11 +6,11 @@ Analyze Codex sessions and turn recurring friction into actionable
 `AGENTS.md` improvements.
 
 > MVP status: local ingestion, instruction capture, deterministic lenses, the
-> advisor, the read-only reporting CLI, bounded local monitoring, compressed
-> rollout readers, explicit refresh/frozen reporting, versioned JSON output,
-> and safe `optimize --apply` are implemented. `refresh` is the explicit raw-input workflow;
-> reporting never refreshes implicitly, monitoring updates the derived store
-> and an optional cursor file, and apply writes only its validated write set.
+> advisor, bounded reporting views, local monitoring, compressed rollout
+> readers, versioned JSON output, and safe `optimize --apply` are implemented.
+> Read views analyze incrementally by default; `--frozen` reads the derived
+> store exactly, monitoring updates the derived store and an optional cursor
+> file, and apply writes only its validated write set.
 
 ## Goal
 
@@ -50,15 +50,17 @@ validated instruction/documentation write set, or claim billing accuracy.
 
 ## CLI surface
 
-The binary has an explicit refresh workflow and a separate reporting surface
-over the derived SQLite store. Reporting commands accept `-s, --store PATH`,
-which defaults to `.codexlens.sqlite`, `--frozen` to state that the selected
-store must be used exactly as recorded, and `--format json` for the versioned
-machine-readable schema. Both normal and frozen reporting formats are
-read-only with respect to raw inputs and never refresh implicitly. Read-only
-reports also accept reproducible `--since` and `--until` RFC3339 bounds; their
-output distinguishes the requested period, observed coverage, and store
-freshness. The explicit
+The binary has an explicit refresh workflow and bounded reporting views over a
+per-user derived SQLite store. Read views accept `--codex-home`, `-s,
+--store`, `--scope global|project|project:PATH`, `--include-archived`,
+`--include-subagents`, `--since`, `--until`, `--format table|markdown|json`,
+and `--frozen`. The default store is
+`${XDG_STATE_HOME:-~/.local/state}/codexlens/codexlens.db`; normal reads
+incrementally analyze the selected Codex home, while `--frozen` uses the
+selected store exactly. Progress and freshness diagnostics go to stderr, and
+JSON stdout is one versioned document. Read-only reports also accept
+reproducible period bounds; their output distinguishes the requested period,
+observed coverage, and store freshness. The explicit
 `optimize --apply` path is the write exception and may update only its
 validated instruction/documentation write set.
 Legacy-store reporting may create a temporary migrated copy, which is removed
@@ -68,35 +70,48 @@ order to render a diff.
 | Command | Input | Output purpose | Read-only behavior |
 | --- | --- | --- | --- |
 | `refresh` | discovered Codex home, rollout/state inputs, and instruction files | build or update the derived store | writes only the selected derived store; raw inputs remain unchanged |
-| `analyze` | derived store | all lens findings | reads the store only |
-| `sessions` | derived store | stored session metadata, coverage, and freshness | reads the store only |
-| `failures` | derived store | failure-lens findings | reads the store only |
-| `corrections` | derived store | correction-lens findings | reads the store only |
-| `rework` | derived store | rework and stuck findings | reads the store only |
-| `stuck` | derived store | alias for `rework` | reads the store only |
-| `verification` | derived store | verification-lens findings | reads the store only |
-| `knowledge` | derived store | knowledge-lens findings | reads the store only |
-| `rediscovery` | derived store | alias for `knowledge` | reads the store only |
-| `instructions` | derived store | instruction-lens findings | reads the store only |
-| `doctor` | derived store | coverage and ranked findings grouped by scope | reads the store only |
+| `analyze` | Codex home and derived store | all lens findings | refreshes incrementally unless `--frozen` |
+| `sessions` | Codex home and derived store | bounded session metadata and coverage | refreshes incrementally unless `--frozen` |
+| `inventory` | Codex home and derived store | configured surfaces, use, and startup estimates | refreshes incrementally unless `--frozen` |
+| `overhead` | Codex home and derived store | always-on context cost and residual | refreshes incrementally unless `--frozen` |
+| `usage` | Codex home and derived store | tools, Skills, models, and surface usage | refreshes incrementally unless `--frozen` |
+| `waste` | Codex home and derived store | ranked remove/slim/re-scope opportunities | refreshes incrementally unless `--frozen` |
+| `failures` | Codex home and derived store | recurring failures by normalized category and owner | refreshes incrementally unless `--frozen` |
+| `corrections` | Codex home and derived store | correction-lens findings | refreshes incrementally unless `--frozen` |
+| `rework` | Codex home and derived store | legacy rework findings | refreshes incrementally unless `--frozen` |
+| `stuck` | Codex home and derived store | bounded edit/failure loops and affected paths | refreshes incrementally unless `--frozen` |
+| `prompts` | Codex home and derived store | steer/correct/question/instruct patterns | refreshes incrementally unless `--frozen` |
+| `verification` | Codex home and derived store | verification-lens findings | refreshes incrementally unless `--frozen` |
+| `knowledge` | Codex home and derived store | knowledge-lens findings | refreshes incrementally unless `--frozen` |
+| `rediscovery` | Codex home and derived store | alias for `knowledge` | refreshes incrementally unless `--frozen` |
+| `instructions` | Codex home and derived store | instruction-lens findings | refreshes incrementally unless `--frozen` |
+| `doctor` | Codex home and derived store | action-first health summary by scope | refreshes incrementally unless `--frozen` |
+| `query` | existing derived store and SQL/stdin | bounded ad-hoc table, Markdown, or JSON rows | opens the store read-only; never refreshes or creates it |
 | `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | does not modify the supplied store or target files; legacy stores use a temporary migrated copy |
 | `optimize --apply --yes` | derived store and validated instruction/documentation targets | applies reviewed proposals and reports retained backups/recovery | modifies only the validated write set; never modifies the supplied store or rollout/state inputs |
 | `monitor` | one local rollout JSONL or state SQLite source | bounded incremental ingestion and cursor/status output | does not modify the source; writes the derived store and optional cursor file |
 
 `doctor` accepts the optional `--limit COUNT` to cap findings per scope.
-`optimize` requires exactly one of `--diff` or `--apply`. `--diff` is advisory
-and read-only. `--apply` requires explicit confirmation; non-interactive use
-must add `--yes` after reviewing the diff. It validates the complete write set,
-re-reads and re-hashes every file, keeps backups after success, and rolls back
-the whole batch on failure. `analyze` reports every lens, while the focused
-analysis commands report one lens through the same deterministic report format.
+`query` accepts one positional SQL statement or reads SQL from stdin. It
+accepts only a single read-only statement, limits output to 50 columns and 50
+rows, and never echoes the SQL in errors. JSON uses
+`{columns, rows, omitted_column_count, omitted_count}` inside a versioned
+`query` envelope.
+
+`optimize` requires exactly one of `--diff`, `--print`, or `--apply`.
+`--diff` and `--print` are advisory and read-only; `--print` emits the
+briefing without requiring a diff flag. `--apply` requires explicit
+confirmation; non-interactive use must add `--yes` after reviewing the diff.
+It validates the complete write set, re-reads and re-hashes every file, keeps
+backups after success, and rolls back the whole batch on failure. `analyze`
+reports every legacy lens, while the focused analysis commands report one
+typed view through its own deterministic report format.
 Add `--format json` to read-only reporting commands for schema version 1;
-aliases emit their canonical command name. Sessions and finding reports include
-an additive `coverage` object with the selected-store scope, valid activity
-range, session/record counts, and missing/invalid timestamp counts. Existing
-schema fields and aliases remain unchanged. Missing or invalid stores return a
-bounded, actionable error. Older supported store schemas are migrated only in
-a temporary copy, leaving the supplied store unchanged.
+aliases emit their canonical command name. Every view uses a versioned envelope
+with top-level `scope`, `coverage`, and `freshness` metadata; its `data` object
+contains named, bounded fields. Missing or invalid stores return a bounded,
+actionable error. Older supported store schemas are migrated only in a
+temporary copy, leaving the supplied store unchanged.
 
 Reporting periods use complete RFC3339 timestamps with `Z` or a numeric
 `+HH:MM`/`-HH:MM` offset and optional fractional seconds (up to 9 digits).
@@ -105,7 +120,8 @@ Either bound may be omitted, equal bounds select no activity, and reversed or
 invalid bounds fail without reading or changing the store. Relative periods
 are intentionally not part of this interface. Period-filtered JSON adds
 requested/observed bounds, included/excluded record counts, unknown
-record/event counts, and `empty`/`complete`/`partial` state to `data.coverage`.
+record/event counts, and `empty`/`complete`/`partial` state to the envelope
+`coverage` object.
 `optimize --apply` rejects period filters; `monitor` keeps its own ingestion
 boundary.
 
@@ -142,31 +158,37 @@ The bounded, human-reviewed finding evaluation plan is in
 It is a planning worksheet: real history requires explicit owner authorization,
 and `optimize --apply` is outside the pilot.
 
-The command examples below use an existing derived store at the default path:
+The command examples below use an existing derived store and opt into the
+read-only `--frozen` boundary:
 
 ```bash
-cargo run -- analyze --store .codexlens.sqlite
-cargo run -- sessions --store .codexlens.sqlite
-cargo run -- failures --store .codexlens.sqlite
-cargo run -- corrections --store .codexlens.sqlite
-cargo run -- rework --store .codexlens.sqlite
-cargo run -- verification --store .codexlens.sqlite
-cargo run -- knowledge --store .codexlens.sqlite
-cargo run -- instructions --store .codexlens.sqlite
-cargo run -- doctor --store .codexlens.sqlite --since 2026-01-01T00:00:00Z --until 2026-01-08T00:00:00Z
-cargo run -- optimize --diff --store .codexlens.sqlite
+cargo run -- analyze --store .codexlens.sqlite --frozen
+cargo run -- sessions --store .codexlens.sqlite --frozen
+cargo run -- inventory --store .codexlens.sqlite --frozen
+cargo run -- overhead --store .codexlens.sqlite --frozen
+cargo run -- usage --store .codexlens.sqlite --frozen
+cargo run -- waste --store .codexlens.sqlite --frozen
+cargo run -- failures --store .codexlens.sqlite --frozen
+cargo run -- stuck --store .codexlens.sqlite --frozen
+cargo run -- prompts --store .codexlens.sqlite --frozen
+cargo run -- corrections --store .codexlens.sqlite --frozen
+cargo run -- rework --store .codexlens.sqlite --frozen
+cargo run -- verification --store .codexlens.sqlite --frozen
+cargo run -- knowledge --store .codexlens.sqlite --frozen
+cargo run -- instructions --store .codexlens.sqlite --frozen
+cargo run -- doctor --store .codexlens.sqlite --frozen --since 2026-01-01T00:00:00Z --until 2026-01-08T00:00:00Z
+cargo run -- optimize --diff --store .codexlens.sqlite --frozen
 cargo run -- monitor --source tests/fixtures/rollout/monitoring.jsonl --kind rollout --store .codexlens.sqlite --max-polls 1
-cargo run -- doctor --format json --store .codexlens.sqlite
+cargo run -- doctor --format json --store .codexlens.sqlite --frozen
 ```
 
-Read-only reports make the data boundary explicit. `Activity` is the earliest
-and latest valid timestamp observed in the selected store; `Latest ingestion`
-is the separate time the store recorded an input. An unfiltered report is not
-necessarily all historical activity or the current raw inputs. Run `refresh`
-explicitly to update the store, and pass `--include-archived` during refresh to
-opt in to archived sessions; reporting never refreshes implicitly. Empty,
-missing, invalid, and partial timestamp coverage is reported as such rather
-than filling activity dates from ingestion time.
+Read views analyze the selected Codex home incrementally before rendering.
+`--frozen` makes the store-only boundary explicit: it does not discover raw
+inputs or write the store. `Activity` is the earliest and latest valid
+timestamp observed in the selected store; `Latest ingestion` is the separate
+time the store recorded an input. Empty, missing, invalid, and partial
+timestamp coverage is reported as such rather than filling activity dates
+from ingestion time.
 
 Example human-readable metadata prefix:
 

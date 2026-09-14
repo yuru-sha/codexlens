@@ -85,6 +85,8 @@ pub struct SessionSummary {
 }
 
 const JSON_SCHEMA_VERSION: u32 = 1;
+const PROPOSAL_VERIFICATION: &str =
+    "Run the project's documented verification command and inspect the target diff after applying.";
 
 pub fn render_json_finding_report(
     command: &str,
@@ -459,6 +461,7 @@ fn proposal_json(proposal: &Proposal) -> serde_json::Value {
             .map(|limitation| bounded_excerpt(limitation, MAX_PROPOSAL_TEXT_BYTES))
             .collect::<Vec<_>>(),
         "review_reminder": bounded_excerpt(&proposal.review_reminder, MAX_PROPOSAL_TEXT_BYTES),
+        "verification": PROPOSAL_VERIFICATION,
     })
 }
 
@@ -976,7 +979,7 @@ fn source_label(source: &SourceRef) -> String {
 pub fn render_proposal_summary(rendered: &RenderedDiff) -> String {
     let proposal = &rendered.proposal;
     let mut output = format!(
-        "Proposal {} {}\nObserved: {}\nEvidence: {} occurrences across {} sessions\nConfidence: {}\nHeuristic: {}\nTarget: {}\n",
+        "Proposal {} {}\nObserved: {}\nEvidence: {} occurrences across {} sessions\nConfidence: {}\nHeuristic: {}\nTarget: {}\nVerification: {}\n",
         proposal.action.as_str(),
         proposal.target_path.display(),
         proposal.observed_problem,
@@ -985,6 +988,7 @@ pub fn render_proposal_summary(rendered: &RenderedDiff) -> String {
         proposal.confidence.as_str(),
         proposal.heuristic,
         proposal.target_rationale,
+        PROPOSAL_VERIFICATION,
     );
     for limitation in &proposal.limitations {
         output.push_str("Limitation: ");
