@@ -197,7 +197,12 @@ fn normalize_records_with_resolver(
                             .as_deref()
                             .filter(|previous| *previous != session_id)
                         {
-                            rekey_session_references(&mut data, previous_session_id, &session_id);
+                            rekey_session_references(
+                                &mut data,
+                                &mut sessions,
+                                previous_session_id,
+                                &session_id,
+                            );
                         }
                     }
                     current_session_id = Some(session_id);
@@ -1115,7 +1120,12 @@ fn matching_state_session_for_candidate<'a>(
         })
 }
 
-fn rekey_session_references(data: &mut CanonicalData, from: &str, to: &str) {
+fn rekey_session_references(
+    data: &mut CanonicalData,
+    sessions: &mut BTreeMap<String, Session>,
+    from: &str,
+    to: &str,
+) {
     if from == to {
         return;
     }
@@ -1124,7 +1134,10 @@ fn rekey_session_references(data: &mut CanonicalData, from: &str, to: &str) {
             *session_id = Some(to.to_owned());
         }
     };
-    for session in &mut data.sessions {
+    for session in data.sessions.iter_mut() {
+        update(&mut session.parent_id);
+    }
+    for session in sessions.values_mut() {
         update(&mut session.parent_id);
     }
     for turn in &mut data.turns {
@@ -3304,6 +3317,12 @@ mod tests {
             r#"{"type":"session_meta","payload":{"id":"fixture-parent"}}
 {"type":"session_meta","payload":{"id":"fixture-child","parent_id":"fixture-parent"}}"#,
         );
+        let mut sessions = data
+            .sessions
+            .iter()
+            .cloned()
+            .map(|session| (session.id.clone(), session))
+            .collect::<BTreeMap<_, _>>();
 
         assert_eq!(
             data.sessions
@@ -3313,12 +3332,23 @@ mod tests {
             Some("fixture-parent")
         );
 
-        rekey_session_references(&mut data, "fixture-parent", "fixture-rollout-parent");
+        rekey_session_references(
+            &mut data,
+            &mut sessions,
+            "fixture-parent",
+            "fixture-rollout-parent",
+        );
 
         assert_eq!(
             data.sessions
                 .iter()
                 .find(|session| session.id == "fixture-child")
+                .and_then(|session| session.parent_id.as_deref()),
+            Some("fixture-rollout-parent")
+        );
+        assert_eq!(
+            sessions
+                .get("fixture-child")
                 .and_then(|session| session.parent_id.as_deref()),
             Some("fixture-rollout-parent")
         );
