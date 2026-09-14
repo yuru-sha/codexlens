@@ -1700,12 +1700,23 @@ impl RendererStatus {
 }
 
 fn parse_renderer_status(stdout: Option<&str>, stderr: Option<&str>) -> RendererParse {
-    [stdout, stderr]
+    let mut malformed = false;
+    for parsed in [stdout, stderr]
         .into_iter()
         .flatten()
         .map(parse_renderer_text)
-        .find(|parsed| !matches!(parsed, RendererParse::NotRenderer))
-        .unwrap_or(RendererParse::NotRenderer)
+    {
+        match parsed {
+            RendererParse::Known(status) => return RendererParse::Known(status),
+            RendererParse::Malformed => malformed = true,
+            RendererParse::NotRenderer => {}
+        }
+    }
+    if malformed {
+        RendererParse::Malformed
+    } else {
+        RendererParse::NotRenderer
+    }
 }
 
 fn parse_renderer_text(output: &str) -> RendererParse {
@@ -2427,7 +2438,7 @@ mod tests {
             "../tests/fixtures/rollout/tool-result-envelopes.jsonl"
         ));
 
-        assert_eq!(data.tool_results.len(), 6);
+        assert_eq!(data.tool_results.len(), 7);
         assert_eq!(data.tool_results[0].exit_code, Some(0));
         assert_eq!(data.tool_results[0].outcome, ToolOutcome::Succeeded);
         assert_eq!(
@@ -2458,6 +2469,12 @@ mod tests {
         assert_eq!(data.tool_results[5].status.as_deref(), Some("completed"));
         assert_eq!(
             data.tool_results[5].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
+        assert_eq!(data.tool_results[6].outcome, ToolOutcome::Succeeded);
+        assert_eq!(data.tool_results[6].status.as_deref(), Some("completed"));
+        assert_eq!(
+            data.tool_results[6].outcome_source,
             OutcomeSource::ParsedRenderer
         );
     }

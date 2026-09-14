@@ -10,3 +10,5 @@
 {"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-renderer-malformed-call","output":"Process exited with code\nerror text from an ambiguous renderer."}}
 {"type":"session_meta","payload":{"id":"fixture-renderer-body"}}
 {"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-renderer-body-call","output":"Script completed\nerror: this is a successful payload containing failed as text."}}
+{"type":"session_meta","payload":{"id":"fixture-renderer-cross-stream"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-renderer-cross-stream-call","output":"Process exited with code\nambiguous stdout","stderr":"Script completed\nerror and failed are payload text."}}
