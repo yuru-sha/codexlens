@@ -107,10 +107,11 @@ Emit a repeated-failure candidate when the shared threshold is met. Include:
 
 Do not infer that a command is wrong solely because it failed once.
 
-For a wrapper or non-shell tool without a canonical command, use the
-`no_canonical_command` family. Keep the failure evidence and state the
-unpacking limitation, but leave `observed_commands` empty and do not suggest
-documenting a shell prerequisite.
+For a known wrapper tool such as `exec`, `js`, or `wait` without a canonical
+command, emit no failure event. For another non-shell tool without a canonical
+command, use the `no_canonical_command` family, keep the failure evidence and
+state the unpacking limitation, leave `observed_commands` empty, and do not
+suggest documenting a shell prerequisite.
 
 ## 4. `corrections`
 

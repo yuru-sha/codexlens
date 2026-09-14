@@ -1661,12 +1661,7 @@ mod tests {
             .iter()
             .filter(|row| row.command_family == "no_canonical_command")
             .collect::<Vec<_>>();
-        assert!(!wrapper_rows.is_empty());
-        assert!(wrapper_rows.iter().all(|row| {
-            row.opportunity
-                .action
-                .contains("no shell-command prerequisite")
-        }));
+        assert!(wrapper_rows.is_empty());
     }
 
     #[test]
