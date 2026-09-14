@@ -291,7 +291,8 @@ cwd: string | null, project: string | null}`. A `RenderedDiff` is
 `proposed_text: string | null`, `existing_text: string | null`,
 `source_path: string | null`, `expected_target_hash: string | null`,
 `expected_source_hash: string | null`, `target_rationale: string`,
-`limitations: string[]`, and `review_reminder: string`. A `SkippedProposal` is
+`limitations: string[]`, `review_reminder: string`, and
+`verification: string`. A `SkippedProposal` is
 `{target_path: string, reason: string, proposal: Proposal | null}`.
 `rendered` and `skipped` are arrays of those exact element types. When a
 rendered proposal is omitted for machine-output safety, `proposal` preserves
@@ -421,6 +422,7 @@ The command-specific empty and alias forms are exact:
   Confidence: <low | medium | high>\n
   Heuristic: <bounded text>\n
   Target: <bounded text>\n
+  Verification: <bounded text>\n
   Limitation: <bounded text>\n
   Evidence ref: <path[:line]>[ — <bounded excerpt>]\n
   <review reminder>\n

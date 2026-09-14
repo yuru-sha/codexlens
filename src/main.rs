@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::{self, ErrorKind, IsTerminal, Write};
+use std::io::{self, ErrorKind, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use rusqlite::types::ValueRef;
 
 use codexlens::advisor::{
     ApplyPlan, ApplyReport, DiffBatch, DoctorOptions, ReportCoverage, doctor_with_coverage,
@@ -118,6 +119,12 @@ enum Command {
         #[arg(long, value_name = "COUNT")]
         limit: Option<usize>,
     },
+    Query {
+        #[arg(value_name = "SQL")]
+        sql: Option<String>,
+        #[command(flatten)]
+        options: QueryOptions,
+    },
     Optimize {
         #[command(flatten)]
         store: StoreOptions,
@@ -127,6 +134,8 @@ enum Command {
         apply: bool,
         #[arg(long, requires = "apply")]
         yes: bool,
+        #[arg(long, conflicts_with_all = ["diff", "apply"])]
+        print: bool,
     },
     Monitor {
         #[command(flatten)]
@@ -219,6 +228,20 @@ struct StoreOptions {
 }
 
 impl StoreOptions {
+    fn store_path(&self) -> Result<PathBuf> {
+        self.store.clone().map_or_else(default_store_path, Ok)
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+struct QueryOptions {
+    #[arg(long, short = 's', value_name = "PATH")]
+    store: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    format: OutputFormat,
+}
+
+impl QueryOptions {
     fn store_path(&self) -> Result<PathBuf> {
         self.store.clone().map_or_else(default_store_path, Ok)
     }
@@ -495,14 +518,16 @@ fn main() -> Result<()> {
         Command::Knowledge { store } => run_finding_report(&store, knowledge, "knowledge"),
         Command::Instructions { store } => run_finding_report(&store, instructions, "instructions"),
         Command::Doctor { store, limit } => run_doctor_report(&store, limit),
+        Command::Query { sql, options } => run_query(sql, &options),
         Command::Optimize {
             store,
             diff,
             apply,
             yes,
+            print,
         } => {
-            if !diff && !apply {
-                bail!("optimize requires --diff or --apply");
+            if !diff && !apply && !print {
+                bail!("optimize requires --diff, --print, or --apply");
             }
             if apply && (store.since.is_some() || store.until.is_some()) {
                 bail!(
@@ -510,8 +535,12 @@ fn main() -> Result<()> {
                 );
             }
             let (data, findings, freshness, selection) = load_analysis(&store)?;
+            let findings = findings
+                .into_iter()
+                .filter(|finding| scope_matches(&store.scope, &finding.scope))
+                .collect::<Vec<_>>();
             let proposal_plan = proposals_for_findings(&data, &findings);
-            if diff {
+            if diff || print {
                 let batch = proposal_batch(&proposal_plan);
                 if let Some(selection) = selection.as_ref() {
                     let coverage = selection.report_coverage.clone();
@@ -959,6 +988,240 @@ fn bounded_text(value: &str) -> String {
         end -= 1;
     }
     format!("{}...", &value[..end])
+}
+
+const QUERY_SQL_MAX_BYTES: usize = 64 * 1024;
+const QUERY_COLUMN_LIMIT: usize = 50;
+
+struct QueryResult {
+    columns: Vec<String>,
+    rows: Vec<Vec<serde_json::Value>>,
+    omitted_columns: usize,
+    omitted_rows: usize,
+}
+
+fn run_query(sql: Option<String>, options: &QueryOptions) -> Result<()> {
+    let sql = match sql {
+        Some(sql) => sql,
+        None => read_query_from_stdin()?,
+    };
+    validate_query_input(&sql)?;
+    let path = options.store_path()?;
+    let display = bounded_display(&path);
+    if !path.is_file() {
+        bail!("store does not exist: {display}");
+    }
+    let store = Store::open_read_only(&path).with_context(|| {
+        format!("failed to open query store {display}; provide a valid SQLite store")
+    })?;
+    let result = execute_query(store.connection(), &sql)?;
+    match options.format {
+        OutputFormat::Table => print!("{}", render_query_table(&result)),
+        OutputFormat::Markdown => print!("{}", render_query_markdown(&result)),
+        OutputFormat::Json => {
+            let document = serde_json::json!({
+                "schema_version": 1,
+                "command": "query",
+                "data": {
+                    "columns": result.columns,
+                    "rows": result.rows,
+                    "omitted_column_count": result.omitted_columns,
+                    "omitted_count": result.omitted_rows,
+                },
+            });
+            println!("{}", serde_json::to_string_pretty(&document)?);
+        }
+    }
+    Ok(())
+}
+
+fn read_query_from_stdin() -> Result<String> {
+    let mut sql = String::new();
+    io::stdin()
+        .take((QUERY_SQL_MAX_BYTES + 1) as u64)
+        .read_to_string(&mut sql)
+        .context("could not read query from stdin")?;
+    Ok(sql)
+}
+
+fn validate_query_input(sql: &str) -> Result<()> {
+    if sql.is_empty() {
+        bail!("query requires SQL as an argument or on stdin");
+    }
+    if sql.len() > QUERY_SQL_MAX_BYTES {
+        bail!("query exceeds the {QUERY_SQL_MAX_BYTES}-byte limit");
+    }
+    if sql.as_bytes().contains(&0) {
+        bail!("query contains an unsupported NUL byte");
+    }
+    Ok(())
+}
+
+fn execute_query(connection: &rusqlite::Connection, sql: &str) -> Result<QueryResult> {
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|_| anyhow::anyhow!("query must contain one valid SQL statement"))?;
+    if starts_with_sql_keyword(sql, "pragma") || !statement.readonly() {
+        bail!("query must be a single read-only SQL statement");
+    }
+
+    let total_columns = statement.column_count();
+    let columns = statement
+        .column_names()
+        .into_iter()
+        .take(QUERY_COLUMN_LIMIT)
+        .map(bounded_text)
+        .collect::<Vec<_>>();
+    let omitted_columns = total_columns.saturating_sub(columns.len());
+    let mut rows = statement
+        .query([])
+        .map_err(|_| anyhow::anyhow!("query could not start"))?;
+    let mut result_rows = Vec::new();
+    let mut omitted_rows = 0;
+    while let Some(row) = rows
+        .next()
+        .map_err(|_| anyhow::anyhow!("query could not read result rows"))?
+    {
+        if result_rows.len() >= CLI_VIEW_ROW_LIMIT {
+            omitted_rows += 1;
+            continue;
+        }
+        let mut result_row = Vec::with_capacity(columns.len());
+        for index in 0..columns.len() {
+            let value = row
+                .get_ref(index)
+                .map_err(|_| anyhow::anyhow!("query returned an unreadable value"))?;
+            result_row.push(query_value(value));
+        }
+        result_rows.push(result_row);
+    }
+    Ok(QueryResult {
+        columns,
+        rows: result_rows,
+        omitted_columns,
+        omitted_rows,
+    })
+}
+
+fn query_value(value: ValueRef<'_>) -> serde_json::Value {
+    match value {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(value) => serde_json::json!(value),
+        ValueRef::Real(value) => serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        ValueRef::Text(value) => {
+            serde_json::Value::String(bounded_text(&String::from_utf8_lossy(value)))
+        }
+        ValueRef::Blob(value) => serde_json::Value::String(format!("<blob {} bytes>", value.len())),
+    }
+}
+
+fn query_human_value(value: &serde_json::Value) -> String {
+    let value = match value {
+        serde_json::Value::Null => "null".to_owned(),
+        serde_json::Value::String(value) => value.clone(),
+        value => value.to_string(),
+    };
+    value.replace(['\r', '\n'], " ")
+}
+
+fn render_query_table(result: &QueryResult) -> String {
+    let mut output = String::from("QUERY\n");
+    if result.columns.is_empty() {
+        output.push_str("No columns.\n");
+        return output;
+    }
+    output.push_str("Columns: ");
+    output.push_str(&result.columns.join(" | "));
+    output.push('\n');
+    for row in &result.rows {
+        output.push_str("- ");
+        output.push_str(
+            &row.iter()
+                .map(query_human_value)
+                .collect::<Vec<_>>()
+                .join(" | "),
+        );
+        output.push('\n');
+    }
+    output.push_str(&format!(
+        "Rows: {}\nOmitted rows: {}\nOmitted columns: {}\n",
+        result.rows.len(),
+        result.omitted_rows,
+        result.omitted_columns
+    ));
+    output
+}
+
+fn markdown_cell(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('|', "\\|")
+}
+
+fn render_query_markdown(result: &QueryResult) -> String {
+    let mut output = String::from("# QUERY\n\n");
+    if result.columns.is_empty() {
+        output.push_str("No columns.\n");
+        return output;
+    }
+    output.push('|');
+    for column in &result.columns {
+        output.push(' ');
+        output.push_str(&markdown_cell(column));
+        output.push_str(" |");
+    }
+    output.push('\n');
+    output.push('|');
+    for _ in &result.columns {
+        output.push_str(" --- |");
+    }
+    output.push('\n');
+    for row in &result.rows {
+        output.push('|');
+        for value in row {
+            output.push(' ');
+            output.push_str(&markdown_cell(&query_human_value(value)));
+            output.push_str(" |");
+        }
+        output.push('\n');
+    }
+    output.push_str(&format!(
+        "\nRows: {}\nOmitted rows: {}\nOmitted columns: {}\n",
+        result.rows.len(),
+        result.omitted_rows,
+        result.omitted_columns
+    ));
+    output
+}
+
+fn starts_with_sql_keyword(mut sql: &str, keyword: &str) -> bool {
+    loop {
+        sql = sql.trim_start();
+        if let Some(comment) = sql.strip_prefix("--") {
+            let Some(end) = comment.find('\n') else {
+                return false;
+            };
+            sql = &comment[end + 1..];
+            continue;
+        }
+        if let Some(comment) = sql.strip_prefix("/*") {
+            let Some(end) = comment.find("*/") else {
+                return false;
+            };
+            sql = &comment[end + 2..];
+            continue;
+        }
+        let Some(prefix) = sql.get(..keyword.len()) else {
+            return false;
+        };
+        if !prefix.eq_ignore_ascii_case(keyword) {
+            return false;
+        }
+        return !sql
+            .get(keyword.len()..)
+            .and_then(|tail| tail.chars().next())
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+    }
 }
 
 fn proposal_batch(plan: &codexlens::advisor::ProposalPlan) -> codexlens::advisor::DiffBatch {
