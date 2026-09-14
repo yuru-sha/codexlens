@@ -83,16 +83,19 @@ analysis layer must prefer it when available.
 
 The outer envelope type and nested payload type are never tool names or
 commands. For a `response_item`, use `payload.name` as the tool name and
-extract commands only from structured fields such as `payload.input.cmd` or
-`payload.input.command`. For an `event_msg`, use the event family only to
-select the adapter, then read the structured command fields.
+extract commands only from structured fields such as `payload.input.cmd`,
+`payload.input.command`, or their `arguments` equivalents. A JSON-encoded
+object or array in `input` or `arguments` is decoded once before applying the
+same structured extraction rules. For an `event_msg`, use the event family
+only to select the adapter, then read the structured command fields.
 
 Command extraction is typed and ordered: join an argv array with one space;
 use a string under a command field; inspect a structured object for `argv`,
 `cmd`, then `command`; otherwise retain an unknown tool call with provenance.
-Arbitrary strings, serialized tool input, wrapper source, and renderer output
-are not commands. Values such as `exec_command const`, `exec_command s:`, and
-`s:12000});` are invalid canonical names and must be rejected before storage.
+Malformed or unsupported serialized input, arbitrary strings, wrapper source,
+and renderer output are not commands. Values such as `exec_command const`,
+`exec_command s:`, and `s:12000});` are invalid canonical names and must be
+rejected before storage.
 
 ### 3.2 Session selection
 
