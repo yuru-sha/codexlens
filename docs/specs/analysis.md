@@ -79,6 +79,7 @@ from the project language.
 ### Input
 
 - tool result with non-zero exit code or failed status;
+- tool result with a parsed Codex renderer status;
 - explicit error event;
 - bounded stderr/output error marker when structured outcome is absent.
 
@@ -87,6 +88,10 @@ from the project language.
 `FailureSignature` is derived from tool name, normalized command family, and
 normalized error category. Paths, IDs, timestamps, and line numbers are
 redacted or replaced before matching.
+
+Parsed renderer status is structured evidence and remains distinct from
+fallback output-text evidence. Unknown or malformed renderer text is not a
+failure signal.
 
 ### Finding
 
@@ -100,6 +105,11 @@ Emit a repeated-failure candidate when the shared threshold is met. Include:
 - a proposal to document the prerequisite or preferred command.
 
 Do not infer that a command is wrong solely because it failed once.
+
+For a wrapper or non-shell tool without a canonical command, use the
+`no_canonical_command` family. Keep the failure evidence and state the
+unpacking limitation, but leave `observed_commands` empty and do not suggest
+documenting a shell prerequisite.
 
 ## 4. `corrections`
 
@@ -134,8 +144,10 @@ known safe pattern; do not hard-code repository-specific exclusions.
 The adapter emits file-operation evidence only from recognized patch markers,
 typed patch/file tool payloads, or a canonical structured shell command. Shell
 redirection targets are not inferred from `input_summary`, wrapper or
-JavaScript text, serialized JSON, or patch text. Quoted targets remain one
-path when the shell command boundary is known. Failed or ambiguous calls,
+JavaScript text, nested or opaque serialized JSON, or patch text. A typed
+JSON-encoded `cmd`, `argv`, or `command` field is decoded once by the adapter
+and remains canonical command evidence. Quoted targets remain one path when
+the shell command boundary is known. Failed or ambiguous calls,
 empty or fragmented paths, file-descriptor targets, `/dev/null` and its
 descendants, and known parser artifacts are rejected before analysis.
 
