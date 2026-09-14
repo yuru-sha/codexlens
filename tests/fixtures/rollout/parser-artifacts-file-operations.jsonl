@@ -2,6 +2,7 @@
 {"timestamp":"2026-01-08T00:00:01Z","type":"turn_context","payload":{"turn_id":"fixture-file-operation-turn","cwd":"/fixture/project"}}
 {"timestamp":"2026-01-08T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-patch-call","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/patched.rs\\n@@\\n-old\\n+new\\n\"}"}}
 {"timestamp":"2026-01-08T00:00:03Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-shell-call","name":"exec_command","input":{"cmd":"printf x > 'src/quoted output.txt' && printf y > \"/fixture/project/quoted absolute.txt\" && printf z 2> /dev/null"}}}
+{"timestamp":"2026-01-08T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-quoted-marker-shell-call","name":"exec_command","input":{"cmd":"printf '*** Update File: note.txt' > 'src/quoted marker output.txt'"}}}
 {"timestamp":"2026-01-08T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-wrapper-call","name":"exec","input":"await tools.exec_command({cmd: \"printf x > /dev/null/...\"});"}}
 {"timestamp":"2026-01-08T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-summary-call","name":"exec_command","input":"printf x > /fixture/project/from-summary.txt"}}
 {"timestamp":"2026-01-08T00:00:06Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-json-call","name":"exec_command","input":"{\"cmd\":\"printf x > /fixture/project/from-json.txt\"}"}}

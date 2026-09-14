@@ -2268,6 +2268,7 @@ mod tests {
                 "src/patched.rs",
                 "/fixture/project/quoted absolute.txt",
                 "src/quoted output.txt",
+                "src/quoted marker output.txt",
             ]
         );
         assert!(data.file_operations.iter().all(|operation| {
