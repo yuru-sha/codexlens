@@ -31,7 +31,7 @@ use crate::state::{
     StateDiagnostic, StateDiagnosticKind, StateReadResult, merge_state_results, read_state_database,
 };
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 const REPORTING_TABLES: &[&str] = &[
     "schema_versions",
@@ -129,6 +129,7 @@ struct IngestBatchOptions<'a> {
     preserve_instruction_snapshots: bool,
     replace: bool,
     retracted_file_operations: &'a [FileOperation],
+    session_rekey: Option<(&'a str, &'a str)>,
 }
 
 struct RolloutIngestContext<'a> {
@@ -487,6 +488,7 @@ impl Store {
                 preserve_instruction_snapshots: false,
                 replace: true,
                 retracted_file_operations: &[],
+                session_rekey: None,
             },
         )
     }
@@ -497,6 +499,7 @@ impl Store {
         kind: IngestInputKind,
         data: &CanonicalData,
         retracted_file_operations: &[FileOperation],
+        session_rekey: Option<(&str, &str)>,
     ) -> Result<IngestSummary> {
         let identity = canonical_identity(source_path)?;
         let fingerprint = fingerprint(source_path)?;
@@ -511,6 +514,7 @@ impl Store {
                 preserve_instruction_snapshots: false,
                 replace: false,
                 retracted_file_operations,
+                session_rekey,
             },
         )
     }
@@ -567,6 +571,7 @@ impl Store {
                 preserve_instruction_snapshots: context.force_refresh && unchanged,
                 replace: true,
                 retracted_file_operations: &[],
+                session_rekey: None,
             },
         )
     }
@@ -625,6 +630,7 @@ impl Store {
                 preserve_instruction_snapshots: false,
                 replace: true,
                 retracted_file_operations: &[],
+                session_rekey: None,
             },
         )
     }
@@ -666,6 +672,7 @@ impl Store {
                 preserve_instruction_snapshots: false,
                 replace: true,
                 retracted_file_operations: &[],
+                session_rekey: None,
             },
         )
     }
@@ -762,6 +769,9 @@ impl Store {
                 &identity,
                 options.preserve_instruction_snapshots,
             )?;
+        }
+        if let Some((from, to)) = options.session_rekey {
+            rekey_source_session(&transaction, &identity, from, to)?;
         }
         delete_file_operations(&transaction, &identity, options.retracted_file_operations)?;
         insert_data(
@@ -889,7 +899,7 @@ fn load_canonical(connection: &Connection) -> Result<CanonicalData> {
 
 fn load_sessions(connection: &Connection) -> Result<Vec<Session>> {
     let mut statement = connection.prepare(
-        "SELECT session_id, source_path, source_line, source_kind, ingested_at, parser_schema_version,
+        "SELECT session_id, rollout_id, codex_session_id, thread_id, source_path, source_line, source_kind, ingested_at, parser_schema_version,
                 created_at, updated_at, cwd, project, model, provider, source, thread_source,
                 rollout_path, archive_state, title, preview, parent_id, cli_version, originator,
                 history_mode, reasoning_effort
@@ -898,24 +908,27 @@ fn load_sessions(connection: &Connection) -> Result<Vec<Session>> {
     Ok(load_rows(&mut statement, |row| {
         Ok(Session {
             id: row.get(0)?,
-            provenance: source_from_row(row, 1, 2, 3, 4, 5)?,
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
-            cwd: row.get(8)?,
-            project: row.get(9)?,
-            model: row.get(10)?,
-            provider: row.get(11)?,
-            source: row.get(12)?,
-            thread_source: row.get(13)?,
-            rollout_path: row.get(14)?,
-            archive_state: row.get::<_, Option<i64>>(15)?.map(|value| value != 0),
-            title: row.get(16)?,
-            preview: row.get(17)?,
-            parent_id: row.get(18)?,
-            cli_version: row.get(19)?,
-            originator: row.get(20)?,
-            history_mode: row.get(21)?,
-            reasoning_effort: row.get(22)?,
+            rollout_id: row.get(1)?,
+            session_id: row.get(2)?,
+            thread_id: row.get(3)?,
+            provenance: source_from_row(row, 4, 5, 6, 7, 8)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+            cwd: row.get(11)?,
+            project: row.get(12)?,
+            model: row.get(13)?,
+            provider: row.get(14)?,
+            source: row.get(15)?,
+            thread_source: row.get(16)?,
+            rollout_path: row.get(17)?,
+            archive_state: row.get::<_, Option<i64>>(18)?.map(|value| value != 0),
+            title: row.get(19)?,
+            preview: row.get(20)?,
+            parent_id: row.get(21)?,
+            cli_version: row.get(22)?,
+            originator: row.get(23)?,
+            history_mode: row.get(24)?,
+            reasoning_effort: row.get(25)?,
         })
     })?)
 }
@@ -1551,6 +1564,9 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             );
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT NOT NULL,
+                rollout_id TEXT,
+                codex_session_id TEXT,
+                thread_id TEXT,
                 source_identity TEXT NOT NULL,
                 source_path TEXT NOT NULL,
                 source_line INTEGER,
@@ -1875,6 +1891,16 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             "#,
         )?;
     }
+    if current < 8 {
+        add_column_if_table_exists(&transaction, "sessions", "rollout_id TEXT")?;
+        add_column_if_table_exists(&transaction, "sessions", "codex_session_id TEXT")?;
+        add_column_if_table_exists(&transaction, "sessions", "thread_id TEXT")?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO schema_versions (version) VALUES (8)",
+            [],
+        )?;
+        transaction.execute_batch("PRAGMA user_version = 8;")?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -2130,6 +2156,42 @@ fn delete_source(
     Ok(())
 }
 
+fn rekey_source_session(
+    transaction: &Transaction<'_>,
+    identity: &str,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<()> {
+    if from == to {
+        return Ok(());
+    }
+    transaction.execute(
+        "DELETE FROM sessions WHERE source_identity = ?1 AND session_id = ?2",
+        params![identity, to],
+    )?;
+    for table in [
+        "sessions",
+        "turns",
+        "records",
+        "messages",
+        "tool_calls",
+        "tool_results",
+        "file_operations",
+        "token_usage",
+        "instruction_snapshots",
+        "instruction_files",
+        "instruction_joins",
+    ] {
+        transaction.execute(
+            &format!(
+                "UPDATE {table} SET session_id = ?2 WHERE source_identity = ?1 AND session_id = ?3"
+            ),
+            params![identity, to, from],
+        )?;
+    }
+    Ok(())
+}
+
 fn delete_file_operations(
     transaction: &Transaction<'_>,
     identity: &str,
@@ -2239,9 +2301,12 @@ fn insert_surface(transaction: &Transaction<'_>, surface: &Surface) -> Result<()
 
 fn insert_session(transaction: &Transaction<'_>, identity: &str, session: &Session) -> Result<()> {
     transaction.execute(
-        "INSERT OR REPLACE INTO sessions (session_id, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, created_at, updated_at, cwd, project, model, provider, source, thread_source, rollout_path, archive_state, title, preview, parent_id, cli_version, originator, history_mode, reasoning_effort) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        "INSERT OR REPLACE INTO sessions (session_id, rollout_id, codex_session_id, thread_id, source_identity, source_path, source_line, source_kind, ingested_at, parser_schema_version, created_at, updated_at, cwd, project, model, provider, source, thread_source, rollout_path, archive_state, title, preview, parent_id, cli_version, originator, history_mode, reasoning_effort) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
         params![
             session.id,
+            session.rollout_id,
+            session.session_id,
+            session.thread_id,
             identity,
             session.provenance.path.to_string_lossy().as_ref(),
             db_line(session.provenance.line),
@@ -3458,6 +3523,35 @@ mod tests {
                 "state".to_owned(),
             )
         );
+        let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn identity_metadata_round_trips_through_the_derived_store() {
+        let source = temp_path("session-identities.sqlite");
+        create_database(
+            &source,
+            include_str!("../tests/fixtures/state/session-identities.sql"),
+        );
+
+        let mut store = Store::in_memory().unwrap();
+        store.ingest_state_database(&source).unwrap();
+
+        let loaded = store.load_canonical().unwrap();
+        let main = loaded
+            .sessions
+            .iter()
+            .find(|session| session.id == "fixture-main-thread")
+            .unwrap();
+        assert_eq!(main.rollout_id.as_deref(), Some("fixture-rollout"));
+        assert_eq!(main.session_id.as_deref(), Some("fixture-session-tree"));
+        assert_eq!(main.thread_id.as_deref(), Some("fixture-main-thread"));
+        let child = loaded
+            .sessions
+            .iter()
+            .find(|session| session.id == "fixture-child-thread")
+            .unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some("fixture-main-thread"));
         let _ = fs::remove_file(source);
     }
 

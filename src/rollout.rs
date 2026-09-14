@@ -274,6 +274,20 @@ pub fn parse_rollout_file(path: &Path, options: &RolloutParseOptions) -> Rollout
     parse_rollout(path, options)
 }
 
+pub(crate) fn rollout_id_from_path(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let core = name
+        .strip_suffix(".jsonl.zst")
+        .or_else(|| name.strip_suffix(".jsonl"))?
+        .strip_prefix("rollout-")?;
+    if core.get(19..20)? != "-" {
+        return None;
+    }
+    let ids = core.get(20..)?;
+    let rollout = ids.split_once('_').map_or(ids, |(_, rollout)| rollout);
+    (!rollout.is_empty()).then(|| rollout.to_owned())
+}
+
 pub fn parse_rollouts<I, P>(paths: I, options: &RolloutParseOptions) -> RolloutParseResult
 where
     I: IntoIterator<Item = P>,
@@ -750,6 +764,26 @@ mod tests {
 
         assert!(result.records.is_empty());
         assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn rollout_id_from_path_matches_normal_and_reverted_names() {
+        assert_eq!(
+            rollout_id_from_path(Path::new(
+                "rollout-2026-01-02T00-00-00-fixture-thread.jsonl",
+            )),
+            Some("fixture-thread".to_owned())
+        );
+        assert_eq!(
+            rollout_id_from_path(Path::new(
+                "rollout-2026-01-02T00-00-00-fixture-thread_fixture-rollout.jsonl.zst",
+            )),
+            Some("fixture-rollout".to_owned())
+        );
+        assert_eq!(
+            rollout_id_from_path(Path::new("rollout-fixture-thread.jsonl")),
+            None
+        );
     }
 
     #[test]

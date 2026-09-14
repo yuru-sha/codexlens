@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use codexlens::analysis::analyze_default;
-use codexlens::model::CanonicalData;
+use codexlens::model::{CanonicalData, Session, SourceRef};
 use codexlens::monitor::{LocalMonitor, MonitorClock, MonitorOptions, MonitorStatus};
 use codexlens::rollout::RolloutParseOptions;
-use codexlens::store::Store;
+use codexlens::store::{IngestInputKind, Store};
 use rusqlite::Connection;
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
@@ -67,6 +67,78 @@ fn monitor_holds_a_partial_final_line_until_the_newline_arrives() {
     );
 
     let _ = fs::remove_file(source);
+}
+
+#[test]
+fn monitor_rekeys_state_fallback_rows_across_polls() {
+    let source = temp_source("state-rekey-rollout");
+    let state_source = temp_source("state-rekey-metadata");
+    let lines = include_str!("fixtures/rollout/state-fallback-rekey.jsonl")
+        .lines()
+        .collect::<Vec<_>>();
+    fs::write(&source, format!("{}\n", lines[0])).unwrap();
+    fs::write(&state_source, []).unwrap();
+    let rollout_path = fs::canonicalize(&source).unwrap();
+    let state_session = Session {
+        id: "fixture-state-session".to_owned(),
+        rollout_id: None,
+        session_id: None,
+        thread_id: None,
+        created_at: None,
+        updated_at: None,
+        cwd: None,
+        project: None,
+        model: None,
+        provider: None,
+        source: None,
+        thread_source: None,
+        rollout_path: Some(rollout_path.to_string_lossy().into_owned()),
+        archive_state: None,
+        title: None,
+        preview: None,
+        parent_id: None,
+        cli_version: None,
+        originator: None,
+        history_mode: None,
+        reasoning_effort: None,
+        provenance: SourceRef::state(state_source.clone()),
+    };
+    let mut store = Store::in_memory().unwrap();
+    store
+        .ingest_canonical(
+            &source,
+            IngestInputKind::Rollout,
+            &CanonicalData {
+                sessions: vec![state_session],
+                ..CanonicalData::default()
+            },
+        )
+        .unwrap();
+    let mut monitor = LocalMonitor::rollout(&source, None, MonitorOptions::default()).unwrap();
+
+    let first_poll = monitor.poll(&mut store).unwrap();
+    assert_eq!(first_poll.records, 1);
+    append(&source, format!("{}\n", lines[1]).as_bytes());
+    let second_poll = monitor.poll(&mut store).unwrap();
+    assert_eq!(second_poll.records, 1);
+
+    let data = store.load_canonical().unwrap();
+    assert_eq!(
+        data.sessions
+            .iter()
+            .filter(|session| session.provenance.path == rollout_path)
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        ["fixture-rollout-session"]
+    );
+    assert!(
+        data.records
+            .iter()
+            .all(|record| record.session_id.as_deref() == Some("fixture-rollout-session"))
+    );
+
+    let _ = fs::remove_file(source);
+    let _ = fs::remove_file(state_source);
 }
 
 fn record_signature(data: &CanonicalData) -> Vec<RecordSignature> {

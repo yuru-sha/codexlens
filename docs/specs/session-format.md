@@ -104,11 +104,21 @@ the parent. `--include-archived` adds inputs under `archived_sessions`.
 `--days N` replaces the default window; `--since` and `--until` are absolute
 RFC3339 half-open bounds and cannot be combined with `--days`.
 
+The canonical `Session.id` is the per-thread identity used for selection. The
+adapter chooses it deterministically from `thread_id`, then `id`, then
+`session_id`, and finally the rollout identity derived from the source path.
+`rollout_id`, `session_id`, and `thread_id` are retained as separate optional
+metadata, while `parent_id` is the canonical parent-thread identity. A
+rollout's repeated metadata keeps its first canonical thread key; expected
+differences between rollout, tree-session, and thread identity roles are not
+metadata conflicts, while differing values for the same canonical field remain
+diagnostics.
+
 ## 4. Session metadata
 
 `session_meta.payload` may provide:
 
-- session ID or thread ID;
+- rollout, session, and thread identity;
 - creation timestamp;
 - cwd;
 - originator/source/thread source;
@@ -131,6 +141,12 @@ RFC3339 half-open bounds and cannot be combined with `--days`.
 These are optional observations. The absence of `user_instructions` does not
 mean that no instructions were active.
 
+The physical rollout identity is read from an explicit `rollout_id` when
+present, otherwise from the final identity component of a `rollout-*.jsonl`
+or `rollout-*.jsonl.zst` source name. This identity is used to join repeated
+metadata for one rollout without using the tree-level `session_id` as the
+per-thread key.
+
 ## 5. State SQLite
 
 `state_*.sqlite` is a local index owned by Codex. It is metadata enrichment,
@@ -139,7 +155,7 @@ columns it needs and tolerate extra or missing columns.
 
 The useful logical fields are:
 
-- thread/session identity;
+- rollout identity, tree-level session identity, and per-thread identity;
 - rollout path;
 - created/updated times;
 - source and thread source;
@@ -150,10 +166,13 @@ The useful logical fields are:
 - parent/child relationship when available.
 
 The database may be split across multiple `state_*.sqlite` files. The
-canonical session identity is the stable thread/session ID, not the database
-filename. When metadata conflicts with a rollout's `session_meta`, rollout
-values are authoritative, state values fill missing fields, and differing
-non-empty values remain diagnostics; evidence is not silently overwritten.
+canonical session identity is the stable per-thread ID, not the database
+filename. State may expose only a tree-level session or rollout identity, so
+the same deterministic fallback order is used there. When metadata conflicts
+with a rollout's `session_meta`, rollout values are authoritative, state values
+fill missing fields, and differing non-empty values for the same canonical field
+remain diagnostics; a matching rollout path prevents those relationships from
+creating a second logical session.
 
 ## 6. Reader abstraction
 
