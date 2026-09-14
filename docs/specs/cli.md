@@ -41,6 +41,12 @@ derived rows. Every view runs `analyze` first unless `--frozen` is present.
 an existing store read-only. Refresh chatter goes to stderr. JSON stdout is
 one JSON document and contains no progress text.
 
+`query` accepts one positional SQL statement or reads it from stdin when the
+argument is omitted. It prepares exactly one statement and rejects writes,
+mutable PRAGMA statements, and bounds output at 50 columns and 50 rows. Its JSON
+`data` shape is `{columns, rows, omitted_column_count, omitted_count}`; text
+and column names are bounded, and blobs are represented by their byte count.
+
 ## View contracts
 
 | View | Required first section | Row identity | Required action/interpretation |

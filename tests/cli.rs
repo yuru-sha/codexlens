@@ -476,6 +476,26 @@ fn run_args_with_flags(args: &[&str], flags: &[&str], store: &Path) -> Output {
         .unwrap()
 }
 
+fn run_query(args: &[&str], store: &Path, stdin: Option<&[u8]>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codexlens"));
+    command
+        .arg("query")
+        .args(args)
+        .args(["--store", store.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+    let mut child = command.spawn().unwrap();
+    if let Some(input) = stdin {
+        child.stdin.take().unwrap().write_all(input).unwrap();
+    }
+    child.wait_with_output().unwrap()
+}
+
 fn assert_file_unchanged(path: &Path, before: &[u8], label: &str) {
     assert_eq!(fs::read(path).unwrap(), before, "{label} changed");
 }
@@ -685,6 +705,143 @@ fn rendered_diff_store_with_content(content: &str) -> (PathBuf, PathBuf, PathBuf
         .unwrap();
     drop(store);
     (store_path, target, project_root)
+}
+
+#[test]
+fn query_renders_table_markdown_and_json_from_an_existing_store() {
+    let store = fixture_store();
+    let before = fs::read(&store).unwrap();
+
+    let table = run_query(&["SELECT 1 AS value"], &store, None);
+    assert!(
+        table.status.success(),
+        "{}",
+        String::from_utf8_lossy(&table.stderr)
+    );
+    assert!(table.stderr.is_empty());
+    let table_stdout = String::from_utf8_lossy(&table.stdout);
+    assert!(table_stdout.contains("QUERY"), "{table_stdout}");
+    assert!(table_stdout.contains("value"), "{table_stdout}");
+    assert!(table_stdout.contains("1"), "{table_stdout}");
+
+    let markdown = run_query(&["SELECT 1 AS value", "--format", "markdown"], &store, None);
+    assert!(
+        markdown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&markdown.stderr)
+    );
+    assert!(String::from_utf8_lossy(&markdown.stdout).starts_with("# QUERY"));
+
+    let json_output = run_query(&["--format", "json"], &store, Some(b"SELECT 2 AS value\n"));
+    let document = parse_json_report(&json_output, "query");
+    assert_eq!(document["data"]["columns"], json!(["value"]));
+    assert_eq!(document["data"]["rows"][0][0], 2);
+    assert_eq!(document["data"]["omitted_count"], 0);
+    assert_eq!(fs::read(&store).unwrap(), before);
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn query_rejects_writes_and_bounds_rows_without_creating_a_store() {
+    let store = fixture_store();
+    {
+        let connection = Connection::open(&store).unwrap();
+        for index in 0..60 {
+            connection
+                .execute(
+                    "INSERT INTO sessions (session_id, source_identity, source_path) VALUES (?1, 'synthetic-query', 'synthetic-query.jsonl')",
+                    params![format!("query-session-{index:03}")],
+                )
+                .unwrap();
+        }
+    }
+    let before = fs::read(&store).unwrap();
+
+    let output = run_query(
+        &[
+            "SELECT session_id FROM sessions ORDER BY session_id",
+            "--format",
+            "json",
+        ],
+        &store,
+        None,
+    );
+    let document = parse_json_report(&output, "query");
+    assert_eq!(document["data"]["rows"].as_array().unwrap().len(), 50);
+    assert!(document["data"]["omitted_count"].as_u64().unwrap() > 0);
+    assert!(output.stdout.len() < 16 * 1024);
+
+    let write = run_query(
+        &["INSERT INTO sessions (session_id) VALUES ('query-write')"],
+        &store,
+        None,
+    );
+    assert!(!write.status.success());
+    assert!(String::from_utf8_lossy(&write.stderr).contains("read-only"));
+    assert_eq!(fs::read(&store).unwrap(), before);
+
+    for sql in ["PRAGMA journal_mode=WAL", "SELECT 1; SELECT 2"] {
+        let rejected = run_query(&[sql], &store, None);
+        assert!(!rejected.status.success(), "{sql} unexpectedly succeeded");
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("statement"));
+    }
+    assert_eq!(fs::read(&store).unwrap(), before);
+
+    let missing = temp_store_path("query-missing");
+    let missing_output = run_query(&["SELECT 1"], &missing, None);
+    assert!(!missing_output.status.success());
+    assert!(String::from_utf8_lossy(&missing_output.stderr).contains("store does not exist"));
+    assert!(!missing.exists());
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn optimize_print_is_read_only_and_scope_matches_findings() {
+    let (store, target, project_root) = rendered_diff_store();
+    let before = fs::read(&target).unwrap();
+
+    let printed = run_args(&["optimize", "--print"], &store);
+    assert!(
+        printed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    let printed_stdout = String::from_utf8_lossy(&printed.stdout);
+    assert!(printed_stdout.contains("Target: "), "{printed_stdout}");
+    assert!(
+        printed_stdout.contains("Evidence ref: "),
+        "{printed_stdout}"
+    );
+    assert!(
+        printed_stdout.contains("Verification: "),
+        "{printed_stdout}"
+    );
+    assert_eq!(fs::read(&target).unwrap(), before);
+
+    let project_scope = format!("project:{}", project_root.display());
+    let project = run_args(
+        &["optimize", "--diff", "--scope", project_scope.as_str()],
+        &store,
+    );
+    assert!(
+        project.status.success(),
+        "{}",
+        String::from_utf8_lossy(&project.stderr)
+    );
+    assert!(String::from_utf8_lossy(&project.stdout).contains(&target.display().to_string()));
+
+    let global = run_args(&["optimize", "--diff", "--scope", "global"], &store);
+    assert!(
+        global.status.success(),
+        "{}",
+        String::from_utf8_lossy(&global.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&global.stdout).contains(&target.display().to_string()));
+    assert!(!String::from_utf8_lossy(&global.stderr).contains(&target.display().to_string()));
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
 }
 
 #[test]
@@ -3300,6 +3457,7 @@ fn optimize_json_contains_typed_proposals_and_keeps_skips_in_document() {
         "target_rationale",
         "limitations",
         "review_reminder",
+        "verification",
     ] {
         assert!(
             rendered["proposal"].get(field).is_some(),

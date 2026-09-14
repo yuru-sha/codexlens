@@ -86,18 +86,26 @@ order to render a diff.
 | `rediscovery` | Codex home and derived store | alias for `knowledge` | refreshes incrementally unless `--frozen` |
 | `instructions` | Codex home and derived store | instruction-lens findings | refreshes incrementally unless `--frozen` |
 | `doctor` | Codex home and derived store | action-first health summary by scope | refreshes incrementally unless `--frozen` |
+| `query` | existing derived store and SQL/stdin | bounded ad-hoc table, Markdown, or JSON rows | opens the store read-only; never refreshes or creates it |
 | `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | does not modify the supplied store or target files; legacy stores use a temporary migrated copy |
 | `optimize --apply --yes` | derived store and validated instruction/documentation targets | applies reviewed proposals and reports retained backups/recovery | modifies only the validated write set; never modifies the supplied store or rollout/state inputs |
 | `monitor` | one local rollout JSONL or state SQLite source | bounded incremental ingestion and cursor/status output | does not modify the source; writes the derived store and optional cursor file |
 
 `doctor` accepts the optional `--limit COUNT` to cap findings per scope.
-`optimize` requires exactly one of `--diff` or `--apply`. `--diff` is advisory
-and read-only. `--apply` requires explicit confirmation; non-interactive use
-must add `--yes` after reviewing the diff. It validates the complete write set,
-re-reads and re-hashes every file, keeps backups after success, and rolls back
-the whole batch on failure. `analyze` reports every legacy lens, while the
-focused analysis commands report one typed view through its own deterministic
-report format.
+`query` accepts one positional SQL statement or reads SQL from stdin. It
+accepts only a single read-only statement, limits output to 50 columns and 50
+rows, and never echoes the SQL in errors. JSON uses
+`{columns, rows, omitted_column_count, omitted_count}` inside a versioned
+`query` envelope.
+
+`optimize` requires exactly one of `--diff`, `--print`, or `--apply`.
+`--diff` and `--print` are advisory and read-only; `--print` emits the
+briefing without requiring a diff flag. `--apply` requires explicit
+confirmation; non-interactive use must add `--yes` after reviewing the diff.
+It validates the complete write set, re-reads and re-hashes every file, keeps
+backups after success, and rolls back the whole batch on failure. `analyze`
+reports every legacy lens, while the focused analysis commands report one
+typed view through its own deterministic report format.
 Add `--format json` to read-only reporting commands for schema version 1;
 aliases emit their canonical command name. Every view uses a versioned envelope
 with top-level `scope`, `coverage`, and `freshness` metadata; its `data` object
