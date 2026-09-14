@@ -79,20 +79,32 @@ Shell-like completion records may expose fields such as `command`, `cwd`,
 An exit code is stronger evidence of failure than a text heuristic; the
 analysis layer must prefer it when available.
 
+Tool-result `output` strings may also begin with a Codex renderer envelope:
+`Process exited with code N`, `Exit code: N`, `Script completed`, `Script
+failed`, or `Script timed out`. The adapter parses these forms before any
+fallback output-text heuristic, records parsed status as distinct evidence,
+and ignores the rendered payload body for outcome classification. Explicit
+`exit_code` and `status` fields remain authoritative. Unknown or malformed
+renderer text remains unknown rather than becoming a failure from incidental
+words in the body.
+
 ### 3.1 Tool normalization rules
 
 The outer envelope type and nested payload type are never tool names or
 commands. For a `response_item`, use `payload.name` as the tool name and
-extract commands only from structured fields such as `payload.input.cmd` or
-`payload.input.command`. For an `event_msg`, use the event family only to
-select the adapter, then read the structured command fields.
+extract commands only from structured fields such as `payload.input.cmd`,
+`payload.input.command`, or their `arguments` equivalents. A JSON-encoded
+object or array in `input` or `arguments` is decoded once before applying the
+same structured extraction rules. For an `event_msg`, use the event family
+only to select the adapter, then read the structured command fields.
 
 Command extraction is typed and ordered: join an argv array with one space;
 use a string under a command field; inspect a structured object for `argv`,
 `cmd`, then `command`; otherwise retain an unknown tool call with provenance.
-Arbitrary strings, serialized tool input, wrapper source, and renderer output
-are not commands. Values such as `exec_command const`, `exec_command s:`, and
-`s:12000});` are invalid canonical names and must be rejected before storage.
+Malformed or unsupported serialized input, arbitrary strings, wrapper source,
+and renderer output are not commands. Values such as `exec_command const`,
+`exec_command s:`, and `s:12000});` are invalid canonical names and must be
+rejected before storage.
 
 Wrapper tools are a separate boundary: preserve names such as `exec`, `js`,
 and `wait` as observed tool names. Wrapper source and renderer text are not

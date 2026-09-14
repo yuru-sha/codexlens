@@ -793,11 +793,16 @@ fn structured_command_value(value: &Value) -> Option<String> {
 }
 
 fn structured_input_command(payload: &Map<String, Value>) -> Option<String> {
-    payload
-        .get("input")
-        .or_else(|| payload.get("arguments"))
-        .filter(|value| value.is_object() || value.is_array())
-        .and_then(structured_command_value)
+    ["input", "arguments"].iter().find_map(|key| {
+        payload.get(*key).and_then(|value| match value {
+            Value::String(encoded) => serde_json::from_str::<Value>(encoded)
+                .ok()
+                .filter(|value| value.is_object() || value.is_array())
+                .and_then(|value| structured_command_value(&value)),
+            value if value.is_object() || value.is_array() => structured_command_value(value),
+            _ => None,
+        })
+    })
 }
 
 fn result_command_value(value: &Value) -> Option<String> {
@@ -1262,12 +1267,17 @@ fn tool_result_from_payload(
         .or_else(|| payload.get("exit"))
         .and_then(value_i64);
     let status = string_field(payload, &["status"]);
+    let renderer = parse_renderer_status(stdout.as_deref(), stderr.as_deref());
     let (outcome, outcome_source) = classify_outcome(
         exit_code,
         status.as_deref(),
+        renderer,
         stdout.as_deref(),
         stderr.as_deref(),
     );
+    let exit_code =
+        exit_code.or_else(|| (status.is_none()).then(|| renderer.exit_code()).flatten());
+    let status = status.or_else(|| (exit_code.is_none()).then(|| renderer.status()).flatten());
     ToolResult {
         id: string_field(payload, &["id"]),
         call_id: string_field(payload, &["call_id"]),
@@ -1616,6 +1626,7 @@ fn combined_output(result: &ToolResult) -> String {
 fn classify_outcome(
     exit_code: Option<i64>,
     status: Option<&str>,
+    renderer: RendererParse,
     stdout: Option<&str>,
     stderr: Option<&str>,
 ) -> (ToolOutcome, OutcomeSource) {
@@ -1629,13 +1640,139 @@ fn classify_outcome(
             OutcomeSource::ExitCode,
         );
     }
-    if let Some(outcome) = status.and_then(ToolOutcome::from_status) {
-        return (outcome, OutcomeSource::Status);
+    if let Some(status) = status {
+        return (
+            ToolOutcome::from_status(status).unwrap_or(ToolOutcome::Unknown),
+            OutcomeSource::Status,
+        );
+    }
+    if let RendererParse::Known(status) = renderer {
+        return (status.outcome(), OutcomeSource::ParsedRenderer);
+    }
+    if matches!(renderer, RendererParse::Malformed) {
+        return (ToolOutcome::Unknown, OutcomeSource::Unknown);
     }
     if output_indicates_failure(stdout, stderr) {
         return (ToolOutcome::Failed, OutcomeSource::OutputText);
     }
     (ToolOutcome::Unknown, OutcomeSource::Unknown)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RendererParse {
+    NotRenderer,
+    Malformed,
+    Known(RendererStatus),
+}
+
+impl RendererParse {
+    fn exit_code(self) -> Option<i64> {
+        match self {
+            Self::Known(status) => status.exit_code(),
+            Self::NotRenderer | Self::Malformed => None,
+        }
+    }
+
+    fn status(self) -> Option<String> {
+        match self {
+            Self::Known(status) => status.status().map(str::to_owned),
+            Self::NotRenderer | Self::Malformed => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RendererStatus {
+    Succeeded {
+        exit_code: Option<i64>,
+    },
+    Failed {
+        exit_code: Option<i64>,
+        status: &'static str,
+    },
+}
+
+impl RendererStatus {
+    fn outcome(self) -> ToolOutcome {
+        match self {
+            Self::Succeeded { .. } => ToolOutcome::Succeeded,
+            Self::Failed { .. } => ToolOutcome::Failed,
+        }
+    }
+
+    fn exit_code(self) -> Option<i64> {
+        match self {
+            Self::Succeeded { exit_code } | Self::Failed { exit_code, .. } => exit_code,
+        }
+    }
+
+    fn status(self) -> Option<&'static str> {
+        match self {
+            Self::Succeeded { .. } => Some("completed"),
+            Self::Failed { status, .. } => Some(status),
+        }
+    }
+}
+
+fn parse_renderer_status(stdout: Option<&str>, stderr: Option<&str>) -> RendererParse {
+    let mut malformed = false;
+    for parsed in [stdout, stderr]
+        .into_iter()
+        .flatten()
+        .map(parse_renderer_text)
+    {
+        match parsed {
+            RendererParse::Known(status) => return RendererParse::Known(status),
+            RendererParse::Malformed => malformed = true,
+            RendererParse::NotRenderer => {}
+        }
+    }
+    if malformed {
+        RendererParse::Malformed
+    } else {
+        RendererParse::NotRenderer
+    }
+}
+
+fn parse_renderer_text(output: &str) -> RendererParse {
+    let Some(line) = output.trim_start().lines().next().map(str::trim) else {
+        return RendererParse::NotRenderer;
+    };
+    let line = line.to_ascii_lowercase();
+    for prefix in ["process exited with code", "exit code"] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            let rest = rest.trim();
+            let code = rest.strip_prefix(':').unwrap_or(rest).trim().parse::<i64>();
+            return code.map_or(RendererParse::Malformed, |exit_code| {
+                if exit_code == 0 {
+                    RendererParse::Known(RendererStatus::Succeeded { exit_code: Some(0) })
+                } else {
+                    RendererParse::Known(RendererStatus::Failed {
+                        exit_code: Some(exit_code),
+                        status: "failed",
+                    })
+                }
+            });
+        }
+    }
+    match line.as_str() {
+        "script completed" => RendererParse::Known(RendererStatus::Succeeded { exit_code: None }),
+        "script failed" => RendererParse::Known(RendererStatus::Failed {
+            exit_code: None,
+            status: "failed",
+        }),
+        "script timed out" | "script timeout" => RendererParse::Known(RendererStatus::Failed {
+            exit_code: None,
+            status: "timeout",
+        }),
+        _ if line.starts_with("process exited with code")
+            || line.starts_with("exit code")
+            || line.starts_with("script ") =>
+        {
+            RendererParse::Malformed
+        }
+        _ => RendererParse::NotRenderer,
+    }
 }
 
 fn output_indicates_failure(stdout: Option<&str>, stderr: Option<&str>) -> bool {
@@ -2267,6 +2404,140 @@ mod tests {
     }
 
     #[test]
+    fn decodes_string_encoded_tool_arguments_without_promoting_arbitrary_text() {
+        let data = parse(include_str!(
+            "../tests/fixtures/rollout/string-encoded-commands.jsonl"
+        ));
+        let call = |call_id: &str| {
+            data.tool_calls
+                .iter()
+                .find(|call| call.call_id.as_deref() == Some(call_id))
+                .unwrap()
+        };
+
+        let function_call = call("fixture-string-function-call");
+        assert_eq!(function_call.command.as_deref(), Some("cargo run"));
+        assert_eq!(function_call.input_summary.as_deref(), Some("cargo run"));
+        assert_eq!(function_call.provenance.line, Some(3));
+
+        let argv_call = call("fixture-string-argv-call");
+        assert_eq!(argv_call.command.as_deref(), Some("cargo check"));
+
+        let command_array_call = call("fixture-string-command-array-call");
+        assert_eq!(command_array_call.command.as_deref(), Some("cargo build"));
+
+        let file_call = call("fixture-string-file-call");
+        assert_eq!(
+            file_call.command.as_deref(),
+            Some("*** Update File: src/lib.rs\n@@\n-old\n+new\n")
+        );
+        assert_eq!(data.file_operations.len(), 2);
+        assert_eq!(data.file_operations[0].path, "src/lib.rs");
+        assert_eq!(data.file_operations[1].path, "src/second.rs");
+
+        let verification_call = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.is_none() && call.command.as_deref() == Some("cargo check"))
+            .unwrap();
+        assert_eq!(verification_call.command.as_deref(), Some("cargo check"));
+
+        let fallback_call = call("fixture-string-fallback-call");
+        assert_eq!(fallback_call.command.as_deref(), Some("cargo fmt"));
+
+        let second_file_call = call("fixture-string-second-file-call");
+        assert_eq!(
+            second_file_call.command.as_deref(),
+            Some("*** Update File: src/second.rs\n@@\n-old\n+new\n")
+        );
+
+        for call_id in [
+            "fixture-string-malformed-call",
+            "fixture-string-wrapper-call",
+            "fixture-string-natural-call",
+        ] {
+            let call = call(call_id);
+            assert_eq!(call.command, None, "{call_id}");
+        }
+        assert_eq!(
+            crate::analysis::classify_verification_command(
+                verification_call.command.as_deref().unwrap()
+            ),
+            Some("check".to_owned())
+        );
+
+        let failure =
+            crate::analysis::analyze_failures(&data, &crate::analysis::AnalysisOptions::default())
+                .into_iter()
+                .find(|finding| {
+                    finding.kind == crate::analysis::FindingType::Failure
+                        && finding.key.contains("|cargo run|")
+                })
+                .unwrap();
+        assert_eq!(failure.scope.as_str(), "project");
+        assert_eq!(failure.occurrences, 2);
+        assert_eq!(failure.distinct_sessions, 2);
+        assert_eq!(failure.confidence, crate::analysis::FindingConfidence::High);
+        assert_eq!(failure.evidence.len(), 2);
+        assert!(
+            failure
+                .evidence
+                .iter()
+                .all(|evidence| evidence.role == crate::analysis::EvidenceRole::Observation)
+        );
+        assert_eq!(
+            failure
+                .evidence
+                .iter()
+                .map(|evidence| evidence.source.line)
+                .collect::<Vec<_>>(),
+            vec![Some(14), Some(19)]
+        );
+        assert!(
+            failure
+                .evidence
+                .iter()
+                .all(|evidence| evidence.source.path == Path::new("fixture.jsonl"))
+        );
+
+        let verification = crate::analysis::analyze_verification(
+            &data,
+            &crate::analysis::AnalysisOptions::default(),
+        );
+        let missing = verification
+            .iter()
+            .find(|finding| finding.affected_paths == ["src/second.rs"])
+            .unwrap();
+        assert_eq!(missing.kind, crate::analysis::FindingType::Verification);
+        assert_eq!(
+            missing.scope,
+            crate::analysis::FindingScope::Project(PathBuf::from("/fixture/project"))
+        );
+        assert_eq!(missing.confidence, crate::analysis::FindingConfidence::Low);
+        assert_eq!(missing.occurrences, 1);
+        assert_eq!(missing.distinct_sessions, 1);
+        assert_eq!(missing.evidence.len(), 2);
+        assert!(
+            missing
+                .observed_commands
+                .iter()
+                .any(|command| command.contains("cargo check"))
+        );
+        assert!(missing.evidence.iter().any(|evidence| {
+            evidence.role == crate::analysis::EvidenceRole::VerificationCommand
+                && evidence.source.path == Path::new("fixture.jsonl")
+                && evidence.source.line == Some(8)
+        }));
+
+        let function_result = data
+            .tool_results
+            .iter()
+            .find(|result| result.call_id.as_deref() == Some("fixture-string-function-call"))
+            .unwrap();
+        assert_eq!(function_result.command, None);
+    }
+
+    #[test]
     fn archived_rollout_source_sets_archive_state() {
         let parsed = parse_rollout_reader(
             Path::new("archived_sessions/2026/archived.jsonl"),
@@ -2400,6 +2671,53 @@ mod tests {
         let result = &data.tool_results[0];
         assert_eq!(result.outcome, ToolOutcome::Succeeded);
         assert_eq!(result.outcome_source, OutcomeSource::ExitCode);
+    }
+
+    #[test]
+    fn parses_renderer_envelopes_before_fallback_text() {
+        let data = parse(include_str!(
+            "../tests/fixtures/rollout/tool-result-envelopes.jsonl"
+        ));
+
+        assert_eq!(data.tool_results.len(), 7);
+        assert_eq!(data.tool_results[0].exit_code, Some(0));
+        assert_eq!(data.tool_results[0].outcome, ToolOutcome::Succeeded);
+        assert_eq!(
+            data.tool_results[0].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
+        assert_eq!(data.tool_results[1].exit_code, Some(23));
+        assert_eq!(data.tool_results[1].outcome, ToolOutcome::Failed);
+        assert_eq!(
+            data.tool_results[1].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
+        assert_eq!(data.tool_results[2].outcome, ToolOutcome::Failed);
+        assert_eq!(data.tool_results[2].status.as_deref(), Some("timeout"));
+        assert_eq!(
+            data.tool_results[2].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
+        assert_eq!(data.tool_results[3].outcome, ToolOutcome::Failed);
+        assert_eq!(data.tool_results[3].status.as_deref(), Some("failed"));
+        assert_eq!(
+            data.tool_results[3].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
+        assert_eq!(data.tool_results[4].outcome, ToolOutcome::Unknown);
+        assert_eq!(data.tool_results[4].outcome_source, OutcomeSource::Unknown);
+        assert_eq!(data.tool_results[5].outcome, ToolOutcome::Succeeded);
+        assert_eq!(data.tool_results[5].status.as_deref(), Some("completed"));
+        assert_eq!(
+            data.tool_results[5].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
+        assert_eq!(data.tool_results[6].outcome, ToolOutcome::Succeeded);
+        assert_eq!(data.tool_results[6].status.as_deref(), Some("completed"));
+        assert_eq!(
+            data.tool_results[6].outcome_source,
+            OutcomeSource::ParsedRenderer
+        );
     }
 
     #[test]

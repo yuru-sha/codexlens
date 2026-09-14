@@ -79,6 +79,7 @@ from the project language.
 ### Input
 
 - tool result with non-zero exit code or failed status;
+- tool result with a parsed Codex renderer status;
 - explicit error event;
 - bounded stderr/output error marker when structured outcome is absent.
 
@@ -87,6 +88,10 @@ from the project language.
 `FailureSignature` is derived from tool name, normalized command family, and
 normalized error category. Paths, IDs, timestamps, and line numbers are
 redacted or replaced before matching.
+
+Parsed renderer status is structured evidence and remains distinct from
+fallback output-text evidence. Unknown or malformed renderer text is not a
+failure signal.
 
 ### Finding
 
