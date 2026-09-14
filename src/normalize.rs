@@ -1124,6 +1124,9 @@ fn rekey_session_references(data: &mut CanonicalData, from: &str, to: &str) {
             *session_id = Some(to.to_owned());
         }
     };
+    for session in &mut data.sessions {
+        update(&mut session.parent_id);
+    }
     for turn in &mut data.turns {
         update(&mut turn.session_id);
     }
@@ -3292,6 +3295,32 @@ mod tests {
             data.records
                 .iter()
                 .all(|record| record.session_id.as_deref() == Some("fixture-rollout-session"))
+        );
+    }
+
+    #[test]
+    fn state_fallback_rekeys_parent_references_in_memory() {
+        let mut data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-parent"}}
+{"type":"session_meta","payload":{"id":"fixture-child","parent_id":"fixture-parent"}}"#,
+        );
+
+        assert_eq!(
+            data.sessions
+                .iter()
+                .find(|session| session.id == "fixture-child")
+                .and_then(|session| session.parent_id.as_deref()),
+            Some("fixture-parent")
+        );
+
+        rekey_session_references(&mut data, "fixture-parent", "fixture-rollout-parent");
+
+        assert_eq!(
+            data.sessions
+                .iter()
+                .find(|session| session.id == "fixture-child")
+                .and_then(|session| session.parent_id.as_deref()),
+            Some("fixture-rollout-parent")
         );
     }
 

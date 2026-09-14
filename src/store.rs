@@ -2170,6 +2170,10 @@ fn rekey_source_session(
         "DELETE FROM sessions WHERE source_identity = ?1 AND session_id = ?2",
         params![identity, to],
     )?;
+    transaction.execute(
+        "UPDATE sessions SET parent_id = ?2 WHERE source_identity = ?1 AND parent_id = ?3",
+        params![identity, to, from],
+    )?;
     for table in [
         "sessions",
         "turns",

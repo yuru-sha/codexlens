@@ -9,7 +9,7 @@ use codexlens::model::{CanonicalData, Session, SourceRef};
 use codexlens::monitor::{LocalMonitor, MonitorClock, MonitorOptions, MonitorStatus};
 use codexlens::rollout::RolloutParseOptions;
 use codexlens::store::{IngestInputKind, Store};
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
@@ -118,6 +118,18 @@ fn monitor_rekeys_state_fallback_rows_across_polls() {
 
     let first_poll = monitor.poll(&mut store).unwrap();
     assert_eq!(first_poll.records, 1);
+    store
+        .connection()
+        .execute(
+            "INSERT INTO sessions (session_id, source_identity, source_path, parent_id) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "fixture-child-thread",
+                rollout_path.to_string_lossy().as_ref(),
+                rollout_path.to_string_lossy().as_ref(),
+                "fixture-state-session",
+            ],
+        )
+        .unwrap();
     append(&source, format!("{}\n", lines[1]).as_bytes());
     let second_poll = monitor.poll(&mut store).unwrap();
     assert_eq!(second_poll.records, 1);
@@ -129,12 +141,19 @@ fn monitor_rekeys_state_fallback_rows_across_polls() {
             .filter(|session| session.provenance.path == rollout_path)
             .map(|session| session.id.as_str())
             .collect::<Vec<_>>(),
-        ["fixture-rollout-session"]
+        ["fixture-child-thread", "fixture-rollout-session"]
     );
     assert!(
         data.records
             .iter()
             .all(|record| record.session_id.as_deref() == Some("fixture-rollout-session"))
+    );
+    assert_eq!(
+        data.sessions
+            .iter()
+            .find(|session| session.id == "fixture-child-thread")
+            .and_then(|session| session.parent_id.as_deref()),
+        Some("fixture-rollout-session")
     );
 
     let _ = fs::remove_file(source);
