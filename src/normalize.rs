@@ -612,7 +612,11 @@ fn call_file_operations(
     let command = call
         .command
         .as_deref()
-        .or(call.input_summary.as_deref())
+        .or_else(|| {
+            (!is_wrapper_tool(call.tool_name.as_deref()))
+                .then_some(call.input_summary.as_deref())
+                .flatten()
+        })
         .unwrap_or_default();
     let cwd = call.cwd.clone().or_else(|| {
         context_cwd(data, call.session_id.as_deref(), call.turn_id.as_deref()).map(str::to_owned)
@@ -1216,6 +1220,13 @@ fn tool_call_from_payload(
         status: string_field(payload, &["status"]),
         provenance,
     }
+}
+
+fn is_wrapper_tool(tool: Option<&str>) -> bool {
+    matches!(
+        tool.map(normalize_token).as_deref(),
+        Some("exec" | "js" | "wait")
+    )
 }
 
 fn tool_call_from_event(
@@ -2162,6 +2173,88 @@ mod tests {
             .find(|result| result.call_id.as_deref() == Some("fixture-unstructured-result"))
             .unwrap();
         assert_eq!(unstructured_result.command, None);
+    }
+
+    #[test]
+    fn keeps_wrapper_calls_opaque_without_safe_command_fields() {
+        let data = parse(include_str!(
+            "../tests/fixtures/rollout/wrapper-tools.jsonl"
+        ));
+
+        let direct = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-direct-shell-a"))
+            .unwrap();
+        assert_eq!(direct.tool_name.as_deref(), Some("exec_command"));
+        assert_eq!(direct.command.as_deref(), Some("cargo test"));
+
+        let nested_shell = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-nested-shell-a"))
+            .unwrap();
+        assert_eq!(nested_shell.tool_name.as_deref(), Some("exec"));
+        assert_eq!(nested_shell.command, None);
+        assert_eq!(nested_shell.provenance.line, Some(4));
+        assert!(
+            nested_shell
+                .input_summary
+                .as_deref()
+                .is_some_and(|input| input.contains("tools.exec_command"))
+        );
+
+        let nested_patch = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-nested-patch-a"))
+            .unwrap();
+        assert_eq!(nested_patch.tool_name.as_deref(), Some("exec"));
+        assert_eq!(nested_patch.command, None);
+        assert!(
+            nested_patch
+                .input_summary
+                .as_deref()
+                .is_some_and(|input| input.contains("tools.apply_patch"))
+        );
+
+        assert!(!data.tool_calls.iter().any(|call| {
+            call.call_id
+                .as_deref()
+                .is_some_and(|id| id.contains("/nested/"))
+        }));
+        assert!(!data.tool_results.iter().any(|result| {
+            result
+                .call_id
+                .as_deref()
+                .is_some_and(|id| id.contains("/nested/"))
+        }));
+        assert!(data.file_operations.is_empty());
+
+        let opaque_call = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-opaque-wrapper-a"))
+            .unwrap();
+        assert_eq!(opaque_call.tool_name.as_deref(), Some("exec"));
+        assert_eq!(opaque_call.command, None);
+        let opaque_result = data
+            .tool_results
+            .iter()
+            .find(|result| result.call_id.as_deref() == Some("fixture-opaque-wrapper-a"))
+            .unwrap();
+        assert_eq!(opaque_result.provenance.line, Some(9));
+        assert!(!opaque_result.is_duplicate);
+
+        assert!(
+            !data
+                .tool_results
+                .iter()
+                .any(
+                    |result| result.call_id.as_deref() == Some("fixture-nested-shell-a")
+                        && result.is_duplicate
+                )
+        );
     }
 
     #[test]

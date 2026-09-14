@@ -1,0 +1,22 @@
+{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"fixture-wrapper-session-a","cwd":"/fixture/project"}}
+{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-direct-shell-a","name":"exec_command","input":{"cmd":"cargo test"}}}
+{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-direct-shell-a","exit_code":1,"status":"failed","output":"direct shell failure"}}
+{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-nested-shell-a","name":"exec","input":"await tools.exec_command({cmd: \"cargo test\"});"}}
+{"timestamp":"2026-01-01T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-nested-shell-a","exit_code":1,"status":"failed","output":"nested shell failure"}}
+{"timestamp":"2026-01-01T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-nested-patch-a","name":"exec","input":"await tools.apply_patch({patch: \"*** Update File: src/lib.rs\\n@@\\n-old\\n+new\\n\"});"}}
+{"timestamp":"2026-01-01T00:00:06Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-nested-patch-a","exit_code":0,"status":"completed","output":"patch applied"}}
+{"timestamp":"2026-01-01T00:00:07Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-opaque-wrapper-a","name":"exec","input":"await tools.exec_command({cmd: commandFromVariable});"}}
+{"timestamp":"2026-01-01T00:00:08Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-opaque-wrapper-a","exit_code":1,"status":"failed","output":"opaque wrapper failure"}}
+{"timestamp":"2026-01-01T00:00:09Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-js-a","name":"js","input":"return 1;"}}
+{"timestamp":"2026-01-01T00:00:10Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-js-a","exit_code":1,"status":"failed","output":"js failure"}}
+{"timestamp":"2026-01-01T00:00:11Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-wait-a","name":"wait","input":{"milliseconds":1}}}
+{"timestamp":"2026-01-01T00:00:12Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-wait-a","exit_code":1,"status":"failed","output":"wait failure"}}
+{"timestamp":"2026-01-02T00:00:00Z","type":"session_meta","payload":{"id":"fixture-wrapper-session-b","cwd":"/fixture/project"}}
+{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-nested-shell-b","name":"exec","input":"await tools.exec_command({cmd: \"cargo test\"});"}}
+{"timestamp":"2026-01-02T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-nested-shell-b","exit_code":1,"status":"failed","output":"nested shell failure"}}
+{"timestamp":"2026-01-02T00:00:03Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-opaque-wrapper-b","name":"exec","input":"await tools.exec_command({cmd: commandFromVariable});"}}
+{"timestamp":"2026-01-02T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-opaque-wrapper-b","exit_code":1,"status":"failed","output":"opaque wrapper failure"}}
+{"timestamp":"2026-01-02T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-js-b","name":"js","input":"return 1;"}}
+{"timestamp":"2026-01-02T00:00:06Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-js-b","exit_code":1,"status":"failed","output":"js failure"}}
+{"timestamp":"2026-01-02T00:00:07Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-wait-b","name":"wait","input":{"milliseconds":1}}}
+{"timestamp":"2026-01-02T00:00:08Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-wait-b","exit_code":1,"status":"failed","output":"wait failure"}}

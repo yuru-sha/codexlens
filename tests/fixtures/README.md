@@ -20,6 +20,9 @@ unknown record to ensure forward compatibility is tested from the beginning.
 `rollout/edge-cases.jsonl` covers thread-only identities, missing content,
 structured status, unmatched tool results, and repeated token snapshots.
 
+`rollout/wrapper-tools.jsonl` covers direct shell calls, opaque wrapper calls
+containing nested shell/patch source, and non-shell wrapper failures.
+
 `state/` contains synthetic SQL schemas for state adapter and store migration
 tests. `store/` contains synthetic rollout input and a version-one schema.
 
