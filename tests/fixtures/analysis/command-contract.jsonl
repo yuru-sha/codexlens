@@ -1,0 +1,19 @@
+{"timestamp":"2026-02-01T00:00:00.000Z","type":"session_meta","payload":{"id":"contract-session-a1","cwd":"/fixture/project-a","project":"/fixture/project-a"}}
+{"timestamp":"2026-02-01T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"contract-turn-a1","cwd":"/fixture/project-a","user_instructions":"Please verify the synthetic test command."}}
+{"timestamp":"2026-02-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Please verify the synthetic test command."}]}}
+{"timestamp":"2026-02-01T00:00:03.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"contract-patch-a1","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/lib.rs\\n@@\\n-old\\n+new-1\\n\"}"}}
+{"timestamp":"2026-02-01T00:00:04.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"contract-patch-a2","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/lib.rs\\n@@\\n-old\\n+new-2\\n\"}"}}
+{"timestamp":"2026-02-01T00:00:05.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"contract-patch-a3","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/lib.rs\\n@@\\n-old\\n+new-3\\n\"}"}}
+{"timestamp":"2026-02-01T00:00:06.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"contract-patch-a4","name":"apply_patch","input":"{\"patch\":\"*** Update File: src/lib.rs\\n@@\\n-old\\n+new-4\\n\"}"}}
+{"timestamp":"2026-02-01T00:00:06.500Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"contract-surface-heavy-a1","name":"heavy-skill","input":"{}"}}
+{"timestamp":"2026-02-01T00:00:07.000Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"contract-failure-project-a1","command":["cargo","test"],"stderr":"synthetic project failure","exit_code":1,"status":"failed"}}
+{"timestamp":"2026-02-01T00:00:07.500Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"contract-failure-global-a1","command":["missing-tool","test"],"stderr":"synthetic command not found","exit_code":127,"status":"failed"}}
+{"timestamp":"2026-02-01T00:00:08.000Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"contract-turn-a1"}}
+{"timestamp":"2026-02-02T00:00:00.000Z","type":"session_meta","payload":{"id":"contract-session-a2","cwd":"/fixture/project-a","project":"/fixture/project-a"}}
+{"timestamp":"2026-02-02T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"contract-turn-a2","cwd":"/fixture/project-a","user_instructions":"Run the synthetic test command."}}
+{"timestamp":"2026-02-02T00:00:02.000Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"contract-failure-project-a2","command":["cargo","test"],"stderr":"synthetic project failure","exit_code":1,"status":"failed"}}
+{"timestamp":"2026-02-02T00:00:03.000Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"contract-turn-a2"}}
+{"timestamp":"2026-02-03T00:00:00.000Z","type":"session_meta","payload":{"id":"contract-session-b1","cwd":"/fixture/project-b","project":"/fixture/project-b"}}
+{"timestamp":"2026-02-03T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"contract-turn-b1","cwd":"/fixture/project-b","user_instructions":"Run the synthetic helper."}}
+{"timestamp":"2026-02-03T00:00:02.000Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"contract-failure-global-b1","command":["missing-tool","test"],"stderr":"synthetic command not found","exit_code":127,"status":"failed"}}
+{"timestamp":"2026-02-03T00:00:03.000Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"contract-turn-b1"}}

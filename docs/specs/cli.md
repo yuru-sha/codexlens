@@ -83,7 +83,7 @@ partial coverage and unknown cost/use remain explicitly inconclusive.
 
 ## Stable JSON envelope
 
-Every view returns:
+Typed views, `doctor`, and `optimize --print` return:
 
 ```json
 {
@@ -100,14 +100,35 @@ Every view returns:
     "limitations": [],
     "limitations_omitted": 0
   },
+  "freshness": {
+    "state": "recorded",
+    "source_count": 0,
+    "latest_ingested_at": null
+  },
   "data": {}
 }
 ```
 
-View-specific `data` must use named fields, not rendered text. A finding row
+View-specific `data` must use named fields, not rendered text. Actionable
+opportunity rows in `doctor`, typed opportunity views, and `optimize --print`
 must include `id`, `title`, `scope`, `target`, `impact`, `confidence`,
 `occurrences`, `distinct_sessions`, `action`, `evidence`, and `limitations`.
 Paths and excerpts are bounded and redacted before serialization.
+
+`analyze` deliberately retains the canonical finding schema rather than
+pretending that a finding is already an actionable opportunity. Its finding
+rows contain `kind`, `severity`, `confidence`, `scope`, `key`, `summary`,
+`evidence`, `occurrences`, `distinct_sessions`, `affected_paths`,
+`observed_commands`, `sequence`, `suggested_action`, `limitations`,
+`verification_status`, and `heuristic`. `affected_paths` is the available
+target evidence and `suggested_action` is the canonical action; `doctor` and
+the typed opportunity views resolve those into explicit `target` and `action`
+fields. Canonical findings retain at most 12 bounded evidence/path/command
+entries; typed opportunities retain at most 3 evidence examples.
+
+`sql` and `query` intentionally use a minimal JSON envelope containing only
+`schema_version`, `command`, and their bounded `data` result; they do not
+pretend that a query result has analysis freshness or coverage.
 
 Coverage limitations are reported as bounded metadata with source provenance,
 selected session and record counts, and the affected lens names. They do not
@@ -129,31 +150,128 @@ reviewable proposals, explicit skips/limitations, and the exact next workflow.
 An actionable non-shell failure is retained even when no canonical shell
 command can be inferred; it is never turned into a shell prerequisite.
 
-## cclens compatibility and bounded result matrix
+## cclens behavioral oracle
 
-The command family follows the public cclens command enum and routing in
-[`src/cli.rs`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L47-L223),
-while Codex-specific parsing remains behind codexlens' adapter. The briefing
-shape is checked against cclens' optimization renderer in
-[`src/core/optimize.rs`](https://github.com/lambdalisue/cclens/blob/main/src/core/optimize.rs#L219-L340)
-and its doctor/optimize operational guidance.
+The user-facing shape is derived from cclens, while Codex-specific parsing
+remains behind codexlens' adapter. These are the exact source locations used as
+the behavioral oracle:
 
-| Command | Codex input and scope | Non-empty result | Empty or partial result | Evidence/privacy bound |
+| Contract area | cclens source location |
+| --- | --- |
+| command enum, format flags, and dispatch/scope routing | [`src/cli.rs#L47-L223`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L47-L223), [`src/cli.rs#L225-L322`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L225-L322) |
+| doctor ordering, empty state, cost, pruning, and healthy state | [`src/cli.rs#L750-L1032`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L750-L1032) |
+| stuck, failure, prompt, overhead, analysis, usage, and inventory views | [`src/cli.rs#L1176-L1237`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L1176-L1237), [`src/cli.rs#L1242-L1379`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L1242-L1379), [`src/cli.rs#L1388-L1583`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L1388-L1583), [`src/cli.rs#L1584-L2220`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L1584-L2220) |
+| SQL bounds and read-only query behavior | [`src/cli.rs#L703-L746`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L703-L746) |
+| finding model, global/project routing, evidence, and action counts | [`src/core/optimize.rs#L11-L122`](https://github.com/lambdalisue/cclens/blob/main/src/core/optimize.rs#L11-L122) |
+| local-only optimization, privacy, concrete actions, and follow-up workflow | [`src/core/optimize.rs#L132-L213`](https://github.com/lambdalisue/cclens/blob/main/src/core/optimize.rs#L132-L213), [`src/core/optimize.rs#L215-L340`](https://github.com/lambdalisue/cclens/blob/main/src/core/optimize.rs#L215-L340) |
+| waste ranking and its actionable opportunity union | [`src/cli.rs#L2274-L2407`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L2274-L2407) |
+| doctor operational contract | [`doctor/SKILL.md#L8-L44`](https://github.com/lambdalisue/cclens/blob/main/plugins/cclens/skills/doctor/SKILL.md#L8-L44) |
+| optimize operational contract | [`optimize/SKILL.md#L8-L50`](https://github.com/lambdalisue/cclens/blob/main/plugins/cclens/skills/optimize/SKILL.md#L8-L50) |
+
+### Codex input mapping
+
+The following differences are intentional adapter boundaries, not changes to
+the user-facing analysis meaning:
+
+| cclens concept | CodexLens input/option | Preserved equivalence or explicit difference |
+| --- | --- | --- |
+| Claude transcript records and session database | rollout JSONL plus `state_*.sqlite` normalized into canonical records | tool outcomes, messages, sessions, token usage, file operations, and provenance feed the same lens categories; unknown valid records are retained, not guessed |
+| Claude config and project instruction files | global/project `AGENTS.md`, `config.toml`, and discovered Codex surfaces | global/project ownership, bounded instruction evidence, and configuration actions remain separate |
+| `--projects` routing | `--scope global|project|project:PATH` | `project` means all known projects; `project:PATH` is normalized before matching; scope filters output, not ingestion |
+| cclens database/report store | `--store PATH` derived SQLite store | reporting reads the derived store without refreshing raw inputs; `refresh`/`analyze` are the explicit ingestion workflows |
+| transcript-derived usage/cost | canonical tool/token records plus surface inventory and startup snapshots | totals are comparable categories, not byte-for-byte Claude measurements; missing attribution or cost remains unknown/partial |
+| cclens local doctor/optimize workflow | `doctor` and `optimize --print/--diff/--apply` | local-only, bounded evidence, reviewable targets, and explicit confirmation are preserved; `--apply` remains the only mutating path |
+
+Codex does not claim cclens' renderer or storage internals as input
+compatibility. The adapter is the only place allowed to translate raw Codex
+field names into these canonical concepts.
+
+Typed views, `doctor`, and `optimize --print` have the same semantics in table
+output, Markdown, and JSON. Markdown adds a heading; JSON keeps the stable
+envelope above and puts the named rows in `data`. `analyze` uses the canonical
+finding envelope described above. `optimize --diff` uses its proposal envelope
+and only adds freshness/coverage inside `data` for a filtered period. `sql` and
+`query` retain the minimal query envelope.
+
+Ordering is deterministic: the doctor's top-fix and typed opportunity lists
+sort by severity, confidence, distinct sessions, occurrences, then stable id;
+doctor groups sort global before project scope. Inventory sorts by scope, kind,
+path, name, then id. Usage sorts by occurrences, output tokens, kind, name,
+then scope. SQL preserves the statement's row order and applies only the
+output bounds.
+
+For actionable rows, `target` identifies the bounded file or configuration
+surface to inspect, and `action` is the concrete verb for that target: remove,
+slim, re-scope, or fix. `follow_up` is a separate bounded command or
+investigation step. Missing or ambiguous evidence leaves the action absent or
+review-only rather than inventing a target.
+
+### Named JSON data fields
+
+The following field sets are part of the contract; additional fields may be
+added only as optional, bounded fields that older readers can ignore.
+
+| Command | Named `data` fields and row shape |
+| --- | --- |
+| `analyze` | `period_start`, `period_end`, `session_count`, `freshness`, `finding_counts`, `groups`, and `coverage`; `groups[]` contains `scope` and `findings[]` using the canonical finding fields above |
+| `usage` | `measure`, `coverage`, `rows`, `omitted_count`; rows contain `kind`, `name`, `scope`, `usage_state`, occurrence/session counts, token totals, duration totals/observations, row coverage, evidence, and limitations |
+| `inventory` | `measure`, `rows`, `omitted_count`; rows contain `id`, `scope`, `owner`, `kind`, `name`, `path`, `load_mode`, byte estimates, usage state/counts, optional action, evidence, and limitations |
+| `waste` | `measure`, `opportunities`, `omitted_count`; opportunities use the actionable opportunity fields above plus `owner`, `severity`, and `follow_up` |
+| `overhead` | `measure`, `rows`, `omitted_count`; rows contain `scope`, optional `project`, session count, observed/readable/residual byte values, `cost_control`, `unknown_cost`, evidence, and limitations |
+| `prompts` | `measure`, `rows`, `omitted_count`; rows contain `class`, `scope`, occurrence/session counts, `verdict`, evidence, and limitations |
+| `failures` | `measure`, `rows`, `omitted_count`; rows contain `category`, `tool`, `command_family`, and an actionable `opportunity` |
+| `stuck` | `measure`, `rows`, `omitted_count`; rows contain `path`, optional `session_id`, bounded `sequence` and `observed_commands`, and an actionable `opportunity` |
+| `doctor` | canonical finding-report fields plus `top_fixes`, `top_fixes_omitted_count`, `cost`, `config_pruning`, `looks_healthy`, and `analysis_sufficient` |
+| `sql` / `query` | `columns`, `rows`, `omitted_column_count`, `omitted_count`; `query` is the same data with its own command label |
+| `optimize --print` | `findings`, `configuration_waste`, `overhead`, `proposals`, `next_steps`, and `limitations`; findings and waste carry explicit target/action/evidence |
+| `optimize --diff` | `rendered`, `skipped`, `rendered_omitted_count`, and `skipped_omitted_count`; filtered periods additionally include bounded `freshness` and `coverage` inside `data` |
+
+Human output uses the same field order as the corresponding table renderer:
+the heading and scope/coverage metadata come first, followed by ranked rows and
+their target/action/evidence details, then bounded omissions or limitations.
+Markdown preserves that order under one top-level heading. `sql`/`query`
+preserve database row order rather than applying analysis ranking.
+
+| Command | Codex input and scope | Non-empty result | Empty result | Partial coverage, health, and privacy bound |
 | --- | --- | --- | --- | --- |
-| `analyze` | selected canonical store; global/project findings | all deterministic findings with counts and targets | empty groups or explicit coverage limitations | source refs and bounded/redacted excerpts |
-| `usage` | tool calls/results, token usage, sessions, surfaces; global/project | tool, Skill, model, prompt, subagent, and surface effort signals | no rows or partial usage coverage; unknown is not zero | bounded rows/evidence; no raw payload |
-| `inventory` | discovered configured surfaces and observed attribution | kind, owner/scope, path, load mode, use state, estimate, action | unknown use is shown as unknown; no remove claim | bounded paths/evidence; names only |
-| `waste` | inventory plus recurring failure/stuck opportunities | ranked remove/slim/re-scope/fix actions | no actionable opportunities, or explicit unknown limitations | max 50 rows and 3 evidence examples |
-| `overhead` | always-on surfaces plus session-start snapshots | readable startup, residual, and user-control classification | unknown cost when a snapshot/estimate is missing | bytes and source refs only |
-| `prompts` | user messages classified by bounded markers | scope-specific steer/correct/question/instruct implications | no user prompts or partial source coverage | at most 3 bounded excerpts per row |
-| `failures` | structured/fallback tool outcomes; scope owner | normalized category/tool, count, examples, suggested fix | no recurring non-transient failure; opaque wrappers stay out | no renderer payload wholesale |
-| `stuck` | file operations and short failure/edit windows | project/session/path sequence and next action | no qualifying loop or explicit incomplete evidence | bounded sequence, paths, examples |
-| `doctor` | selected findings and view opportunities | highest-impact problem, impact, owner, target, action, follow-up | healthy only when coverage is observed and complete; otherwise inconclusive | max 5 per scope, 3 evidence examples |
-| `sql` | existing derived SQLite store and one read-only statement | bounded table/Markdown/JSON rows | missing store or empty result is explicit | max 50 columns/rows; query text is not echoed |
-| `optimize` | selected findings, surfaces, and validated instruction baselines | root-cause briefing plus reviewable diff or review-only metadata | every unsupported/ambiguous item remains a bounded skip | max 50 proposal rows; no raw inputs; each diff JSON max 16 KiB |
+| `analyze` | selected canonical store; global/project findings | deterministic finding groups with counts, scope, suggested action, and evidence | empty groups with empty coverage, not a fabricated finding | limitations stay in coverage; summaries, paths, commands, and excerpts are bounded/redacted; max 12 canonical evidence entries |
+| `usage` | tool calls/results, token usage, sessions, and surfaces | effort rows for tools, Skills, models, prompts, subagents, and surfaces | `rows: []` and an explicit no-usage message | coverage status and unknown values are shown; max 50 rows and 3 evidence examples; no raw payload |
+| `inventory` | discovered configured surfaces and observed attribution | owner/scope, kind, path, load mode, use state, estimates, and optional action | `rows: []` and an explicit no-configured-surfaces message | unknown use never becomes a remove claim; max 50 rows and bounded paths/evidence |
+| `waste` | inventory plus recurring failure and stuck opportunities | ranked remove/slim/re-scope/fix opportunities with target, action, and evidence | no actionable opportunities, with limitations when analysis is incomplete | unknown or suppressed opportunities remain inconclusive; max 50 opportunities and 3 evidence examples |
+| `overhead` | always-on surfaces plus session-start snapshots | global/project startup, readable, residual, and control classification | `rows: []` or explicit unknown cost when no estimate exists | missing snapshots set unknown cost rather than zero; max 50 rows and bounded byte/path evidence |
+| `prompts` | bounded user messages classified by prompt markers | scope-specific steer/correct/question/instruct counts, verdict, and evidence | `rows: []` and an explicit no-user-prompts message | incomplete attribution is a limitation; max 50 rows and 3 bounded excerpts |
+| `failures` | structured and fallback tool outcomes with scope routing | recurring non-transient category/tool rows and actionable opportunity fields | no recurring failure; one-off and opaque-wrapper noise stays out | wrapper payload is not promoted wholesale; max 50 rows and 3 evidence examples |
+| `stuck` | file operations and short failure/edit windows | project/session/path sequence, observed commands, and next action | no qualifying loop and an explicit no-stuck message | incomplete windows remain a limitation; max 50 rows, 10 sequence/command items, and 3 evidence examples |
+| `doctor` | selected findings and view opportunities | `WHAT TO FIX FIRST`, at most 5 opportunities per scope, then cost/pruning sections | no top fixes is healthy only with observed complete coverage and no unknowns | otherwise says analysis is incomplete/inconclusive; every opportunity has target/action/evidence, max 3 examples |
+| `sql` | existing derived SQLite store and one read-only statement | bounded table/Markdown/JSON rows | missing store is an explicit error; empty result has `rows: []` | one statement only, max 50 columns/rows, bounded text/blobs, and query text is not echoed |
+| `query` | exact compatibility alias of `sql` | same result and bounds with `command: "query"` | same explicit missing-store and empty-result behavior | same read-only and privacy guarantees as `sql` |
+| `optimize` | selected findings, surfaces, and validated instruction baselines | briefing with findings, waste, overhead, reviewable proposals/skips, and next steps; `--diff` renders bounded diffs | no applicable proposals plus explicit skips/limitations | read-only until confirmed `--apply`; max 50 proposals, no raw inputs/secrets, and each JSON diff is max 16 KiB |
 
-All rows retain global and project scope separately. JSON and Markdown are
-renderings of these same bounded action fields, not alternate analyses.
+All rows retain global and project scope separately. A healthy result requires
+observed coverage, no coverage limitations, no unknown selected cost/use
+estimates, and no actionable opportunities. Empty data, partial coverage,
+unknown attribution/cost, or a suppressed finding is an analysis gap, not
+evidence that the project is healthy. Suppressed findings remain absent from
+rankings when evidence is insufficient or ambiguous, with the relevant
+limitation retained where it can be reported safely.
+
+## Golden synthetic contract fixture
+
+[`analysis/command-contract.jsonl`](../../tests/fixtures/analysis/command-contract.jsonl)
+is the bounded golden rollout consumed by `tests/cli.rs`. The test adds a
+bounded synthetic surface inventory because surfaces are derived configuration
+data rather than rollout records.
+
+| Synthetic signal | Required contract assertion |
+| --- | --- |
+| `missing-tool test` fails in two projects | a recurring global failure, not a project-owned finding |
+| `cargo test` fails in two sessions in `/fixture/project-a` | a recurring project-scoped failure with target/action/evidence |
+| four `apply_patch` operations in one short session | a distinct stuck/rework opportunity with its sequence |
+| unused on-demand Skill | inventory and waste may recommend removal, with evidence |
+| one observed startup Skill above the bounded heavy threshold | inventory and waste may recommend slimming/re-scoping, with evidence |
+
+The fixture is synthetic only; no real rollout, prompt, tool payload, path, or
+identifier may be copied into it.
 
 ## Real-history smoke procedure
 

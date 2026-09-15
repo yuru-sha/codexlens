@@ -339,6 +339,69 @@ fn typed_view_store() -> PathBuf {
     path
 }
 
+fn command_contract_store() -> PathBuf {
+    let path = temp_store_path("command-contract");
+    let mut store = Store::open(&path).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/analysis/command-contract.jsonl");
+    store
+        .ingest_rollout_file(&fixture, &RolloutParseOptions::default())
+        .unwrap();
+
+    let mut surfaces = vec![Surface {
+        id: "unused-skill".to_owned(),
+        kind: SurfaceKind::Skill,
+        name: "unused-skill".to_owned(),
+        path: Some(PathBuf::from("/fixture/codex/skills/unused/SKILL.md")),
+        scope: SurfaceScope::Global,
+        enabled: Some(true),
+        load_mode: SurfaceLoadMode::OnDemand,
+        static_bytes: Some(256),
+        startup_bytes: Some(0),
+        observed_uses: 0,
+        observed_sessions: 0,
+        usage_state: SurfaceUsageState::Unused,
+        limitations: Vec::new(),
+    }];
+    // Keep the percentile boundary at 4096 so the 8192-byte row is actionable.
+    for index in 0..9 {
+        surfaces.push(Surface {
+            id: format!("baseline-rule-{index}"),
+            kind: SurfaceKind::Rule,
+            name: format!("base-{index}.rules"),
+            path: Some(PathBuf::from(format!(
+                "/fixture/codex/rules/base-{index}.rules"
+            ))),
+            scope: SurfaceScope::Global,
+            enabled: Some(true),
+            load_mode: SurfaceLoadMode::StartupFull,
+            static_bytes: Some(4096),
+            startup_bytes: Some(4096),
+            observed_uses: 1,
+            observed_sessions: 1,
+            usage_state: SurfaceUsageState::Used,
+            limitations: Vec::new(),
+        });
+    }
+    surfaces.push(Surface {
+        id: "heavy-skill".to_owned(),
+        kind: SurfaceKind::Skill,
+        name: "heavy-skill".to_owned(),
+        path: Some(PathBuf::from("/fixture/codex/skills/heavy/SKILL.md")),
+        scope: SurfaceScope::Global,
+        enabled: Some(true),
+        load_mode: SurfaceLoadMode::StartupFull,
+        static_bytes: Some(8192),
+        startup_bytes: Some(8192),
+        observed_uses: 1,
+        observed_sessions: 1,
+        usage_state: SurfaceUsageState::Used,
+        limitations: Vec::new(),
+    });
+    store.replace_surfaces(&surfaces).unwrap();
+    path
+}
+
 fn session_selection_store() -> PathBuf {
     let path = temp_store_path("session-selection");
     let mut store = Store::open(&path).unwrap();
@@ -1395,6 +1458,199 @@ fn typed_views_have_distinct_bounded_formats_and_json_envelopes() {
             assert!(document["data"][data_key][0]["owner"].is_string());
         }
     }
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
+    let store = command_contract_store();
+    let mut headings = Vec::new();
+    let assert_evidence = |row: &Value| {
+        let evidence = row["evidence"].as_array().expect("evidence array");
+        assert!(!evidence.is_empty());
+        assert!(evidence.len() <= 3);
+    };
+    let assert_opportunity = |opportunity: &Value| {
+        for field in [
+            "id",
+            "title",
+            "scope",
+            "target",
+            "impact",
+            "confidence",
+            "occurrences",
+            "distinct_sessions",
+            "action",
+            "evidence",
+            "limitations",
+        ] {
+            assert!(
+                !opportunity[field].is_null(),
+                "missing {field}: {opportunity}"
+            );
+        }
+        assert_evidence(opportunity);
+    };
+
+    for (command, heading, data_key) in [
+        ("inventory", "CONFIGURATION INVENTORY", "rows"),
+        ("overhead", "CONTEXT COST", "rows"),
+        ("usage", "WHERE EFFORT GOES", "rows"),
+        ("waste", "OPPORTUNITIES", "opportunities"),
+        ("failures", "RECURRING FAILURES", "rows"),
+        ("stuck", "STUCK WORK", "rows"),
+        ("prompts", "HOW YOU STEER CODEX", "rows"),
+    ] {
+        let human = run_args(&[command], &store);
+        assert!(human.status.success(), "{command}: {:?}", human);
+        let stdout = String::from_utf8_lossy(&human.stdout);
+        assert!(stdout.starts_with(heading), "{command}: {stdout}");
+        assert!(headings.iter().all(|seen| *seen != heading));
+        headings.push(heading);
+
+        let machine = run_args(&[command, "--format", "json"], &store);
+        let repeat = run_args(&[command, "--format", "json"], &store);
+        assert_eq!(
+            machine.stdout, repeat.stdout,
+            "{command} is not deterministic"
+        );
+        let document = parse_json_report(&machine, command);
+        let rows = document["data"][data_key]
+            .as_array()
+            .expect("contract rows array");
+        assert!(!rows.is_empty(), "{command} lost its typed rows");
+        assert!(!document["data"]["groups"].is_array());
+        for row in rows {
+            let evidence_row = if command == "failures" || command == "stuck" {
+                &row["opportunity"]
+            } else {
+                row
+            };
+            assert_evidence(evidence_row);
+        }
+        if command == "waste" {
+            for opportunity in rows {
+                assert_opportunity(opportunity);
+            }
+        }
+        if command == "failures" || command == "stuck" {
+            for row in rows {
+                assert_opportunity(&row["opportunity"]);
+            }
+        }
+    }
+
+    let analyze = parse_json_report(
+        &run_args(&["analyze", "--format", "json"], &store),
+        "analyze",
+    );
+    let groups = analyze["data"]["groups"].as_array().unwrap();
+    assert!(!groups.is_empty());
+    for group in groups {
+        for finding in group["findings"].as_array().unwrap() {
+            for field in [
+                "kind",
+                "severity",
+                "confidence",
+                "scope",
+                "key",
+                "summary",
+                "evidence",
+                "occurrences",
+                "distinct_sessions",
+                "affected_paths",
+                "observed_commands",
+                "sequence",
+                "suggested_action",
+                "limitations",
+                "verification_status",
+                "heuristic",
+            ] {
+                assert!(
+                    finding.get(field).is_some(),
+                    "missing analyze field {field}"
+                );
+            }
+            let evidence = finding["evidence"].as_array().unwrap();
+            assert!(!evidence.is_empty());
+            assert!(evidence.len() <= 12);
+        }
+    }
+
+    let inventory = parse_json_report(
+        &run_args(&["inventory", "--format", "json"], &store),
+        "inventory",
+    );
+    let inventory_rows = inventory["data"]["rows"].as_array().unwrap();
+    assert!(inventory_rows.iter().any(|row| {
+        row["name"] == "unused-skill"
+            && row["usage_state"] == "unused"
+            && row["action"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("Remove"))
+    }));
+    assert!(inventory_rows.iter().any(|row| {
+        row["name"] == "heavy-skill"
+            && row["action"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("Slim"))
+    }));
+
+    let waste = parse_json_report(&run_args(&["waste", "--format", "json"], &store), "waste");
+    let opportunities = waste["data"]["opportunities"].as_array().unwrap();
+    assert!(opportunities.iter().any(|opportunity| {
+        opportunity["id"] == "surface:unused-skill"
+            && opportunity["target"] == "/fixture/codex/skills/unused/SKILL.md"
+            && opportunity["action"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("Remove"))
+    }));
+    assert!(opportunities.iter().any(|opportunity| {
+        opportunity["id"] == "surface:heavy-skill"
+            && opportunity["target"] == "/fixture/codex/skills/heavy/SKILL.md"
+            && opportunity["action"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("Slim"))
+    }));
+
+    let failures = parse_json_report(
+        &run_args(&["failures", "--format", "json"], &store),
+        "failures",
+    );
+    let failure_rows = failures["data"]["rows"].as_array().unwrap();
+    assert!(failure_rows.iter().any(|row| {
+        row["category"] == "command_not_found" && row["opportunity"]["scope"]["kind"] == "global"
+    }));
+    assert!(failure_rows.iter().any(|row| {
+        row["category"] == "exit_code_1" && row["opportunity"]["scope"]["kind"] == "project"
+    }));
+
+    let stuck = parse_json_report(&run_args(&["stuck", "--format", "json"], &store), "stuck");
+    let stuck_rows = stuck["data"]["rows"].as_array().unwrap();
+    assert!(stuck_rows.iter().any(|row| {
+        row["path"] == "src/lib.rs"
+            && row["sequence"]
+                .as_array()
+                .is_some_and(|sequence| sequence.len() >= 4)
+    }));
+
+    let doctor = parse_json_report(&run_args(&["doctor", "--format", "json"], &store), "doctor");
+    let top_fixes = doctor["data"]["top_fixes"].as_array().unwrap();
+    assert!(!top_fixes.is_empty());
+    for opportunity in top_fixes {
+        assert_opportunity(opportunity);
+    }
+    assert!(
+        top_fixes
+            .iter()
+            .any(|opportunity| opportunity["scope"]["kind"] == "global")
+    );
+    assert!(
+        top_fixes
+            .iter()
+            .any(|opportunity| opportunity["scope"]["kind"] == "project")
+    );
+
     let _ = fs::remove_file(store);
 }
 
