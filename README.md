@@ -5,12 +5,16 @@
 Analyze Codex sessions and turn recurring friction into actionable
 `AGENTS.md` improvements.
 
-> MVP status: local ingestion, instruction capture, deterministic lenses, the
-> advisor, bounded reporting views, local monitoring, compressed rollout
+> Foundation MVP status: local ingestion, instruction capture, deterministic
+> lenses, bounded reporting views, local monitoring, compressed rollout
 > readers, versioned JSON output, and safe `optimize --apply` are implemented.
-> Read views analyze incrementally by default; `--frozen` reads the derived
-> store exactly, monitoring updates the derived store and an optional cursor
-> file, and apply writes only its validated write set.
+> The full cclens-compatible command contract is being rebaselined in
+> [#137](https://github.com/yuru-sha/codexlens/issues/137); this is not a
+> claim that the product rebaseline is complete.
+> Explicit `analyze`/`refresh` commands update the derived store; read views
+> consume that store without refreshing it. `--frozen` makes the store-only
+> boundary explicit, monitoring updates the derived store and an optional
+> cursor file, and apply writes only its validated write set.
 
 ## Goal
 
@@ -19,7 +23,7 @@ Analyze Codex sessions and turn recurring friction into actionable
 The product contract is [`docs/specs/product.md`](docs/specs/product.md):
 codexlens is intended to be the Codex counterpart of `cclens`, with a bounded
 health check plus the corresponding inventory, overhead, usage, waste,
-failures, stuck, prompts, query, and optimize views.
+failures, stuck, prompts, sql/query, and optimize views.
 
 ```text
 Codex local state + project instructions
@@ -55,9 +59,9 @@ per-user derived SQLite store. Read views accept `--codex-home`, `-s,
 --store`, `--scope global|project|project:PATH`, `--include-archived`,
 `--include-subagents`, `--since`, `--until`, `--format table|markdown|json`,
 and `--frozen`. The default store is
-`${XDG_STATE_HOME:-~/.local/state}/codexlens/codexlens.db`; normal reads
-incrementally analyze the selected Codex home, while `--frozen` uses the
-selected store exactly. Progress and freshness diagnostics go to stderr, and
+`${XDG_STATE_HOME:-~/.local/state}/codexlens/codexlens.db`; `analyze` and
+`refresh` incrementally process the selected Codex home, while read views use
+the selected store exactly. Progress and freshness diagnostics go to stderr, and
 JSON stdout is one versioned document. Read-only reports also accept
 reproducible period bounds; their output distinguishes the requested period,
 observed coverage, and store freshness. The explicit
@@ -70,33 +74,35 @@ order to render a diff.
 | Command | Input | Output purpose | Read-only behavior |
 | --- | --- | --- | --- |
 | `refresh` | discovered Codex home, rollout/state inputs, and instruction files | build or update the derived store | writes only the selected derived store; raw inputs remain unchanged |
-| `analyze` | Codex home and derived store | all lens findings | refreshes incrementally unless `--frozen` |
-| `sessions` | Codex home and derived store | bounded session metadata and coverage | refreshes incrementally unless `--frozen` |
-| `inventory` | Codex home and derived store | configured surfaces, use, and startup estimates | refreshes incrementally unless `--frozen` |
-| `overhead` | Codex home and derived store | always-on context cost and residual | refreshes incrementally unless `--frozen` |
-| `usage` | Codex home and derived store | tools, Skills, models, and surface usage | refreshes incrementally unless `--frozen` |
-| `waste` | Codex home and derived store | ranked remove/slim/re-scope opportunities | refreshes incrementally unless `--frozen` |
-| `failures` | Codex home and derived store | recurring failures by normalized category and owner | refreshes incrementally unless `--frozen` |
-| `corrections` | Codex home and derived store | correction-lens findings | refreshes incrementally unless `--frozen` |
-| `rework` | Codex home and derived store | legacy rework findings | refreshes incrementally unless `--frozen` |
-| `stuck` | Codex home and derived store | bounded edit/failure loops and affected paths | refreshes incrementally unless `--frozen` |
-| `prompts` | Codex home and derived store | steer/correct/question/instruct patterns | refreshes incrementally unless `--frozen` |
-| `verification` | Codex home and derived store | verification-lens findings | refreshes incrementally unless `--frozen` |
-| `knowledge` | Codex home and derived store | knowledge-lens findings | refreshes incrementally unless `--frozen` |
-| `rediscovery` | Codex home and derived store | alias for `knowledge` | refreshes incrementally unless `--frozen` |
-| `instructions` | Codex home and derived store | instruction-lens findings | refreshes incrementally unless `--frozen` |
-| `doctor` | Codex home and derived store | action-first health summary by scope | refreshes incrementally unless `--frozen` |
+| `analyze` | Codex home and derived store | all lens findings | refreshes the selected store unless `--frozen` |
+| `sessions` | derived store | bounded session metadata and coverage | reads the selected store; never refreshes |
+| `inventory` | derived store | configured surfaces, use, and startup estimates | reads the selected store; never refreshes |
+| `overhead` | derived store | always-on context cost and residual | reads the selected store; never refreshes |
+| `usage` | derived store | tools, Skills, models, prompts, subagents, and surface usage | reads the selected store; never refreshes |
+| `waste` | derived store | ranked remove/slim/re-scope opportunities | reads the selected store; never refreshes |
+| `failures` | derived store | recurring failures by normalized category and owner | reads the selected store; never refreshes |
+| `corrections` | derived store | correction-lens findings | reads the selected store; never refreshes |
+| `rework` | derived store | legacy rework findings | reads the selected store; never refreshes |
+| `stuck` | derived store | bounded edit/failure loops and affected paths | reads the selected store; never refreshes |
+| `prompts` | derived store | steer/correct/question/instruct patterns | reads the selected store; never refreshes |
+| `verification` | derived store | verification-lens findings | reads the selected store; never refreshes |
+| `knowledge` | derived store | knowledge-lens findings | reads the selected store; never refreshes |
+| `rediscovery` | derived store | alias for `knowledge` | reads the selected store; never refreshes |
+| `instructions` | derived store | instruction-lens findings | reads the selected store; never refreshes |
+| `doctor` | derived store | action-first health summary by scope | reads the selected store; never refreshes |
+| `sql` | existing derived store and SQL/stdin | bounded read-only ad-hoc table, Markdown, or JSON rows | never refreshes or creates the store |
 | `query` | existing derived store and SQL/stdin | bounded ad-hoc table, Markdown, or JSON rows | opens the store read-only; never refreshes or creates it |
 | `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | does not modify the supplied store or target files; legacy stores use a temporary migrated copy |
 | `optimize --apply --yes` | derived store and validated instruction/documentation targets | applies reviewed proposals and reports retained backups/recovery | modifies only the validated write set; never modifies the supplied store or rollout/state inputs |
 | `monitor` | one local rollout JSONL or state SQLite source | bounded incremental ingestion and cursor/status output | does not modify the source; writes the derived store and optional cursor file |
 
 `doctor` accepts the optional `--limit COUNT` to cap findings per scope.
-`query` accepts one positional SQL statement or reads SQL from stdin. It
-accepts only a single read-only statement, limits output to 50 columns and 50
-rows, and never echoes the SQL in errors. JSON uses
+`sql` accepts one positional SQL statement or reads SQL from stdin. It accepts
+only a single read-only statement, limits output to 50 columns and 50 rows,
+and never echoes the SQL in errors. JSON uses
 `{columns, rows, omitted_column_count, omitted_count}` inside a versioned
-`query` envelope.
+`sql` envelope. `query` is retained as an explicit compatibility alias with
+the same contract.
 
 `optimize` requires exactly one of `--diff`, `--print`, or `--apply`.
 `--diff` and `--print` are advisory and read-only; `--print` emits the
@@ -177,14 +183,16 @@ cargo run -- verification --store .codexlens.sqlite --frozen
 cargo run -- knowledge --store .codexlens.sqlite --frozen
 cargo run -- instructions --store .codexlens.sqlite --frozen
 cargo run -- doctor --store .codexlens.sqlite --frozen --since 2026-01-01T00:00:00Z --until 2026-01-08T00:00:00Z
+cargo run -- optimize --print --store .codexlens.sqlite --frozen
+cargo run -- sql --store .codexlens.sqlite --format json SELECT/**/1
 cargo run -- optimize --diff --store .codexlens.sqlite --frozen
 cargo run -- monitor --source tests/fixtures/rollout/monitoring.jsonl --kind rollout --store .codexlens.sqlite --max-polls 1
 cargo run -- doctor --format json --store .codexlens.sqlite --frozen
 ```
 
-Read views analyze the selected Codex home incrementally before rendering.
-`--frozen` makes the store-only boundary explicit: it does not discover raw
-inputs or write the store. `Activity` is the earliest and latest valid
+Run `analyze` or `refresh` to update the selected derived store, then use read
+views to render it. `--frozen` makes the store-only boundary explicit: it does
+not discover raw inputs or write the store. `Activity` is the earliest and latest valid
 timestamp observed in the selected store; `Latest ingestion` is the separate
 time the store recorded an input. Empty, missing, invalid, and partial
 timestamp coverage is reported as such rather than filling activity dates
@@ -212,10 +220,13 @@ extensions are defined in [docs/specs/post-mvp.md](docs/specs/post-mvp.md).
 
 ## Status and roadmap
 
-Phases 0 through 5 are complete. Phase 5 compressed rollout readers (#57),
+Phases 0 through 5 implementation milestones are complete. Phase 5 compressed rollout readers (#57),
 refresh/frozen reporting (#58), versioned JSON reporting (#59), bounded local
 live monitoring (#60), and safe optimize apply (#61) are implemented. Future
 changes must preserve the explicit boundaries documented above.
+
+Product readiness remains pending the cclens contract rebaseline in [#137](https://github.com/yuru-sha/codexlens/issues/137); the historical Phase 5
+milestones do not close that issue.
 
 Phase 6 is the release-preparation phase. Its release checklist and source
 release procedure are recorded in [docs/release.md](docs/release.md).

@@ -21,6 +21,8 @@ pub struct RenderedDiff {
 pub struct SkippedProposal {
     pub target_path: PathBuf,
     pub reason: String,
+    #[serde(default)]
+    pub proposal: Option<Proposal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +58,8 @@ pub enum DiffError {
     InvalidAnchor { path: PathBuf },
     #[error("proposal paths must be different: {0}")]
     SamePath(PathBuf),
+    #[error("review-only proposals cannot be rendered or applied")]
+    ReviewOnly,
 }
 
 pub fn render_diff(proposal: &Proposal) -> Result<String, DiffError> {
@@ -65,6 +69,9 @@ pub fn render_diff(proposal: &Proposal) -> Result<String, DiffError> {
 
 pub(crate) fn prepare_changes(proposal: &Proposal) -> Result<Vec<PreparedChange>, DiffError> {
     proposal.validate()?;
+    if proposal.review_only {
+        return Err(DiffError::ReviewOnly);
+    }
     match proposal.action {
         ProposalAction::Add => {
             let current = read_target(&proposal.target_path)?;
@@ -220,6 +227,7 @@ pub fn render_diffs(proposals: &[Proposal]) -> DiffBatch {
                     "proposal confidence is {}; optimize --diff requires high-confidence proposals",
                     proposal.confidence.as_str()
                 ),
+                proposal: None,
             });
             continue;
         }
@@ -234,6 +242,7 @@ pub fn render_diffs(proposals: &[Proposal]) -> DiffBatch {
             result.skipped.push(SkippedProposal {
                 target_path: proposal.target_path,
                 reason: "conflicting proposals share a target or source path".to_owned(),
+                proposal: None,
             });
             continue;
         }
@@ -241,11 +250,13 @@ pub fn render_diffs(proposals: &[Proposal]) -> DiffBatch {
             Ok(diff) if diff.is_empty() => result.skipped.push(SkippedProposal {
                 target_path: proposal.target_path,
                 reason: "proposal is a no-op for the current target".to_owned(),
+                proposal: None,
             }),
             Ok(diff) => result.rendered.push(RenderedDiff { proposal, diff }),
             Err(error) => result.skipped.push(SkippedProposal {
                 target_path: proposal.target_path,
                 reason: error.to_string(),
+                proposal: None,
             }),
         }
     }
@@ -435,6 +446,19 @@ mod tests {
     use crate::advisor::test_support::{proposal, temp_file};
     use crate::analysis::FindingConfidence;
     use std::path::Path;
+
+    #[test]
+    fn review_only_proposals_are_never_rendered() {
+        let mut proposal = proposal(&temp_file("config.toml"), ProposalAction::Remove);
+        proposal.review_only = true;
+        proposal.expected_target_hash = Some("synthetic-hash".to_owned());
+
+        assert!(matches!(render_diff(&proposal), Err(DiffError::ReviewOnly)));
+        let batch = render_diffs(&[proposal]);
+        assert!(batch.rendered.is_empty());
+        assert_eq!(batch.skipped.len(), 1);
+        assert!(batch.skipped[0].proposal.is_none());
+    }
 
     #[test]
     fn diff_renderer_supports_actions_and_never_writes() {

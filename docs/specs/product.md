@@ -39,17 +39,19 @@ The MVP mirrors the cclens view model with Codex adapters:
 | `analyze` | refresh and derive all analysis facts/views |
 | `inventory` | configured surfaces by scope and observed use |
 | `overhead` | always-on instruction/configuration cost and its owners |
-| `usage` | most-used tools, Skills, models, and workflow surfaces |
+| `usage` | most-used tools, Skills, models, prompts, subagents, and workflow surfaces |
 | `waste` | ranked optimization opportunities with suggested actions |
 | `failures` | recurring tool failures by normalized category and owner |
 | `stuck` | repeated edit/failure loops with affected paths |
 | `prompts` | steer/correct/question/instruct interaction patterns |
 | `sessions` | bounded session listing and coverage metadata |
-| `query` | read-only ad-hoc queries over the derived store |
+| `sql` | read-only ad-hoc queries over the derived store |
+| `query` | compatibility alias for `sql` |
 | `optimize` | investigate selected findings and propose concrete config/docs fixes |
 
-Read commands automatically refresh on first use and incrementally afterward.
-`--frozen` reads the existing store exactly. `--scope global` and
+Explicit `analyze` and `refresh` commands update the derived store
+incrementally. Read commands consume the existing store exactly and never
+refresh it; `--frozen` makes that store-only boundary explicit. `--scope global` and
 `--scope project:<path>` are supported on applicable views. Human output is
 screen-sized; JSON/Markdown are detailed machine/paste formats.
 
@@ -80,11 +82,13 @@ The initial views are deterministic and evidence-backed:
 - `prompts`: user steering, correction, question, and instruction patterns;
 - `overhead`: always-on configuration cost reconciled with actual usage;
 - `inventory`: configured surfaces multiplied by actual usage and scope;
-- `usage`: ranked tools, Skills, models, and other observed surfaces;
+- `usage`: ranked tools, Skills, models, prompts, subagents, and other observed surfaces;
 - `waste`: the ranked union of actionable unused/heavy/failure/stuck findings;
-- `doctor`: the top bounded `waste` opportunities split global/project;
+- `doctor`: the top bounded `waste` opportunities split global/project, with
+  owner, target, evidence, action, and follow-up command;
 - `optimize`: a root-cause briefing and specific proposed edits, never a
-  generic instruction such as “document the prerequisite”.
+  generic instruction such as “document the prerequisite”. Unsupported or
+  ambiguous configuration changes remain visible as skipped limitations.
 
 Every opportunity contains a title, impact, confidence, target path/scope,
 concrete action, occurrence and session counts, up to three evidence examples,
@@ -110,12 +114,13 @@ Top fixes
    Evidence: <up to three examples>
 ```
 
-Detailed rows belong to view commands, JSON, Markdown, or `query`; the normal
+Detailed rows belong to view commands, JSON, Markdown, or `sql`/`query`; the normal
 doctor output must not print hundreds of findings or full prompt/tool output.
 
 ## 7. Acceptance criteria
 
-- A first `codexlens doctor` requires no manual refresh.
+- A first `codexlens analyze` refreshes the selected inputs, after which
+  `codexlens doctor` reports from the derived store without implicit refresh.
 - The default store is per-user and does not depend on the repository where
   the command is run.
 - Global and project scopes are distinct.
@@ -124,7 +129,7 @@ doctor output must not print hundreds of findings or full prompt/tool output.
 - A synthetic unused/heavy configuration surface yields its path and a
   remove/slim/re-scope recommendation.
 - `inventory`, `overhead`, `usage`, `waste`, `failures`, `stuck`, `prompts`,
-  `doctor`, `query`, and `optimize` are real user-facing views, not aliases
+  `doctor`, `sql`, `query`, and `optimize` are real user-facing views, not aliases
   that merely dump the same finding list.
 - Human reports are bounded and actionable; JSON/Markdown preserve the same
   target/action semantics without progress text mixed into JSON stdout.
