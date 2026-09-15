@@ -3031,6 +3031,20 @@ mod tests {
                 .is_some_and(|input| input.contains("tools.exec_command"))
         );
 
+        let nested_js_shell = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-nested-js-shell-b"))
+            .unwrap();
+        assert_eq!(nested_js_shell.tool_name.as_deref(), Some("exec_command"));
+        assert_eq!(nested_js_shell.command.as_deref(), Some("cargo test"));
+        assert!(
+            nested_js_shell
+                .input_summary
+                .as_deref()
+                .is_some_and(|input| input.contains("tools.exec_command"))
+        );
+
         let nested_patch = data
             .tool_calls
             .iter()

@@ -443,7 +443,7 @@ mod tests {
         let context = AnalysisContext::new(&data);
         let events = context.failure_events();
 
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 4);
         assert!(events.iter().all(|event| {
             event.tool == "exec_command"
                 && event.family == "cargo test"
@@ -459,7 +459,7 @@ mod tests {
             .iter()
             .find(|finding| finding.key == "exec_command|cargo test|exit_code_1")
             .unwrap();
-        assert_eq!(failure.occurrences, 3);
+        assert_eq!(failure.occurrences, 4);
         assert_eq!(failure.distinct_sessions, 2);
         assert_eq!(
             failure.scope,
