@@ -138,6 +138,7 @@ pub(crate) fn proposal(path: &Path, action: ProposalAction) -> Proposal {
         target_scope: FindingScope::Instruction(path.to_path_buf()),
         target_path: path.to_path_buf(),
         action,
+        review_only: false,
         observed_problem: "synthetic problem".to_owned(),
         evidence_count: 1,
         distinct_sessions: 1,

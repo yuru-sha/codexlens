@@ -1,6 +1,8 @@
 //! Proposal modeling, validation, and finding conversion.
 
 use std::collections::BTreeSet;
+use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,7 @@ use super::diff::SkippedProposal;
 use super::scope::{file_hash, recommend_scope, stored_file};
 pub(super) const MAX_PROPOSAL_TEXT_BYTES: usize = 512;
 pub(super) const MAX_REPORT_EVIDENCE: usize = 12;
+const MAX_REVIEW_TARGET_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +50,8 @@ pub struct Proposal {
     pub target_scope: FindingScope,
     pub target_path: PathBuf,
     pub action: ProposalAction,
+    #[serde(default)]
+    pub review_only: bool,
     pub observed_problem: String,
     pub evidence_count: usize,
     pub distinct_sessions: usize,
@@ -138,6 +143,9 @@ impl Proposal {
                 field: "expected_target_hash",
             });
         }
+        if self.review_only {
+            return Ok(());
+        }
         match self.action {
             ProposalAction::Add => required_text(self.proposed_text.as_deref(), "proposed_text"),
             ProposalAction::Modify => {
@@ -219,6 +227,7 @@ impl Proposal {
             target_scope,
             target_path,
             action,
+            review_only: false,
             observed_problem: bounded_excerpt(
                 &format!(
                     "{} Target rationale: {}",
@@ -257,7 +266,7 @@ impl Proposal {
             .find(|surface| surface.id == id)
             .ok_or("configured surface is no longer present")?;
         if surface.kind != SurfaceKind::Instruction {
-            return Err("the configured surface has no stored instruction baseline");
+            return Self::from_review_only_surface(surface, opportunity);
         }
         let target_path = surface
             .path
@@ -304,6 +313,7 @@ impl Proposal {
             target_scope: opportunity.scope.clone(),
             target_path,
             action,
+            review_only: false,
             observed_problem: bounded_excerpt(&opportunity.impact, MAX_PROPOSAL_TEXT_BYTES),
             evidence_count: opportunity.occurrences,
             distinct_sessions: opportunity.distinct_sessions,
@@ -327,6 +337,86 @@ impl Proposal {
             .map_err(|_| "surface proposal validation failed")?;
         Ok(proposal)
     }
+
+    fn from_review_only_surface(
+        surface: &crate::model::Surface,
+        opportunity: &crate::analysis::views::ViewOpportunity,
+    ) -> Result<Self, &'static str> {
+        let target_path = surface
+            .path
+            .clone()
+            .ok_or("the configured surface has no target path")?;
+        let target_hash = review_target_hash(&target_path)?;
+        let action = if opportunity.action.starts_with("Remove") {
+            ProposalAction::Remove
+        } else if opportunity.action.starts_with("Slim") {
+            if opportunity.action.contains("re-scope") {
+                ProposalAction::SplitScope
+            } else {
+                ProposalAction::Modify
+            }
+        } else {
+            return Err("the configuration waste action is unsupported");
+        };
+        let evidence = bounded_evidence(&opportunity.evidence, MAX_PROPOSAL_TEXT_BYTES);
+        let mut limitations = opportunity.limitations.clone();
+        limitations.push(
+            "configuration values are not retained; inspect the named declaration manually"
+                .to_owned(),
+        );
+        let proposal = Self {
+            target_scope: opportunity.scope.clone(),
+            target_path,
+            action,
+            review_only: true,
+            observed_problem: bounded_excerpt(&opportunity.impact, MAX_PROPOSAL_TEXT_BYTES),
+            evidence_count: opportunity.occurrences,
+            distinct_sessions: opportunity.distinct_sessions,
+            confidence: opportunity.confidence,
+            heuristic: format!("configured {} surface waste", surface.kind.as_str()),
+            evidence,
+            proposed_text: None,
+            existing_text: None,
+            source_path: None,
+            expected_target_hash: Some(target_hash),
+            expected_source_hash: None,
+            target_rationale: format!(
+                "Review the configured {} declaration owned by {} at the hash-guarded target",
+                surface.kind.as_str(),
+                opportunity.owner
+            ),
+            limitations,
+            review_reminder: "This is review-only metadata; inspect the guarded configuration declaration and edit it manually if the evidence still applies".to_owned(),
+        };
+        proposal
+            .validate()
+            .map_err(|_| "configuration proposal validation failed")?;
+        Ok(proposal)
+    }
+}
+
+fn review_target_hash(path: &Path) -> Result<String, &'static str> {
+    let mut file = fs::File::open(path)
+        .map_err(|_| "the configured surface target is missing or unreadable")?;
+    if !file
+        .metadata()
+        .map_err(|_| "the configured surface target is missing or unreadable")?
+        .is_file()
+    {
+        return Err("the configured surface target is not a regular file");
+    }
+    let limit = u64::try_from(MAX_REVIEW_TARGET_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "the configured surface target is unreadable")?;
+    if bytes.len() > MAX_REVIEW_TARGET_BYTES {
+        return Err("the configured surface target exceeds the bounded review size");
+    }
+    Ok(crate::instructions::content_hash(&bytes))
 }
 
 fn redundant_instruction_pair(content: &str) -> Option<(String, String)> {
@@ -494,10 +584,12 @@ pub fn proposals_for_findings(data: &CanonicalData, findings: &[Finding]) -> Pro
                     "proposal confidence is {}; optimize --diff requires high-confidence proposals",
                     proposal.confidence.as_str()
                 ),
+                proposal: None,
             }),
             None => plan.skipped.push(SkippedProposal {
                 target_path: target_path_for_finding(data, finding),
                 reason: proposal_skip_reason(data, finding),
+                proposal: None,
             }),
         }
     }
@@ -516,6 +608,14 @@ pub fn proposals_for_findings_and_waste(
             continue;
         }
         match Proposal::from_surface_opportunity(data, opportunity) {
+            Ok(proposal) if proposal.review_only => {
+                let target_path = proposal.target_path.clone();
+                plan.skipped.push(SkippedProposal {
+                    target_path,
+                    reason: "configuration waste is actionable but this proposal is review-only; inspect the guarded declaration and edit configuration manually".to_owned(),
+                    proposal: Some(proposal),
+                });
+            }
             Ok(proposal) if proposal.confidence == FindingConfidence::High => {
                 plan.proposals.push(proposal);
             }
@@ -525,10 +625,12 @@ pub fn proposals_for_findings_and_waste(
                     "proposal confidence is {}; optimize --diff requires high-confidence proposals",
                     proposal.confidence.as_str()
                 ),
+                proposal: None,
             }),
             Err(reason) => plan.skipped.push(SkippedProposal {
                 target_path: surface_target_path(data, opportunity),
                 reason: format!("configuration waste is actionable but {reason}"),
+                proposal: None,
             }),
         }
     }
@@ -558,6 +660,7 @@ pub fn proposals_for_findings_and_waste(
         plan.skipped.push(SkippedProposal {
             target_path,
             reason: format!("{} ({})", reason, surface.id),
+            proposal: None,
         });
     }
     sort_proposal_plan(&mut plan);

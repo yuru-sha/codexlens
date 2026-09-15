@@ -230,7 +230,9 @@ The top-level JSON contract is versioned and uses stable snake-case fields:
   typed proposal and unified `diff`, and `skipped` contains
   `{target_path, reason, proposal}`. `proposal` is the typed proposal when a
   rendered diff was omitted for machine-output safety, and is `null` when the
-  proposal was already skipped before diff rendering.
+  proposal has no bounded metadata to preserve. Review-only configuration
+  proposals are retained in this field even though they are skipped before
+  diff rendering.
 
 Machine-readable diffs are redacted before output and are emitted only when
 the complete, unchanged diff is at most 16 KiB. A rendered proposal requiring
@@ -312,7 +314,7 @@ cwd: string | null, project: string | null}`. A `RenderedDiff` is
 `proposed_text: string | null`, `existing_text: string | null`,
 `source_path: string | null`, `expected_target_hash: string | null`,
 `expected_source_hash: string | null`, `target_rationale: string`,
-`limitations: string[]`, `review_reminder: string`, and
+`limitations: string[]`, `review_reminder: string`, `review_only: boolean`, and
 `verification: string`. A `SkippedProposal` is
 `{target_path: string, reason: string, proposal: Proposal | null}`.
 `rendered` and `skipped` are arrays of those exact element types. When a

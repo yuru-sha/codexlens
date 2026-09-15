@@ -280,6 +280,10 @@ The `--apply` path requires interactive confirmation or `--yes` in non-interacti
 then validates the full instruction/documentation write set, re-reads and
 re-hashes every file, creates retained backups, and applies one recoverable
 transaction. It never writes rollout/state inputs or the derived store.
+Configuration surfaces without a retained instruction baseline may instead
+produce a bounded review-only proposal in `skipped`; it carries the target,
+content guard, evidence, rationale, limitations, and review reminder, but never
+retains configuration values and is never part of the `--apply` write set.
 
 ## 11. Phase 4 advisor contract
 
@@ -291,12 +295,16 @@ field names and SQL. It contains:
 - the observed problem, occurrence/session counts, confidence, evidence
   references, and limitations;
 - the bounded proposed/replaced text needed by the diff renderer;
+- whether the proposal is review-only and therefore has no diff/apply text;
 - a target rationale and an explicit review reminder.
 
 Proposals are advisory. A proposal without evidence, a review reminder, or
 the text required by its action is invalid.
 Every mutating action carries the expected target-content hash; move and split
 proposals additionally carry the expected source-content hash.
+Review-only configuration proposals are the documented exception to the
+action-text requirement: they carry an expected target-content hash but omit
+both text fields and remain in the skipped set.
 
 Scope selection uses the evidence sessions and stored instruction joins:
 
@@ -315,7 +323,10 @@ global/project/nested groups. Evidence excerpts are bounded and redacted.
 `optimize --diff` reads the recommended target files and emits reviewable
 unified diffs plus an evidence summary. Missing, changed, unreadable,
 unsupported, conflicting, and no-op proposals are explicit skipped results.
-Only high-confidence proposals are rendered. Findings do not synthesize
+Non-instruction configuration waste may be represented by a bounded
+review-only proposal in `skipped`; its target hash and metadata do not contain
+configuration values. Only high-confidence, applyable proposals are rendered.
+Findings do not synthesize
 `modify` or `move_to_docs` proposals because they do not contain an approved
 replacement pair and the docs target has no stored baseline; both actions
 remain available for explicitly constructed, validated proposals.

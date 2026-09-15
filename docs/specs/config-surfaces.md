@@ -83,7 +83,10 @@ by resolved path. No surface is recommended for removal solely from size.
 
 Never persist config values for secrets, environment variables, command args,
 or private keys. Persist names, paths, booleans, bounded size estimates, and
-hashes only. Adapter fixtures must include one global Skill, one project rule,
+hashes only. A non-instruction configuration waste proposal may hash its
+current target for a review-only guard, but it must not retain target content
+and must remain outside the `optimize --apply` write set. Adapter fixtures must
+include one global Skill, one project rule,
 one MCP server, one unused surface, and one unreadable/missing surface; adapter
 tests assert the exact inventory state, while analysis-view tests assert
 target-specific recommendations.

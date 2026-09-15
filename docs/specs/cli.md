@@ -118,7 +118,9 @@ create findings from unknown evidence.
 `optimize` is read-only until the user approves a concrete plan. It receives
 the same scoped findings as `doctor`, inspects the named configuration target,
 and emits a plan containing exact target files, before/after snippets, reason,
-evidence, and a verification step. `--print` prints the briefing; otherwise
+evidence, and a verification step. Non-instruction targets without a retained
+baseline carry bounded review-only metadata instead of before/after snippets.
+`--print` prints the briefing; otherwise
 the implementation may launch the configured Codex CLI only through a private
 temporary file. No mutating write is allowed without explicit confirmation.
 The `--print` briefing has the same action semantics in table, Markdown, and
@@ -148,7 +150,7 @@ and its doctor/optimize operational guidance.
 | `stuck` | file operations and short failure/edit windows | project/session/path sequence and next action | no qualifying loop or explicit incomplete evidence | bounded sequence, paths, examples |
 | `doctor` | selected findings and view opportunities | highest-impact problem, impact, owner, target, action, follow-up | healthy only when coverage is observed and complete; otherwise inconclusive | max 5 per scope, 3 evidence examples |
 | `sql` | existing derived SQLite store and one read-only statement | bounded table/Markdown/JSON rows | missing store or empty result is explicit | max 50 columns/rows; query text is not echoed |
-| `optimize` | selected findings, surfaces, and validated instruction baselines | root-cause briefing plus reviewable diff | every unsupported/ambiguous item remains a bounded skip | max 50 proposal rows; no raw inputs; each diff JSON max 16 KiB |
+| `optimize` | selected findings, surfaces, and validated instruction baselines | root-cause briefing plus reviewable diff or review-only metadata | every unsupported/ambiguous item remains a bounded skip | max 50 proposal rows; no raw inputs; each diff JSON max 16 KiB |
 
 All rows retain global and project scope separately. JSON and Markdown are
 renderings of these same bounded action fields, not alternate analyses.

@@ -147,6 +147,7 @@ struct KnownProposal {
     target_scope: KnownScope,
     target_path: String,
     action: String,
+    review_only: bool,
     observed_problem: String,
     evidence_count: usize,
     distinct_sessions: usize,
@@ -212,6 +213,7 @@ fn assert_known_proposal(proposal: &KnownProposal) {
         &proposal.target_scope.value,
         &proposal.target_path,
         &proposal.action,
+        proposal.review_only,
         &proposal.observed_problem,
         proposal.evidence_count,
         proposal.distinct_sessions,
@@ -479,6 +481,97 @@ fn minimal_store() -> PathBuf {
             "INSERT INTO sessions (session_id, source_identity, source_path) VALUES ('minimal-session', 'synthetic-minimal-source', 'minimal.jsonl')",
             [],
         )
+        .unwrap();
+    path
+}
+
+fn unknown_surface_store() -> PathBuf {
+    let path = temp_store_path("unknown-surface");
+    let mut store = Store::open(&path).unwrap();
+    store
+        .connection()
+        .execute(
+            "INSERT INTO sessions (session_id, source_identity, source_path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                "unknown-surface-session",
+                "unknown-surface-source",
+                "unknown-surface.jsonl",
+                "2026-01-03T00:00:00Z",
+                "2026-01-03T00:01:00Z",
+            ],
+        )
+        .unwrap();
+    store
+        .connection()
+        .execute(
+            "INSERT INTO records (record_key, source_identity, source_path, source_line, source_kind, parser_schema_version, session_id, timestamp, sequence, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                "unknown-surface-record",
+                "unknown-surface-source",
+                "unknown-surface.jsonl",
+                1,
+                "rollout",
+                SCHEMA_VERSION,
+                "unknown-surface-session",
+                "2026-01-03T00:00:30Z",
+                0,
+                "event_message",
+            ],
+        )
+        .unwrap();
+    let snapshot_content = "synthetic instruction snapshot";
+    let snapshot_hash = codexlens::instructions::content_hash(snapshot_content.as_bytes());
+    store
+        .connection()
+        .execute(
+            "INSERT INTO instruction_blobs (blob_key, content_hash, byte_count, content) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "unknown-surface-snapshot",
+                snapshot_hash,
+                snapshot_content.len(),
+                snapshot_content,
+            ],
+        )
+        .unwrap();
+    store
+        .connection()
+        .execute(
+            "INSERT INTO instruction_snapshots (snapshot_key, source_identity, source_path, source_line, source_kind, parser_schema_version, session_id, snapshot_source, accuracy, blob_key, content_hash, byte_count, effective_chain_hash, truncated, chain_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                "unknown-surface-snapshot",
+                "unknown-surface-source",
+                "unknown-surface.jsonl",
+                1,
+                "rollout",
+                SCHEMA_VERSION,
+                "unknown-surface-session",
+                "rollout",
+                "observed",
+                "unknown-surface-snapshot",
+                snapshot_hash,
+                snapshot_content.len(),
+                snapshot_hash,
+                0,
+                "[]",
+            ],
+        )
+        .unwrap();
+    store
+        .replace_surfaces(&[Surface {
+            id: "unknown-surface".to_owned(),
+            kind: SurfaceKind::Skill,
+            name: "unknown-skill".to_owned(),
+            path: Some(PathBuf::from("/synthetic/unknown-skill/SKILL.md")),
+            scope: SurfaceScope::Global,
+            enabled: None,
+            load_mode: SurfaceLoadMode::OnDemand,
+            static_bytes: Some(64),
+            startup_bytes: Some(0),
+            observed_uses: 0,
+            observed_sessions: 0,
+            usage_state: SurfaceUsageState::Unknown,
+            limitations: vec!["synthetic usage state is unknown".to_owned()],
+        }])
         .unwrap();
     path
 }
@@ -3933,6 +4026,83 @@ fn empty_reporting_store_marks_activity_unknown_without_using_ingestion_time() {
         }
     }
     let _ = fs::remove_file(store);
+}
+
+#[test]
+fn doctor_marks_unknown_surface_usage_inconclusive() {
+    let store = unknown_surface_store();
+    let document = parse_json_report(&run_args(&["doctor", "--format", "json"], &store), "doctor");
+    assert_eq!(document["data"]["looks_healthy"], false);
+    assert_eq!(document["data"]["analysis_sufficient"], false);
+    assert_eq!(document["coverage"]["status"], "observed");
+    assert_eq!(document["data"]["cost"]["rows"][0]["unknown_cost"], false);
+    assert!(
+        document["data"]["config_pruning"]["rows"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn optimize_json_keeps_review_only_configuration_proposal_bounded() {
+    let (store, target, project_root) =
+        rendered_diff_store_with_content("Existing synthetic guidance.\n");
+    let config_path = project_root.join("config.toml");
+    fs::write(
+        &config_path,
+        "synthetic configuration declaration = \"redacted\"\n",
+    )
+    .unwrap();
+    Store::open(&store)
+        .unwrap()
+        .replace_surfaces(&[Surface {
+            id: "synthetic-config".to_owned(),
+            kind: SurfaceKind::Config,
+            name: "synthetic.toml".to_owned(),
+            path: Some(config_path.clone()),
+            scope: SurfaceScope::Project(project_root.clone()),
+            enabled: Some(true),
+            load_mode: SurfaceLoadMode::StartupFull,
+            static_bytes: Some(64),
+            startup_bytes: Some(64),
+            observed_uses: 0,
+            observed_sessions: 0,
+            usage_state: SurfaceUsageState::Unused,
+            limitations: Vec::new(),
+        }])
+        .unwrap();
+
+    let output = run_args(&["optimize", "--diff", "--format", "json"], &store);
+    let document = parse_json_report(&output, "optimize_diff");
+    let skipped = document["data"]["skipped"].as_array().unwrap();
+    let configuration = skipped
+        .iter()
+        .find(|entry| entry["proposal"]["review_only"] == true)
+        .expect("configuration proposal should be present as a review-only skip");
+    assert_eq!(configuration["proposal"]["action"], "remove");
+    assert!(configuration["proposal"]["expected_target_hash"].is_string());
+    assert!(configuration["proposal"]["existing_text"].is_null());
+    assert!(configuration["proposal"]["proposed_text"].is_null());
+    assert!(
+        configuration["reason"]
+            .as_str()
+            .unwrap()
+            .contains("review-only")
+    );
+    assert!(
+        !output
+            .stdout
+            .windows("redacted".len())
+            .any(|window| { window == "redacted".as_bytes() })
+    );
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_file(config_path);
+    let _ = fs::remove_dir(project_root);
 }
 
 #[test]

@@ -252,8 +252,7 @@ fn render_json_diff_inner(
     let mut skipped = batch
         .skipped
         .iter()
-        .cloned()
-        .map(|skipped| (skipped, None))
+        .map(|skipped| (skipped.clone(), skipped.proposal.as_ref()))
         .collect::<Vec<(SkippedProposal, Option<&Proposal>)>>();
     let mut rendered_json = Vec::new();
     for rendered_diff in rendered {
@@ -273,6 +272,7 @@ fn render_json_diff_inner(
                 SkippedProposal {
                     target_path: rendered_diff.proposal.target_path.clone(),
                     reason,
+                    proposal: None,
                 },
                 Some(&rendered_diff.proposal),
             ));
@@ -490,6 +490,7 @@ fn proposal_json(proposal: &Proposal) -> serde_json::Value {
             MAX_PROPOSAL_TEXT_BYTES,
         ),
         "action": proposal.action.as_str(),
+        "review_only": proposal.review_only,
         "observed_problem": bounded_excerpt(&proposal.observed_problem, MAX_PROPOSAL_TEXT_BYTES),
         "evidence_count": proposal.evidence_count,
         "distinct_sessions": proposal.distinct_sessions,
