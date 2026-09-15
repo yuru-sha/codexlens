@@ -1264,6 +1264,17 @@ fn doctor_promotes_actionable_findings_beyond_configuration_waste() {
         .unwrap();
     assert_eq!(stuck["occurrences"], 4);
     assert_eq!(stuck["distinct_sessions"], 2);
+    let failure = top_fixes
+        .iter()
+        .find(|opportunity| {
+            opportunity["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("failure:"))
+        })
+        .expect("doctor omitted the recurring failure finding");
+    assert_eq!(failure["scope"]["kind"], "project");
+    assert_eq!(failure["occurrences"], 2);
+    assert_eq!(failure["distinct_sessions"], 2);
 
     let _ = fs::remove_file(store);
 }
