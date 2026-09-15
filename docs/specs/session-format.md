@@ -108,10 +108,14 @@ and renderer output are not commands. Values such as `exec_command const`,
 rejected before storage.
 
 Wrapper tools are a separate boundary: preserve names such as `exec`, `js`,
-and `wait` as observed tool names. Wrapper source and renderer text are not
-canonical commands. When a wrapper does not expose one safely structured
-nested call, retain the bounded input and provenance as an opaque tool call;
-do not infer a shell command or synthesize a nested result.
+and `wait` as observed tool names unless the wrapper source contains exactly
+one safely structured `tools.<name>({...})` call. In that case, retain the
+wrapper source and source provenance while normalizing the nested tool name
+and typed command/patch argument into the same canonical call. Browser and
+other non-shell nested tools retain their bounded input without becoming a
+command. Ambiguous, malformed, or unsupported wrapper source remains an
+opaque tool call and emits a bounded `opaque_tool_input` limitation; wrapper
+source and renderer text are never canonical commands.
 
 ### 3.2 Session selection
 

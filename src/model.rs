@@ -775,6 +775,7 @@ pub enum DiagnosticKind {
     StateSchemaMismatch,
     StateQuery,
     MetadataConflict,
+    OpaqueToolInput,
     UnsupportedReader,
 }
 
@@ -787,6 +788,7 @@ impl DiagnosticKind {
             Self::StateSchemaMismatch => "state_schema_mismatch",
             Self::StateQuery => "state_query",
             Self::MetadataConflict => "metadata_conflict",
+            Self::OpaqueToolInput => "opaque_tool_input",
             Self::UnsupportedReader => "unsupported_reader",
         }
     }

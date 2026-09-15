@@ -14,6 +14,8 @@
 {"timestamp":"2026-01-02T00:00:00Z","type":"session_meta","payload":{"id":"fixture-wrapper-session-b","cwd":"/fixture/project"}}
 {"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-nested-shell-b","name":"exec","input":"await tools.exec_command({cmd: \"cargo test\"});"}}
 {"timestamp":"2026-01-02T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-nested-shell-b","exit_code":1,"status":"failed","output":"nested shell failure"}}
+{"timestamp":"2026-01-02T00:00:02.500Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-nested-js-shell-b","name":"js","input":"await tools.exec_command({cmd: \"cargo test\"});"}}
+{"timestamp":"2026-01-02T00:00:02.600Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-nested-js-shell-b","exit_code":1,"status":"failed","output":"nested js shell failure"}}
 {"timestamp":"2026-01-02T00:00:03Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-opaque-wrapper-b","name":"exec","input":"await tools.exec_command({cmd: commandFromVariable});"}}
 {"timestamp":"2026-01-02T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-opaque-wrapper-b","exit_code":1,"status":"failed","output":"opaque wrapper failure"}}
 {"timestamp":"2026-01-02T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-js-b","name":"js","input":"return 1;"}}
@@ -22,3 +24,5 @@
 {"timestamp":"2026-01-02T00:00:08Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-wait-b","exit_code":1,"status":"failed","output":"wait failure"}}
 {"timestamp":"2026-01-02T00:00:09Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-structured-wrapper-b","name":"exec","input":{"command":"*** Update File: src/wrapper.rs"}}}
 {"timestamp":"2026-01-02T00:00:10Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-structured-wrapper-b","exit_code":0,"status":"completed","output":"wrapper completed"}}
+{"timestamp":"2026-01-02T00:00:11Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-nested-browser-b","name":"js","input":"await tools.browser({url: \"https://example.test\"});"}}
+{"timestamp":"2026-01-02T00:00:12Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-nested-browser-b","exit_code":0,"status":"completed","output":"browser completed"}}
