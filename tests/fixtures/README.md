@@ -51,6 +51,11 @@ events, and a malformed line.
 `rollout/coverage-limitations.jsonl` covers a bounded incomplete turn and a
 valid sibling event for coverage-reporting tests.
 
+`analysis/command-contract.jsonl` is the bounded golden rollout for the CLI
+contract: a global recurring failure, a project recurring failure, a repeated
+edit sequence, and classified user steering. Its companion test adds synthetic
+unused and heavy surfaces to exercise inventory and waste actions.
+
 Observed-instruction snapshot tests generate bounded synthetic text in memory,
 so instruction content is not stored in repository fixtures.
 
