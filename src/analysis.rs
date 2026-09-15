@@ -2386,6 +2386,12 @@ mod tests {
                 .map(|finding| &finding.scope),
             Some(&FindingScope::Instruction(global.path))
         );
+        assert!(
+            findings
+                .iter()
+                .filter(|finding| finding.kind == FindingType::Overscoped)
+                .all(|finding| finding.occurrences == 1 && finding.distinct_sessions == 1)
+        );
 
         let mut truncated_snapshot = data.clone();
         for snapshot in &mut truncated_snapshot.instruction_snapshots {

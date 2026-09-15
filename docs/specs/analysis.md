@@ -232,7 +232,12 @@ recurring failures and stuck loops.
 
 ## 9. `doctor`
 
-`doctor` combines the highest-ranked findings and groups them by scope:
+`doctor` combines the highest-ranked actionable findings with typed waste
+opportunities and groups them by scope. An instruction-gap finding that refers
+to the same scoped opportunity already present in the waste view is not
+rendered twice.
+Known, evidence-backed user-controlled startup overhead is also an actionable
+opportunity; unknown overhead remains a COST limitation rather than a fix:
 
 1. global;
 2. project;
@@ -243,8 +248,9 @@ period, session count, freshness, finding counts, and a bounded evidence
 sample. Read-only reporting commands also accept explicit `--since` and
 `--until` RFC3339 bounds using the half-open interval `[since, until)`; the
 requested period, observed coverage, and store freshness remain separate. The
-`codexlens doctor` command accepts an optional `--limit COUNT` to cap findings
-per scope. All reporting commands also accept explicit `--format json` output;
+`codexlens doctor` command accepts an optional `--limit COUNT` to cap
+opportunities per scope (never above five). All reporting commands also accept
+explicit `--format json` output;
 the versioned schema keeps stdout free of progress text and sends diagnostics
 and operational errors to stderr. Period-filtered JSON adds the version-1
 `data.coverage` object defined in
