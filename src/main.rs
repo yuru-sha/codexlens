@@ -23,7 +23,7 @@ use codexlens::advisor::{
 };
 use codexlens::analysis::views::{
     FailureReport, InventoryReport, OverheadReport, PromptReport, StuckReport, UsageReport,
-    ViewOpportunity, WasteReport,
+    ViewOpportunity, WasteReport, doctor_opportunities,
 };
 use codexlens::analysis::{
     Finding, FindingScope, analyze_default, corrections, instructions, knowledge, rework,
@@ -1735,6 +1735,7 @@ fn filter_view_report(report: ViewReport, scope: &ScopeFilter) -> ViewReport {
 
 struct DoctorView {
     top_fixes: Vec<ViewOpportunity>,
+    top_fixes_omitted_count: usize,
     cost: OverheadReport,
     pruning: InventoryReport,
     finding_report: DoctorReport,
@@ -1789,23 +1790,10 @@ fn run_doctor_report(options: &StoreOptions, limit: Option<usize>) -> Result<()>
         finding_report.period_start = period.observed_start.clone();
         finding_report.period_end = period.observed_end.clone();
     }
-    let mut seen_per_scope = BTreeMap::<String, usize>::new();
-    let top_fixes = waste
-        .opportunities
-        .iter()
-        .filter(|opportunity| {
-            let count = seen_per_scope
-                .entry(opportunity.scope.to_string())
-                .or_default();
-            if *count >= max_per_scope {
-                return false;
-            }
-            *count += 1;
-            true
-        })
-        .cloned()
-        .collect();
-    let has_opportunities = !waste.opportunities.is_empty();
+    let all_opportunities = doctor_opportunities(&scoped_data, &findings, &waste, &cost);
+    let has_opportunities = !all_opportunities.is_empty();
+    let (top_fixes, top_fixes_omitted_count) =
+        bound_doctor_opportunities(all_opportunities, max_per_scope);
     let unknown_cost = cost.rows.iter().any(|row| row.unknown_cost);
     let unknown_inventory = pruning
         .rows
@@ -1818,6 +1806,7 @@ fn run_doctor_report(options: &StoreOptions, limit: Option<usize>) -> Result<()>
         && !unknown_inventory;
     let doctor = DoctorView {
         top_fixes,
+        top_fixes_omitted_count,
         cost,
         pruning: InventoryReport {
             measure: pruning.measure,
@@ -1869,6 +1858,27 @@ fn run_doctor_report(options: &StoreOptions, limit: Option<usize>) -> Result<()>
     }
 }
 
+fn bound_doctor_opportunities(
+    opportunities: Vec<ViewOpportunity>,
+    max_per_scope: usize,
+) -> (Vec<ViewOpportunity>, usize) {
+    let total = opportunities.len();
+    let mut seen_per_scope = BTreeMap::<String, usize>::new();
+    let mut visible = Vec::new();
+    for opportunity in opportunities {
+        let count = seen_per_scope
+            .entry(opportunity.scope.to_string())
+            .or_default();
+        if *count >= max_per_scope || visible.len() >= CLI_VIEW_ROW_LIMIT {
+            continue;
+        }
+        *count += 1;
+        visible.push(opportunity);
+    }
+    let omitted = total.saturating_sub(visible.len());
+    (visible, omitted)
+}
+
 fn render_doctor_table(
     doctor: &DoctorView,
     freshness: &StoreFreshness,
@@ -1888,7 +1898,11 @@ fn render_doctor_table(
     ));
     output.push_str(&render_coverage_limitations(coverage));
     if doctor.top_fixes.is_empty() {
-        if doctor.coverage_sufficient {
+        if doctor.top_fixes_omitted_count > 0 {
+            output.push_str(
+                "Top fixes were omitted by the selected doctor limit; inspect the focused views for the remaining opportunities.\n",
+            );
+        } else if doctor.coverage_sufficient {
             output.push_str("No top fixes with bounded evidence.\n");
         } else {
             output.push_str(
@@ -1904,7 +1918,17 @@ fn render_doctor_table(
             ));
             append_opportunity_fields(&mut output, opportunity);
         }
-        append_omitted(&mut output, doctor.top_fixes.len());
+        if doctor.top_fixes_omitted_count > 0 {
+            output.push_str(&format!(
+                "Omitted {} additional top-fix opportunit{} due to the per-scope/summary limit.\n",
+                doctor.top_fixes_omitted_count,
+                if doctor.top_fixes_omitted_count == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+            ));
+        }
     }
     if !doctor.cost.rows.is_empty() {
         output.push_str("\nCOST\n");
@@ -1959,8 +1983,7 @@ fn print_doctor_json(
             .map(opportunity_json)
             .collect::<Vec<_>>()
     );
-    doctor_data["top_fixes_omitted_count"] =
-        serde_json::json!(doctor.top_fixes.len().saturating_sub(CLI_VIEW_ROW_LIMIT));
+    doctor_data["top_fixes_omitted_count"] = serde_json::json!(doctor.top_fixes_omitted_count);
     doctor_data["cost"] = serde_json::json!({
         "measure": doctor.cost.measure,
         "rows": doctor.cost.rows.iter().take(CLI_VIEW_ROW_LIMIT).map(overhead_row_json).collect::<Vec<_>>(),
