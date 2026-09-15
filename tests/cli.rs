@@ -1457,6 +1457,19 @@ fn typed_views_have_distinct_bounded_formats_and_json_envelopes() {
         if command == "inventory" {
             assert!(document["data"][data_key][0]["owner"].is_string());
         }
+        if command == "overhead" {
+            assert!(
+                stdout.contains("residual (system/tool): "),
+                "{command}: {stdout}"
+            );
+            assert!(
+                document["data"][data_key]
+                    .as_array()
+                    .expect("overhead rows")
+                    .iter()
+                    .all(|row| row["residual_source"].is_string())
+            );
+        }
     }
     let _ = fs::remove_file(store);
 }

@@ -2129,7 +2129,7 @@ fn render_overhead_table(output: &mut String, report: &OverheadReport) {
         append_field(output, "project", row.project.as_deref().map(bounded_path));
         output.push_str(&format!("  sessions: {}\n", row.session_count));
         output.push_str(&format!(
-            "  observed minimum: {} bytes\n  readable startup: {} bytes\n  residual: {} bytes\n  cost control: {}\n  unknown cost: {}\n",
+            "  observed minimum: {} bytes\n  readable startup: {} bytes (user-controlled configuration)\n  residual (system/tool): {} bytes\n  cost control: {}\n  unknown cost: {}\n",
             optional_number(row.observed_min_startup_bytes),
             optional_number(row.readable_startup_bytes),
             optional_number(row.residual_bytes),
@@ -2584,6 +2584,7 @@ fn overhead_row_json(row: &codexlens::analysis::views::OverheadRow) -> serde_jso
         "observed_min_startup_bytes": row.observed_min_startup_bytes,
         "readable_startup_bytes": row.readable_startup_bytes,
         "residual_bytes": row.residual_bytes,
+        "residual_source": if row.residual_bytes.is_some() { "system_or_tool" } else { "unknown" },
         "cost_control": if row.unknown_cost { "unknown" } else { "user_controlled" },
         "unknown_cost": row.unknown_cost,
         "evidence": row.evidence.iter().take(3).map(evidence_json).collect::<Vec<_>>(),

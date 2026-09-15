@@ -225,9 +225,10 @@ prompt and subagent rows use counts and token observations available for those
 canonical records, and unknown attribution remains explicit. `inventory`
 reports owner/scope, path, load mode, use state, estimates, and a concrete
 remove/slim/re-scope action only when evidence supports it. `overhead`
-reports readable always-on bytes, residual bytes, and whether the cost is
-user-controlled or unknown. `waste` ranks those configuration opportunities
-alongside recurring failures and stuck loops.
+reports readable always-on configuration bytes separately from residual
+system/tool bytes, and marks the cost unknown when the observed comparison is
+inconclusive. `waste` ranks those configuration opportunities alongside
+recurring failures and stuck loops.
 
 ## 9. `doctor`
 

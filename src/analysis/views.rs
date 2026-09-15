@@ -971,12 +971,7 @@ pub fn waste_with_options(data: &CanonicalData, options: &AnalysisOptions) -> Wa
         });
     }
     for row in failures_with_options(data, options).rows {
-        let mut opportunity = row.opportunity;
-        opportunity.action = format!(
-            "Fix the recurring {} prerequisite at {}",
-            row.category, opportunity.target
-        );
-        opportunities.push(opportunity);
+        opportunities.push(row.opportunity);
     }
     for row in stuck_with_options(data, options).rows {
         opportunities.push(row.opportunity);
@@ -1961,6 +1956,59 @@ mod tests {
             .filter(|row| row.command_family == "no_canonical_command")
             .collect::<Vec<_>>();
         assert!(wrapper_rows.is_empty());
+    }
+
+    #[test]
+    fn waste_preserves_no_canonical_tool_action() {
+        let mut data = view_fixture();
+        for (index, session_id) in ["view-session-a", "view-session-b"].into_iter().enumerate() {
+            data.tool_calls.push(ToolCall {
+                id: Some(format!("patch-{index}")),
+                call_id: Some(format!("patch-call-{index}")),
+                session_id: Some(session_id.to_owned()),
+                turn_id: Some(format!("patch-turn-{index}")),
+                tool_name: Some("apply_patch".to_owned()),
+                input_summary: Some("synthetic patch".to_owned()),
+                command: None,
+                cwd: Some("/fixture/project".to_owned()),
+                status: None,
+                provenance: SourceRef::rollout("views.jsonl".into(), 100 + index),
+            });
+            data.tool_results.push(ToolResult {
+                id: Some(format!("patch-result-{index}")),
+                call_id: Some(format!("patch-call-{index}")),
+                session_id: Some(session_id.to_owned()),
+                turn_id: Some(format!("patch-turn-{index}")),
+                command: None,
+                cwd: Some("/fixture/project".to_owned()),
+                stdout: None,
+                stderr: Some("synthetic patch failure".to_owned()),
+                duration_ms: None,
+                exit_code: Some(1),
+                status: Some("failed".to_owned()),
+                outcome: ToolOutcome::Failed,
+                outcome_source: OutcomeSource::ExitCode,
+                matched_call: true,
+                deduplication_key: None,
+                equivalent_to: None,
+                is_duplicate: false,
+                provenance: SourceRef::rollout("views.jsonl".into(), 110 + index),
+            });
+        }
+
+        let opportunity = waste(&data)
+            .opportunities
+            .into_iter()
+            .find(|opportunity| {
+                opportunity.id == "failure:apply_patch|no_canonical_command|exit_code_1"
+            })
+            .expect("non-shell failure opportunity");
+        assert!(
+            opportunity
+                .action
+                .contains("no shell-command prerequisite was inferred")
+        );
+        assert!(!opportunity.action.contains("prerequisite at"));
     }
 
     #[test]
