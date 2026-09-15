@@ -2129,9 +2129,14 @@ fn render_overhead_table(output: &mut String, report: &OverheadReport) {
         append_field(output, "project", row.project.as_deref().map(bounded_path));
         output.push_str(&format!("  sessions: {}\n", row.session_count));
         output.push_str(&format!(
-            "  observed minimum: {} bytes\n  readable startup: {} bytes (user-controlled configuration)\n  residual (system/tool): {} bytes\n  cost control: {}\n  unknown cost: {}\n",
+            "  observed minimum: {} bytes\n  readable startup: {} bytes (user-controlled configuration)\n  residual ({}): {} bytes\n  cost control: {}\n  unknown cost: {}\n",
             optional_number(row.observed_min_startup_bytes),
             optional_number(row.readable_startup_bytes),
+            if row.residual_bytes.is_some() {
+                "system/tool"
+            } else {
+                "unknown"
+            },
             optional_number(row.residual_bytes),
             if row.unknown_cost { "unknown" } else { "user-controlled" },
             row.unknown_cost

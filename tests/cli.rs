@@ -1475,6 +1475,38 @@ fn typed_views_have_distinct_bounded_formats_and_json_envelopes() {
 }
 
 #[test]
+fn overhead_marks_unknown_residual_source_in_human_and_json() {
+    let store = minimal_store();
+
+    let human = run_args(&["overhead"], &store);
+    assert!(human.status.success());
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        human_stdout.contains("residual (unknown): unknown"),
+        "{human_stdout}"
+    );
+    assert!(
+        !human_stdout.contains("residual (system/tool): unknown"),
+        "{human_stdout}"
+    );
+
+    let document = parse_json_report(
+        &run_args(&["overhead", "--format", "json"], &store),
+        "overhead",
+    );
+    let row = document["data"]["rows"]
+        .as_array()
+        .expect("overhead rows")
+        .first()
+        .expect("global overhead row");
+    assert!(row["residual_bytes"].is_null());
+    assert_eq!(row["residual_source"], "unknown");
+    assert_eq!(row["unknown_cost"], true);
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
 fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
     let store = command_contract_store();
     let privacy_marker = "contract-private-value";
