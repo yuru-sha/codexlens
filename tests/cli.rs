@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1231,6 +1231,73 @@ fn doctor_does_not_call_an_empty_store_healthy() {
 }
 
 #[test]
+fn doctor_promotes_actionable_findings_beyond_configuration_waste() {
+    let store = fixture_store();
+
+    let document = parse_json_report(&run_args(&["doctor", "--format", "json"], &store), "doctor");
+    let top_fixes = document["data"]["top_fixes"].as_array().unwrap();
+
+    assert!(
+        top_fixes.iter().any(|opportunity| opportunity["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("gap:"))),
+        "doctor omitted the actionable instruction-gap finding: {top_fixes:?}"
+    );
+    let ids = top_fixes
+        .iter()
+        .map(|opportunity| {
+            format!(
+                "{}|{}",
+                opportunity["id"].as_str().unwrap(),
+                serde_json::to_string(&opportunity["scope"]).unwrap()
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        ids.len(),
+        top_fixes.len(),
+        "doctor duplicated an opportunity"
+    );
+    let stuck = top_fixes
+        .iter()
+        .find(|opportunity| opportunity["id"] == "stuck:src/lib.rs|loop")
+        .unwrap();
+    assert_eq!(stuck["occurrences"], 4);
+    assert_eq!(stuck["distinct_sessions"], 2);
+    let failure = top_fixes
+        .iter()
+        .find(|opportunity| {
+            opportunity["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("failure:"))
+        })
+        .expect("doctor omitted the recurring failure finding");
+    assert_eq!(failure["scope"]["kind"], "project");
+    assert_eq!(failure["occurrences"], 2);
+    assert_eq!(failure["distinct_sessions"], 2);
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn doctor_reports_top_fix_omissions_when_limit_bounds_the_summary() {
+    let store = fixture_store();
+
+    let machine = parse_json_report(
+        &run_args(&["doctor", "--limit", "1", "--format", "json"], &store),
+        "doctor",
+    );
+    assert_eq!(machine["data"]["top_fixes"].as_array().unwrap().len(), 1);
+    assert!(machine["data"]["top_fixes_omitted_count"].as_u64().unwrap() > 0);
+
+    let human = run_args(&["doctor", "--limit", "1"], &store);
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("Omitted"), "{stdout}");
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
 fn optimize_diff_renders_a_proposal_without_writing_the_target() {
     let (store, target, project_root) = rendered_diff_store();
     let before = fs::read_to_string(&target).unwrap();
@@ -1760,7 +1827,16 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
     let doctor = parse_json_report(&doctor_machine, "doctor");
     let top_fixes = doctor["data"]["top_fixes"].as_array().unwrap();
     assert!(!top_fixes.is_empty());
-    assert_eq!(top_fixes[0]["id"], "stuck:src/lib.rs|loop");
+    assert!(
+        top_fixes
+            .iter()
+            .any(|opportunity| opportunity["id"] == "stuck:src/lib.rs|loop")
+    );
+    assert!(
+        top_fixes
+            .iter()
+            .any(|opportunity| opportunity["id"] == "overhead:global")
+    );
     for opportunity in top_fixes {
         assert_opportunity(opportunity);
     }

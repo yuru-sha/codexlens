@@ -219,6 +219,133 @@ pub struct WasteReport {
     pub opportunities: Vec<ViewOpportunity>,
 }
 
+/// Combine typed waste opportunities with the other actionable findings used
+/// by the doctor view, keeping one bounded opportunity per routed target.
+pub fn doctor_opportunities(
+    data: &CanonicalData,
+    findings: &[Finding],
+    waste: &WasteReport,
+    overhead: &OverheadReport,
+) -> Vec<ViewOpportunity> {
+    let mut by_target = BTreeMap::<(String, String), ViewOpportunity>::new();
+    let waste_keys = waste
+        .opportunities
+        .iter()
+        .map(doctor_opportunity_key)
+        .collect::<BTreeSet<_>>();
+    for opportunity in &waste.opportunities {
+        merge_doctor_opportunity(&mut by_target, opportunity.clone());
+    }
+    for row in &overhead.rows {
+        let Some(opportunity) = overhead_opportunity(row) else {
+            continue;
+        };
+        merge_doctor_opportunity(&mut by_target, opportunity);
+    }
+    for finding in findings {
+        if finding.kind == FindingType::Failure {
+            let (_, _, category) = failure_key_parts(&finding.key);
+            if transient_failure_category(&category) {
+                continue;
+            }
+        }
+        if finding.kind == FindingType::Gap
+            && gap_base_id(finding)
+                .is_some_and(|id| waste_keys.contains(&(id, finding.scope.to_string())))
+        {
+            continue;
+        }
+        let Some(opportunity) = opportunity_from_finding(data, finding) else {
+            continue;
+        };
+        if waste_keys.contains(&doctor_opportunity_key(&opportunity)) {
+            continue;
+        }
+        merge_doctor_opportunity(&mut by_target, opportunity);
+    }
+    let mut opportunities = by_target.into_values().collect::<Vec<_>>();
+    opportunities.sort_by(opportunity_order);
+    opportunities
+}
+
+fn overhead_opportunity(row: &OverheadRow) -> Option<ViewOpportunity> {
+    let readable = row
+        .readable_startup_bytes
+        .filter(|bytes| *bytes > HEAVY_STARTUP_BYTES)?;
+    if row.unknown_cost || row.evidence.is_empty() {
+        return None;
+    }
+    let target = scope_target(&row.scope);
+    Some(ViewOpportunity {
+        id: format!("overhead:{}", row.scope),
+        title: format!("Reduce startup context overhead for {}", row.scope),
+        scope: row.scope.clone(),
+        owner: owner_for_scope(&row.scope),
+        target: target.clone(),
+        impact: format!(
+            "{readable} bytes of user-controlled always-on configuration are included across {} session(s)",
+            row.session_count
+        ),
+        severity: if readable >= HEAVY_STARTUP_BYTES.saturating_mul(2) {
+            FindingSeverity::High
+        } else {
+            FindingSeverity::Medium
+        },
+        confidence: FindingConfidence::High,
+        occurrences: row.session_count,
+        distinct_sessions: row.session_count,
+        action: format!("Review and slim always-on configuration at {target}"),
+        follow_up: follow_up_for("overhead", &row.scope),
+        evidence: bounded_evidence(row.evidence.clone()),
+        limitations: {
+            let mut limitations = row.limitations.clone();
+            ensure_limitations(&mut limitations);
+            limitations
+        },
+    })
+}
+
+fn gap_base_id(finding: &Finding) -> Option<String> {
+    let (kind, key) = finding.key.split_once('|')?;
+    Some(format!("{kind}:{key}"))
+}
+
+fn opportunity_from_finding(data: &CanonicalData, finding: &Finding) -> Option<ViewOpportunity> {
+    if finding.evidence.is_empty() || finding.suggested_action.trim().is_empty() {
+        return None;
+    }
+    Some(finding_opportunity(
+        data,
+        finding,
+        finding_target(data, finding),
+        finding.suggested_action.clone(),
+    ))
+}
+
+fn doctor_opportunity_key(opportunity: &ViewOpportunity) -> (String, String) {
+    (opportunity.id.clone(), opportunity.scope.to_string())
+}
+
+fn merge_doctor_opportunity(
+    by_target: &mut BTreeMap<(String, String), ViewOpportunity>,
+    opportunity: ViewOpportunity,
+) {
+    let key = doctor_opportunity_key(&opportunity);
+    let Some(existing) = by_target.get_mut(&key) else {
+        by_target.insert(key, opportunity);
+        return;
+    };
+    existing.occurrences = existing.occurrences.saturating_add(opportunity.occurrences);
+    existing.distinct_sessions = existing
+        .distinct_sessions
+        .saturating_add(opportunity.distinct_sessions);
+    for evidence in opportunity.evidence {
+        add_evidence(&mut existing.evidence, evidence);
+    }
+    existing.limitations.extend(opportunity.limitations);
+    ensure_limitations(&mut existing.limitations);
+}
+
 pub fn inventory(data: &CanonicalData) -> InventoryReport {
     let options = AnalysisOptions::default();
     let heavy_threshold = heavy_startup_threshold(data);
@@ -1508,7 +1635,11 @@ fn finding_target(data: &CanonicalData, finding: &Finding) -> String {
     if let Some(path) = finding.affected_paths.first() {
         return path.clone();
     }
-    match &finding.scope {
+    scope_target(&finding.scope)
+}
+
+fn scope_target(scope: &FindingScope) -> String {
+    match scope {
         FindingScope::Global => "AGENTS.md".to_owned(),
         FindingScope::Project(path) => path.join("AGENTS.md").to_string_lossy().into_owned(),
         FindingScope::Instruction(path) => path.to_string_lossy().into_owned(),
@@ -1836,6 +1967,13 @@ mod tests {
         assert_eq!(project.residual_bytes, Some(1_760));
 
         let waste_report = waste(&data);
+        let doctor_report = doctor_opportunities(&data, &[], &waste_report, &overhead);
+        let overhead_opportunity = doctor_report
+            .iter()
+            .find(|opportunity| opportunity.id == "overhead:project:/fixture/project")
+            .expect("known user-controlled overhead opportunity");
+        assert!(overhead_opportunity.action.contains("Review and slim"));
+        assert_eq!(overhead_opportunity.distinct_sessions, 2);
         assert!(waste_report.opportunities.iter().any(|opportunity| {
             opportunity.target == "/fixture/project/unused.rules"
                 && opportunity.action.contains("Remove")
@@ -2222,6 +2360,144 @@ mod tests {
         assert_eq!(
             follow_up_for_finding(&data, &finding),
             "codexlens failures --scope project:/fixture/project"
+        );
+    }
+
+    #[test]
+    fn doctor_merges_same_actionable_finding_across_sessions() {
+        let data = view_fixture();
+        let scope = FindingScope::Project(PathBuf::from("/fixture/project"));
+        let mut first = crate::advisor::test_support::finding(
+            scope.clone(),
+            FindingType::Rework,
+            Some("src/lib.rs"),
+        );
+        first.key = "shared-loop".to_owned();
+        first.evidence[0].session_id = Some("view-session-a".to_owned());
+
+        let mut second = first.clone();
+        second.evidence[0].session_id = Some("view-session-b".to_owned());
+        second.evidence[0].source = SourceRef::rollout("views.jsonl".into(), 2);
+        second.occurrences = 3;
+
+        let report = doctor_opportunities(
+            &data,
+            &[first, second],
+            &WasteReport {
+                measure: "synthetic".to_owned(),
+                opportunities: Vec::new(),
+            },
+            &OverheadReport {
+                measure: "synthetic".to_owned(),
+                rows: Vec::new(),
+            },
+        );
+        let opportunity = report
+            .iter()
+            .find(|opportunity| opportunity.id == "rework:shared-loop")
+            .expect("merged rework opportunity");
+        assert_eq!(opportunity.scope, scope);
+        assert_eq!(opportunity.occurrences, 5);
+        assert_eq!(opportunity.distinct_sessions, 2);
+        assert_eq!(opportunity.evidence.len(), 2);
+    }
+
+    #[test]
+    fn doctor_keeps_transient_failures_out_of_actionable_findings() {
+        let data = view_fixture();
+        let mut finding = crate::advisor::test_support::finding(
+            FindingScope::Project(PathBuf::from("/fixture/project")),
+            FindingType::Failure,
+            Some("src/lib.rs"),
+        );
+        finding.key = "exec_command|cargo test|timeout".to_owned();
+
+        let report = doctor_opportunities(
+            &data,
+            &[finding],
+            &WasteReport {
+                measure: "synthetic".to_owned(),
+                opportunities: Vec::new(),
+            },
+            &OverheadReport {
+                measure: "synthetic".to_owned(),
+                rows: Vec::new(),
+            },
+        );
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn doctor_keeps_gap_scope_and_opportunity_keys_distinct() {
+        let data = view_fixture();
+        let mut waste_finding =
+            crate::advisor::test_support::finding(FindingScope::Global, FindingType::Failure, None);
+        waste_finding.key = "shared".to_owned();
+        let waste_opportunity = finding_opportunity(
+            &data,
+            &waste_finding,
+            "AGENTS.md".to_owned(),
+            waste_finding.suggested_action.clone(),
+        );
+        let mut gap = crate::advisor::test_support::finding(
+            FindingScope::Project(PathBuf::from("/fixture/project")),
+            FindingType::Gap,
+            Some("src/lib.rs"),
+        );
+        gap.key = "failure|shared".to_owned();
+        let waste = WasteReport {
+            measure: "synthetic".to_owned(),
+            opportunities: vec![waste_opportunity.clone()],
+        };
+        let empty_overhead = OverheadReport {
+            measure: "synthetic".to_owned(),
+            rows: Vec::new(),
+        };
+
+        let different_scope =
+            doctor_opportunities(&data, std::slice::from_ref(&gap), &waste, &empty_overhead);
+        assert!(
+            different_scope
+                .iter()
+                .any(|opportunity| opportunity.id == "gap:failure|shared")
+        );
+
+        gap.scope = FindingScope::Global;
+        let same_scope =
+            doctor_opportunities(&data, std::slice::from_ref(&gap), &waste, &empty_overhead);
+        assert!(
+            !same_scope
+                .iter()
+                .any(|opportunity| opportunity.id == "gap:failure|shared")
+        );
+
+        let mut left = crate::advisor::test_support::finding(
+            FindingScope::Path("y|path:z".to_owned()),
+            FindingType::Rework,
+            Some("src/lib.rs"),
+        );
+        left.key = "x".to_owned();
+        let mut right = crate::advisor::test_support::finding(
+            FindingScope::Path("z".to_owned()),
+            FindingType::Rework,
+            Some("src/lib.rs"),
+        );
+        right.key = "x|path:y".to_owned();
+        let distinct_keys = doctor_opportunities(
+            &data,
+            &[left, right],
+            &WasteReport {
+                measure: "synthetic".to_owned(),
+                opportunities: Vec::new(),
+            },
+            &empty_overhead,
+        );
+        assert_eq!(
+            distinct_keys
+                .iter()
+                .filter(|opportunity| opportunity.id.starts_with("rework:"))
+                .count(),
+            2
         );
     }
 

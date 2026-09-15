@@ -72,7 +72,10 @@ compatibility alias.
 | `sessions` | `SESSIONS` | session id | bounded metadata and selection coverage |
 
 `doctor` renders at most 5 opportunities per scope and at most 3 evidence
-examples per opportunity. Empty sections are omitted. `inventory`, `usage`,
+examples per opportunity. `--limit` lowers the per-scope cap. The JSON
+`top_fixes_omitted_count` field and the human report both disclose candidates
+removed by the per-scope or overall summary bound. Empty sections are omitted.
+`inventory`, `usage`,
 and `sessions` render at most 50 rows by default and state the omitted count.
 JSON contains the complete bounded result set selected by the same limits.
 Every actionable doctor item also exposes its owner, target, occurrence/session
@@ -234,7 +237,7 @@ added only as optional, bounded fields that older readers can ignore.
 | `prompts` | `measure`, `rows`, `omitted_count`; rows contain `class`, `scope`, occurrence/session counts, `verdict`, evidence, and limitations |
 | `failures` | `measure`, `rows`, `omitted_count`; rows contain `category`, `tool`, `command_family`, and an actionable `opportunity` |
 | `stuck` | `measure`, `rows`, `omitted_count`; rows contain `path`, optional `session_id`, bounded `sequence` and `observed_commands`, and an actionable `opportunity` |
-| `doctor` | canonical finding-report fields plus `top_fixes`, `top_fixes_omitted_count`, `cost`, `config_pruning`, `looks_healthy`, and `analysis_sufficient` |
+| `doctor` | canonical finding-report fields plus `top_fixes`, `top_fixes_omitted_count`, `cost`, `config_pruning`, `looks_healthy`, and `analysis_sufficient`; known evidence-backed user-controlled overhead may appear in `top_fixes` |
 | `sql` / `query` | `columns`, `rows`, `omitted_column_count`, `omitted_count`; `query` is the same data with its own command label |
 | `optimize --print` | `findings`, `configuration_waste`, `overhead`, `proposals`, `next_steps`, and `limitations`; findings and waste carry explicit target/action/evidence |
 | `optimize --diff` | `rendered`, `skipped`, `rendered_omitted_count`, and `skipped_omitted_count`; filtered periods additionally include bounded `freshness` and `coverage` inside `data` |

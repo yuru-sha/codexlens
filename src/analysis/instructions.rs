@@ -265,8 +265,8 @@ fn instruction_join_findings(
                             path.display()
                         ),
                         evidence,
-                        occurrences: finding.occurrences,
-                        distinct_sessions: finding.distinct_sessions,
+                        occurrences: 1,
+                        distinct_sessions: 1,
                         affected_paths: finding.affected_paths.clone(),
                         observed_commands: finding.observed_commands.clone(),
                         sequence: Vec::new(),

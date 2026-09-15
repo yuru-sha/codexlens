@@ -84,8 +84,9 @@ The initial views are deterministic and evidence-backed:
 - `inventory`: configured surfaces multiplied by actual usage and scope;
 - `usage`: ranked tools, Skills, models, prompts, subagents, and other observed surfaces;
 - `waste`: the ranked union of actionable unused/heavy/failure/stuck findings;
-- `doctor`: the top bounded `waste` opportunities split global/project, with
-  owner, target, evidence, action, and follow-up command;
+- `doctor`: the top bounded `waste` opportunities, known user-controlled
+  overhead, and other actionable findings split global/project, with owner,
+  target, evidence, action, and follow-up command;
 - `optimize`: a root-cause briefing and specific proposed edits, never a
   generic instruction such as “document the prerequisite”. Unsupported or
   ambiguous configuration changes remain visible as skipped limitations.
