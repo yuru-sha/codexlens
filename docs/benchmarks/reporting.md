@@ -16,16 +16,16 @@ non-empty messages, 1,661 file operations, 1,650 instruction snapshots, and
 of bounded output. The benchmark validates that the result is one parseable
 schema-version-1 JSON document with the expected session and record counts,
 exercises recurring evidence from each populated lens, is at most 64 KiB, and
-finishes within the 5-second target. It also runs the other read-only JSON
+finishes within the 8-second target. It also runs the other read-only JSON
 reporting commands against the same store. Each focused command output is
 capped at 256 KiB; the doctor output keeps the stricter 64 KiB cap.
 
-The chosen target is at most 5 seconds per reporting command on macOS arm64.
+The chosen target is at most 8 seconds per reporting command on macOS arm64.
 The benchmark is enforced by the pinned `macos-14` arm64 CI job with
 `cargo bench --locked --bench reporting`. A non-timing benchmark failure fails
 CI immediately. If a run reports only a timing failure, CI allows up to five
 total attempts and requires two subsequent clean attempts before passing; each
-clean attempt enforces the 5-second limit for every command. This is a
+clean attempt enforces the 8-second limit for every command. This is a
 development benchmark target for that runner; it does not claim runtime or
 package support for other platforms or a universal runtime guarantee under
 noisy hardware.

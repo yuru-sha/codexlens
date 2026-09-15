@@ -960,6 +960,7 @@ fn diagnostic_lenses(kind: DiagnosticKind) -> &'static [&'static str] {
         | DiagnosticKind::Unreadable
         | DiagnosticKind::StateSchemaMismatch
         | DiagnosticKind::StateQuery
+        | DiagnosticKind::OpaqueToolInput
         | DiagnosticKind::UnsupportedReader => SOURCE_LENSES,
     }
 }
