@@ -1753,6 +1753,11 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
         }
         assert!(finding["evidence"].as_array().unwrap().len() <= 3);
     }
+    let configuration_waste = optimize["data"]["configuration_waste"].as_array().unwrap();
+    assert!(!configuration_waste.is_empty());
+    for opportunity in configuration_waste {
+        assert_opportunity(opportunity);
+    }
 
     let optimize_human = run_args(&["optimize", "--print"], &store);
     assert!(optimize_human.status.success());
@@ -1811,6 +1816,94 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
     }
 
     let _ = fs::remove_file(store);
+}
+
+#[test]
+fn command_contract_fixture_covers_empty_and_partial_reports() {
+    let commands: &[(&[&str], &str)] = &[
+        (&["analyze", "--format", "json"], "analyze"),
+        (&["usage", "--format", "json"], "usage"),
+        (&["inventory", "--format", "json"], "inventory"),
+        (&["waste", "--format", "json"], "waste"),
+        (&["overhead", "--format", "json"], "overhead"),
+        (&["prompts", "--format", "json"], "prompts"),
+        (&["failures", "--format", "json"], "failures"),
+        (&["stuck", "--format", "json"], "stuck"),
+        (&["doctor", "--format", "json"], "doctor"),
+        (&["optimize", "--print", "--format", "json"], "optimize"),
+    ];
+    let period_flags = [
+        "--since",
+        "2026-01-01T00:00:00Z",
+        "--until",
+        "2027-01-01T00:00:00Z",
+    ];
+
+    for (store, expected_status) in [
+        (empty_store(), "empty"),
+        (coverage_limitation_store(), "partial"),
+    ] {
+        for (args, command) in commands {
+            let document = parse_json_report(&run_args(args, &store), command);
+            let coverage = if *command == "analyze" {
+                &document["data"]["coverage"]
+            } else {
+                &document["coverage"]
+            };
+            assert_eq!(coverage["status"], expected_status, "{command}");
+            if expected_status == "partial" {
+                assert!(!coverage["limitations"].as_array().unwrap().is_empty());
+            }
+        }
+
+        let optimize_diff = parse_json_report(
+            &run_args_with_flags(
+                &["optimize", "--diff", "--format", "json"],
+                &period_flags,
+                &store,
+            ),
+            "optimize_diff",
+        );
+        assert_eq!(
+            optimize_diff["data"]["coverage"]["status"], expected_status,
+            "optimize --diff"
+        );
+
+        for command in ["sql", "query"] {
+            let output = if command == "sql" {
+                run_sql(
+                    &[
+                        "SELECT COUNT(*) AS records FROM records",
+                        "--format",
+                        "json",
+                    ],
+                    &store,
+                    None,
+                )
+            } else {
+                run_query(
+                    &[
+                        "SELECT COUNT(*) AS records FROM records",
+                        "--format",
+                        "json",
+                    ],
+                    &store,
+                    None,
+                )
+            };
+            let document = parse_json_report(&output, command);
+            assert_eq!(document["data"]["columns"][0], "records");
+            let count = document["data"]["rows"][0][0].as_u64().unwrap();
+            if expected_status == "empty" {
+                assert_eq!(count, 0, "{command} empty result");
+            } else {
+                assert!(count > 0, "{command} partial result");
+            }
+            assert!(document["coverage"].is_null());
+            assert!(document["freshness"].is_null());
+        }
+        let _ = fs::remove_file(store);
+    }
 }
 
 #[test]

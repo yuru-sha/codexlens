@@ -287,6 +287,12 @@ data rather than rollout records.
 The fixture is synthetic only; no real rollout, prompt, tool payload, path, or
 identifier may be copied into it.
 
+`command_contract_fixture_covers_empty_and_partial_reports` also runs every
+analysis command against the existing empty-store and coverage-limitation
+fixtures. `sql` and `query` are checked in both states using their minimal
+read-only result envelope; analysis coverage metadata is intentionally absent
+from those aliases.
+
 ## Real-history smoke procedure
 
 Real history is an explicitly selected local source, not a committed fixture.
