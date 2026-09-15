@@ -177,7 +177,8 @@ the user-facing analysis meaning:
 | --- | --- | --- |
 | Claude transcript records and session database | rollout JSONL plus `state_*.sqlite` normalized into canonical records | tool outcomes, messages, sessions, token usage, file operations, and provenance feed the same lens categories; unknown valid records are retained, not guessed |
 | Claude config and project instruction files | global/project `AGENTS.md`, `config.toml`, and discovered Codex surfaces | global/project ownership, bounded instruction evidence, and configuration actions remain separate |
-| `--projects` routing | `--scope global|project|project:PATH` | `project` means all known projects; `project:PATH` is normalized before matching; scope filters output, not ingestion |
+| transcript input root (`--projects`) | `--codex-home` and input discovery | both select the local raw input root; Codex additionally discovers rollout JSONL and `state_*.sqlite` inputs under the selected home |
+| scope filter (`--scope`) | `--scope global|project|project:PATH` | `project` means all known projects; `project:PATH` is normalized before matching; scope filters output, not ingestion |
 | cclens database/report store | `--store PATH` derived SQLite store | reporting reads the derived store without refreshing raw inputs; `refresh`/`analyze` are the explicit ingestion workflows |
 | transcript-derived usage/cost | canonical tool/token records plus surface inventory and startup snapshots | totals are comparable categories, not byte-for-byte Claude measurements; missing attribution or cost remains unknown/partial |
 | cclens local doctor/optimize workflow | `doctor` and `optimize --print/--diff/--apply` | local-only, bounded evidence, reviewable targets, and explicit confirmation are preserved; `--apply` remains the only mutating path |
@@ -193,12 +194,24 @@ finding envelope described above. `optimize --diff` uses its proposal envelope
 and only adds freshness/coverage inside `data` for a filtered period. `sql` and
 `query` retain the minimal query envelope.
 
-Ordering is deterministic: the doctor's top-fix and typed opportunity lists
-sort by severity, confidence, distinct sessions, occurrences, then stable id;
-doctor groups sort global before project scope. Inventory sorts by scope, kind,
-path, name, then id. Usage sorts by occurrences, output tokens, kind, name,
-then scope. SQL preserves the statement's row order and applies only the
-output bounds.
+Ordering is deterministic and part of the contract:
+
+| Output | Required order |
+| --- | --- |
+| `analyze` findings | severity descending, confidence descending, distinct sessions descending, normalized key ascending, occurrences descending, then kind/key/scope tie-breakers |
+| `doctor` | global group before project groups; findings use the `analyze` order; top-fix opportunities use severity descending, confidence descending, distinct sessions descending, occurrences descending, then id ascending; sections are `WHAT TO FIX FIRST`, optional `COST`, optional `CONFIG WORTH PRUNING`, then conditional `LOOKS HEALTHY` |
+| `inventory` | scope, kind, path, name, then id ascending |
+| `overhead` | global row first, then project rows by normalized project path ascending |
+| `usage` | occurrences descending, output tokens descending, kind, name, then scope ascending |
+| `prompts` | prompt class order `steer`, `correct`, `question`, `instruct`, then scope ascending |
+| `waste`, `failures`, `stuck` | opportunity severity descending, confidence descending, distinct sessions descending, occurrences descending, then id ascending |
+| `optimize --print` | sections `FINDINGS`, `CONFIGURATION WASTE`, `OVERHEAD`, `REVIEWABLE PROPOSALS`, then `NEXT WORKFLOW`; each list keeps its source ordering |
+| `optimize --diff` | rendered proposals by target path, action, problem; skipped proposals by target path, reason |
+| `sql` / `query` | statement result order, with no analysis ranking |
+
+Markdown preserves the same section, row, and field order under one top-level
+heading. SQL preserves the statement's row order and applies only the output
+bounds.
 
 For actionable rows, `target` identifies the bounded file or configuration
 surface to inspect, and `action` is the concrete verb for that target: remove,
@@ -269,6 +282,7 @@ data rather than rollout records.
 | four `apply_patch` operations in one short session | a distinct stuck/rework opportunity with its sequence |
 | unused on-demand Skill | inventory and waste may recommend removal, with evidence |
 | one observed startup Skill above the bounded heavy threshold | inventory and waste may recommend slimming/re-scoping, with evidence |
+| `token=contract-private-value` in synthetic prompt/failure text | the marker is redacted from human, Markdown, and JSON evidence |
 
 The fixture is synthetic only; no real rollout, prompt, tool payload, path, or
 identifier may be copied into it.

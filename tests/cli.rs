@@ -1464,6 +1464,7 @@ fn typed_views_have_distinct_bounded_formats_and_json_envelopes() {
 #[test]
 fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
     let store = command_contract_store();
+    let privacy_marker = "contract-private-value";
     let mut headings = Vec::new();
     let assert_evidence = |row: &Value| {
         let evidence = row["evidence"].as_array().expect("evidence array");
@@ -1491,6 +1492,15 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
         }
         assert_evidence(opportunity);
     };
+    let assert_actionable_order = |text: &str, label: &str| {
+        let target = text.find("  target: ").expect("target field");
+        let action = text.find("  action: ").expect("action field");
+        let evidence = text.find("  evidence: ").expect("evidence field");
+        assert!(
+            target < action && action < evidence,
+            "{label} fields reordered"
+        );
+    };
 
     for (command, heading, data_key) in [
         ("inventory", "CONFIGURATION INVENTORY", "rows"),
@@ -1505,14 +1515,45 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
         assert!(human.status.success(), "{command}: {:?}", human);
         let stdout = String::from_utf8_lossy(&human.stdout);
         assert!(stdout.starts_with(heading), "{command}: {stdout}");
+        assert!(
+            !stdout.contains(privacy_marker),
+            "{command} leaked private text"
+        );
         assert!(headings.iter().all(|seen| *seen != heading));
         headings.push(heading);
+
+        let markdown = run_args(&[command, "--format", "markdown"], &store);
+        assert!(markdown.status.success(), "{command} Markdown failed");
+        let markdown_stdout = String::from_utf8_lossy(&markdown.stdout);
+        assert!(
+            markdown_stdout.starts_with(&format!("# {heading}")),
+            "{command} Markdown has no heading"
+        );
+        assert!(
+            !markdown_stdout.contains(privacy_marker),
+            "{command} leaked private text"
+        );
+        if command == "waste" || command == "failures" || command == "stuck" {
+            for field in ["target: ", "action: ", "evidence: "] {
+                assert!(stdout.contains(field), "{command} omitted {field}");
+                assert!(
+                    markdown_stdout.contains(field),
+                    "{command} Markdown omitted {field}"
+                );
+            }
+            assert_actionable_order(&stdout, command);
+            assert_actionable_order(&markdown_stdout, &format!("{command} Markdown"));
+        }
 
         let machine = run_args(&[command, "--format", "json"], &store);
         let repeat = run_args(&[command, "--format", "json"], &store);
         assert_eq!(
             machine.stdout, repeat.stdout,
             "{command} is not deterministic"
+        );
+        assert!(
+            !String::from_utf8_lossy(&machine.stdout).contains(privacy_marker),
+            "{command} leaked private text"
         );
         let document = parse_json_report(&machine, command);
         let rows = document["data"][data_key]
@@ -1540,12 +1581,15 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
         }
     }
 
-    let analyze = parse_json_report(
-        &run_args(&["analyze", "--format", "json"], &store),
-        "analyze",
-    );
+    let analyze_machine = run_args(&["analyze", "--format", "json"], &store);
+    assert!(!String::from_utf8_lossy(&analyze_machine.stdout).contains(privacy_marker));
+    let analyze = parse_json_report(&analyze_machine, "analyze");
     let groups = analyze["data"]["groups"].as_array().unwrap();
     assert!(!groups.is_empty());
+    assert_eq!(groups[0]["scope"]["kind"], "global");
+    assert!(groups.iter().skip(1).any(|group| {
+        group["scope"]["kind"] == "project" && group["scope"]["value"] == "/fixture/project-a"
+    }));
     for group in groups {
         for finding in group["findings"].as_array().unwrap() {
             for field in [
@@ -1576,6 +1620,25 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
             assert!(evidence.len() <= 12);
         }
     }
+    let analyze_human = run_args(&["analyze"], &store);
+    assert!(analyze_human.status.success());
+    let analyze_stdout = String::from_utf8_lossy(&analyze_human.stdout);
+    assert!(analyze_stdout.starts_with("Analyzed period:"));
+    assert!(!analyze_stdout.contains(privacy_marker));
+    for field in ["Finding counts:", "  action: ", "  evidence: "] {
+        assert!(analyze_stdout.contains(field), "analyze omitted {field}");
+    }
+    assert!(
+        analyze_stdout.find("  action: ").unwrap() < analyze_stdout.find("  evidence: ").unwrap(),
+        "analyze fields reordered"
+    );
+    let analyze_markdown = run_args(&["analyze", "--format", "markdown"], &store);
+    assert!(analyze_markdown.status.success());
+    let analyze_markdown_stdout = String::from_utf8_lossy(&analyze_markdown.stdout);
+    assert!(analyze_markdown_stdout.starts_with("# analyze\n\nAnalyzed period:"));
+    assert!(!analyze_markdown_stdout.contains(privacy_marker));
+    assert!(analyze_markdown_stdout.contains("  action: "));
+    assert!(analyze_markdown_stdout.contains("  evidence: "));
 
     let inventory = parse_json_report(
         &run_args(&["inventory", "--format", "json"], &store),
@@ -1596,8 +1659,19 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
                 .is_some_and(|action| action.starts_with("Slim"))
     }));
 
+    let overhead = parse_json_report(
+        &run_args(&["overhead", "--format", "json"], &store),
+        "overhead",
+    );
+    let overhead_rows = overhead["data"]["rows"].as_array().unwrap();
+    assert_eq!(overhead_rows.len(), 3);
+    assert_eq!(overhead_rows[0]["scope"]["kind"], "global");
+    assert_eq!(overhead_rows[1]["project"], "/fixture/project-a");
+    assert_eq!(overhead_rows[2]["project"], "/fixture/project-b");
+
     let waste = parse_json_report(&run_args(&["waste", "--format", "json"], &store), "waste");
     let opportunities = waste["data"]["opportunities"].as_array().unwrap();
+    assert_eq!(opportunities[0]["id"], "stuck:src/lib.rs|loop");
     assert!(opportunities.iter().any(|opportunity| {
         opportunity["id"] == "surface:unused-skill"
             && opportunity["target"] == "/fixture/codex/skills/unused/SKILL.md"
@@ -1618,6 +1692,8 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
         "failures",
     );
     let failure_rows = failures["data"]["rows"].as_array().unwrap();
+    assert_eq!(failure_rows[0]["category"], "exit_code_1");
+    assert_eq!(failure_rows[1]["category"], "command_not_found");
     assert!(failure_rows.iter().any(|row| {
         row["category"] == "command_not_found" && row["opportunity"]["scope"]["kind"] == "global"
     }));
@@ -1634,9 +1710,12 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
                 .is_some_and(|sequence| sequence.len() >= 4)
     }));
 
-    let doctor = parse_json_report(&run_args(&["doctor", "--format", "json"], &store), "doctor");
+    let doctor_machine = run_args(&["doctor", "--format", "json"], &store);
+    assert!(!String::from_utf8_lossy(&doctor_machine.stdout).contains(privacy_marker));
+    let doctor = parse_json_report(&doctor_machine, "doctor");
     let top_fixes = doctor["data"]["top_fixes"].as_array().unwrap();
     assert!(!top_fixes.is_empty());
+    assert_eq!(top_fixes[0]["id"], "stuck:src/lib.rs|loop");
     for opportunity in top_fixes {
         assert_opportunity(opportunity);
     }
@@ -1650,6 +1729,86 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
             .iter()
             .any(|opportunity| opportunity["scope"]["kind"] == "project")
     );
+
+    let doctor_human = run_args(&["doctor"], &store);
+    assert!(doctor_human.status.success());
+    let doctor_stdout = String::from_utf8_lossy(&doctor_human.stdout);
+    assert!(doctor_stdout.starts_with("WHAT TO FIX FIRST"));
+    assert!(!doctor_stdout.contains(privacy_marker));
+    assert_actionable_order(&doctor_stdout, "doctor");
+    let doctor_markdown = run_args(&["doctor", "--format", "markdown"], &store);
+    assert!(doctor_markdown.status.success());
+    let doctor_markdown_stdout = String::from_utf8_lossy(&doctor_markdown.stdout);
+    assert!(doctor_markdown_stdout.starts_with("# WHAT TO FIX FIRST"));
+    assert!(!doctor_markdown_stdout.contains(privacy_marker));
+    assert_actionable_order(&doctor_markdown_stdout, "doctor Markdown");
+
+    let optimize_machine = run_args(&["optimize", "--print", "--format", "json"], &store);
+    assert!(optimize_machine.status.success());
+    assert!(!String::from_utf8_lossy(&optimize_machine.stdout).contains(privacy_marker));
+    let optimize = parse_json_report(&optimize_machine, "optimize");
+    for finding in optimize["data"]["findings"].as_array().unwrap() {
+        for field in ["target", "action", "evidence"] {
+            assert!(!finding[field].is_null(), "missing optimize field {field}");
+        }
+        assert!(finding["evidence"].as_array().unwrap().len() <= 3);
+    }
+
+    let optimize_human = run_args(&["optimize", "--print"], &store);
+    assert!(optimize_human.status.success());
+    let optimize_stdout = String::from_utf8_lossy(&optimize_human.stdout);
+    assert!(optimize_stdout.starts_with("OPTIMIZATION BRIEFING"));
+    assert!(!optimize_stdout.contains(privacy_marker));
+    assert_actionable_order(&optimize_stdout, "optimize");
+    let optimize_sections = [
+        "\nFINDINGS\n",
+        "\nCONFIGURATION WASTE\n",
+        "\nOVERHEAD\n",
+        "\nREVIEWABLE PROPOSALS\n",
+        "\nNEXT WORKFLOW\n",
+    ];
+    for pair in optimize_sections.windows(2) {
+        assert!(
+            optimize_stdout.find(pair[0]).unwrap() < optimize_stdout.find(pair[1]).unwrap(),
+            "optimize sections reordered"
+        );
+    }
+    let optimize_markdown = run_args(&["optimize", "--print", "--format", "markdown"], &store);
+    assert!(optimize_markdown.status.success());
+    let optimize_markdown_stdout = String::from_utf8_lossy(&optimize_markdown.stdout);
+    assert!(optimize_markdown_stdout.starts_with("# OPTIMIZE\n\nOPTIMIZATION BRIEFING"));
+    assert!(!optimize_markdown_stdout.contains(privacy_marker));
+    assert_actionable_order(&optimize_markdown_stdout, "optimize Markdown");
+
+    for command in ["sql", "query"] {
+        let output = if command == "sql" {
+            run_sql(
+                &[
+                    "SELECT COUNT(*) AS sessions FROM sessions",
+                    "--format",
+                    "json",
+                ],
+                &store,
+                None,
+            )
+        } else {
+            run_query(
+                &[
+                    "SELECT COUNT(*) AS sessions FROM sessions",
+                    "--format",
+                    "json",
+                ],
+                &store,
+                None,
+            )
+        };
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(privacy_marker));
+        let document = parse_json_report(&output, command);
+        assert_eq!(document["data"]["columns"][0], "sessions");
+        assert!(document["data"]["rows"].is_array());
+        assert!(document["freshness"].is_null());
+        assert!(document["coverage"].is_null());
+    }
 
     let _ = fs::remove_file(store);
 }
