@@ -253,13 +253,16 @@ fn normalize_records_with_resolver(
                             source.clone(),
                         ));
                     } else if is_tool_call_type(nested_type.as_deref()) {
-                        data.tool_calls.push(tool_call_from_payload(
-                            payload,
-                            nested_type.as_deref(),
-                            current_session_id.clone(),
-                            turn_id.clone(),
-                            source.clone(),
-                        ));
+                        push_tool_call(
+                            &mut data,
+                            tool_call_from_payload(
+                                payload,
+                                nested_type.as_deref(),
+                                current_session_id.clone(),
+                                turn_id.clone(),
+                                source.clone(),
+                            ),
+                        );
                     } else if is_tool_result_type(nested_type.as_deref()) {
                         data.tool_results.push(tool_result_from_payload(
                             payload,
@@ -295,13 +298,16 @@ fn normalize_records_with_resolver(
                         }
                     }
                     if is_event_tool_call_type(nested_type.as_deref()) {
-                        data.tool_calls.push(tool_call_from_event(
-                            payload,
-                            nested_type.as_deref(),
-                            current_session_id.clone(),
-                            event_turn_id.clone(),
-                            source.clone(),
-                        ));
+                        push_tool_call(
+                            &mut data,
+                            tool_call_from_event(
+                                payload,
+                                nested_type.as_deref(),
+                                current_session_id.clone(),
+                                event_turn_id.clone(),
+                                source.clone(),
+                            ),
+                        );
                     } else if is_event_tool_result_type(nested_type.as_deref()) {
                         data.tool_results.push(tool_result_from_payload(
                             payload,
@@ -948,6 +954,292 @@ fn structured_input_command(payload: &Map<String, Value>) -> Option<String> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NestedToolCall {
+    tool_name: String,
+    command: Option<String>,
+}
+
+fn nested_tool_call(value: &Value) -> Option<NestedToolCall> {
+    let source = value.as_str()?;
+    if source.len() > MAX_TOOL_SUMMARY_BYTES {
+        return None;
+    }
+    // ponytail: parse only the bounded call subset; unsupported JavaScript stays opaque.
+
+    let mut search = 0;
+    let mut found = None;
+    while let Some(relative) = source.get(search..)?.find("tools.") {
+        let start = search + relative;
+        if !js_code_at(source, start) {
+            search = start + "tools.".len();
+            continue;
+        }
+        let preceding = start
+            .checked_sub(1)
+            .and_then(|index| source.as_bytes().get(index))
+            .copied();
+        if preceding
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'.'))
+        {
+            search = start + "tools.".len();
+            continue;
+        }
+        let method_start = start + "tools.".len();
+        let method_end = source[method_start..]
+            .char_indices()
+            .find_map(|(offset, character)| {
+                (!character.is_ascii_alphanumeric() && character != '_')
+                    .then_some(method_start + offset)
+            })
+            .unwrap_or(source.len());
+        if method_end == method_start {
+            search = method_start + 1;
+            continue;
+        }
+        let call_start = skip_js_whitespace(source, method_end);
+        if source.as_bytes().get(call_start) != Some(&b'(') {
+            search = method_end;
+            continue;
+        }
+        let object_start = skip_js_whitespace(source, call_start + 1);
+        if source.as_bytes().get(object_start) != Some(&b'{') {
+            return None;
+        }
+        let mut parser = JsLiteralParser::new(&source[object_start..]);
+        let arguments = parser.parse_object()?;
+        let after_object = skip_js_whitespace(source, object_start + parser.index);
+        if source.as_bytes().get(after_object) != Some(&b')') {
+            return None;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some((&source[method_start..method_end], arguments));
+        search = after_object + 1;
+    }
+
+    let (tool_name, arguments) = found?;
+    let tool_name = valid_tool_name(tool_name.to_owned())?;
+    let command = if is_shell_tool(&tool_name) {
+        ["argv", "cmd", "command"]
+            .iter()
+            .find_map(|key| arguments.get(*key).and_then(structured_command_value))?
+    } else if is_file_operation_tool(&tool_name) {
+        arguments.get("patch").and_then(structured_command_value)?
+    } else {
+        return Some(NestedToolCall {
+            tool_name,
+            command: None,
+        });
+    };
+    Some(NestedToolCall {
+        tool_name,
+        command: Some(command),
+    })
+}
+
+fn js_code_at(source: &str, target: usize) -> bool {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    let mut quote = None;
+    let mut line_comment = false;
+    let mut block_comment = false;
+    while index < target {
+        if line_comment {
+            if bytes[index] == b'\n' {
+                line_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if block_comment {
+            if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                block_comment = false;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if bytes[index] == b'\\' {
+                index = (index + 2).min(target);
+            } else {
+                if bytes[index] == delimiter {
+                    quote = None;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                line_comment = true;
+                index += 2;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                block_comment = true;
+                index += 2;
+            }
+            b'\'' | b'"' | b'`' => {
+                quote = Some(bytes[index]);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    quote.is_none() && !line_comment && !block_comment
+}
+
+fn skip_js_whitespace(source: &str, mut index: usize) -> usize {
+    while source
+        .as_bytes()
+        .get(index)
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        index += 1;
+    }
+    index
+}
+
+struct JsLiteralParser<'a> {
+    source: &'a str,
+    index: usize,
+}
+
+impl<'a> JsLiteralParser<'a> {
+    fn new(source: &'a str) -> Self {
+        Self { source, index: 0 }
+    }
+
+    fn parse_object(&mut self) -> Option<Map<String, Value>> {
+        self.expect(b'{')?;
+        let mut object = Map::new();
+        loop {
+            self.skip_whitespace();
+            if self.consume(b'}') {
+                return Some(object);
+            }
+            let key = self.parse_key()?;
+            self.skip_whitespace();
+            self.expect(b':')?;
+            let value = self.parse_value()?;
+            object.insert(key, value);
+            self.skip_whitespace();
+            if self.consume(b'}') {
+                return Some(object);
+            }
+            self.expect(b',')?;
+        }
+    }
+
+    fn parse_array(&mut self) -> Option<Value> {
+        self.expect(b'[')?;
+        let mut values = Vec::new();
+        loop {
+            self.skip_whitespace();
+            if self.consume(b']') {
+                return Some(Value::Array(values));
+            }
+            values.push(self.parse_value()?);
+            self.skip_whitespace();
+            if self.consume(b']') {
+                return Some(Value::Array(values));
+            }
+            self.expect(b',')?;
+        }
+    }
+
+    fn parse_value(&mut self) -> Option<Value> {
+        self.skip_whitespace();
+        match self.source.as_bytes().get(self.index).copied()? {
+            b'{' => self.parse_object().map(Value::Object),
+            b'[' => self.parse_array(),
+            b'\'' | b'"' => self.parse_string().map(Value::String),
+            _ => {
+                let start = self.index;
+                while self
+                    .source
+                    .as_bytes()
+                    .get(self.index)
+                    .is_some_and(|byte| !byte.is_ascii_whitespace() && !b",}]".contains(byte))
+                {
+                    self.index += 1;
+                }
+                serde_json::from_str(self.source.get(start..self.index)?).ok()
+            }
+        }
+    }
+
+    fn parse_key(&mut self) -> Option<String> {
+        self.skip_whitespace();
+        match self.source.as_bytes().get(self.index).copied()? {
+            b'\'' | b'"' => self.parse_string(),
+            _ => {
+                let start = self.index;
+                while self.source.as_bytes().get(self.index).is_some_and(|byte| {
+                    byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$'
+                }) {
+                    self.index += 1;
+                }
+                (start != self.index).then(|| self.source[start..self.index].to_owned())
+            }
+        }
+    }
+
+    fn parse_string(&mut self) -> Option<String> {
+        let delimiter = self.source.as_bytes().get(self.index).copied()?;
+        if !matches!(delimiter, b'\'' | b'"') {
+            return None;
+        }
+        self.index += 1;
+        let mut value = String::new();
+        while self.index < self.source.len() {
+            let character = self.source[self.index..].chars().next()?;
+            self.index += character.len_utf8();
+            if character == delimiter as char {
+                return Some(value);
+            }
+            if character == '\\' {
+                let escaped = self.source[self.index..].chars().next()?;
+                self.index += escaped.len_utf8();
+                value.push(match escaped {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    '\\' => '\\',
+                    '\'' => '\'',
+                    '"' => '"',
+                    _ => return None,
+                });
+            } else {
+                value.push(character);
+            }
+        }
+        None
+    }
+
+    fn skip_whitespace(&mut self) {
+        self.index = skip_js_whitespace(self.source, self.index);
+    }
+
+    fn expect(&mut self, byte: u8) -> Option<()> {
+        (self.source.as_bytes().get(self.index) == Some(&byte)).then(|| {
+            self.index += 1;
+        })
+    }
+
+    fn consume(&mut self, byte: u8) -> bool {
+        if self.source.as_bytes().get(self.index) == Some(&byte) {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 fn result_command_value(value: &Value) -> Option<String> {
     structured_command_value(value)
 }
@@ -1543,14 +1835,29 @@ fn tool_call_from_payload(
     turn_id: Option<String>,
     provenance: SourceRef,
 ) -> ToolCall {
+    let input = payload.get("input").or_else(|| payload.get("arguments"));
+    let tool_name = string_field(payload, &["name", "tool_name"])
+        .and_then(valid_tool_name)
+        .or_else(|| (nested_type == Some("exec_command")).then(|| "exec_command".to_owned()));
+    let nested = is_wrapper_tool(tool_name.as_deref()).then(|| input.and_then(nested_tool_call));
+    let (tool_name, command) = match nested.flatten() {
+        Some(nested) => (Some(nested.tool_name), nested.command),
+        None => {
+            let command = if is_wrapper_tool(tool_name.as_deref()) {
+                None
+            } else {
+                structured_input_command(payload)
+                    .or_else(|| payload.get("command").and_then(structured_command_value))
+            };
+            (tool_name, command)
+        }
+    };
     ToolCall {
         id: string_field(payload, &["id"]),
         call_id: string_field(payload, &["call_id"]),
         session_id,
         turn_id,
-        tool_name: string_field(payload, &["name", "tool_name"])
-            .and_then(valid_tool_name)
-            .or_else(|| (nested_type == Some("exec_command")).then(|| "exec_command".to_owned())),
+        tool_name,
         input_summary: payload
             .get("input")
             .or_else(|| payload.get("arguments"))
@@ -1561,8 +1868,7 @@ fn tool_call_from_payload(
             .or_else(|| payload.get("file_path"))
             .or_else(|| payload.get("filename"))
             .and_then(input_summary_value),
-        command: structured_input_command(payload)
-            .or_else(|| payload.get("command").and_then(structured_command_value)),
+        command,
         cwd: string_field(payload, &["cwd"]),
         status: string_field(payload, &["status"]),
         provenance,
@@ -1574,6 +1880,18 @@ fn is_wrapper_tool(tool: Option<&str>) -> bool {
         tool.map(normalize_token).as_deref(),
         Some("exec" | "js" | "wait")
     )
+}
+
+fn push_tool_call(data: &mut CanonicalData, call: ToolCall) {
+    if matches!(call.tool_name.as_deref(), Some("exec" | "js" | "wait")) && call.command.is_none() {
+        data.diagnostics.push(CanonicalDiagnostic {
+            kind: DiagnosticKind::OpaqueToolInput,
+            source: call.provenance.clone(),
+            session_id: call.session_id.clone(),
+            message: "Wrapper input was retained as opaque because no single safely structured nested tool call was available".to_owned(),
+        });
+    }
+    data.tool_calls.push(call);
 }
 
 fn tool_call_from_event(
@@ -2703,8 +3021,8 @@ mod tests {
             .iter()
             .find(|call| call.call_id.as_deref() == Some("fixture-nested-shell-a"))
             .unwrap();
-        assert_eq!(nested_shell.tool_name.as_deref(), Some("exec"));
-        assert_eq!(nested_shell.command, None);
+        assert_eq!(nested_shell.tool_name.as_deref(), Some("exec_command"));
+        assert_eq!(nested_shell.command.as_deref(), Some("cargo test"));
         assert_eq!(nested_shell.provenance.line, Some(4));
         assert!(
             nested_shell
@@ -2718,8 +3036,11 @@ mod tests {
             .iter()
             .find(|call| call.call_id.as_deref() == Some("fixture-nested-patch-a"))
             .unwrap();
-        assert_eq!(nested_patch.tool_name.as_deref(), Some("exec"));
-        assert_eq!(nested_patch.command, None);
+        assert_eq!(nested_patch.tool_name.as_deref(), Some("apply_patch"));
+        assert_eq!(
+            nested_patch.command.as_deref(),
+            Some("*** Update File: src/lib.rs\n@@\n-old\n+new\n")
+        );
         assert!(
             nested_patch
                 .input_summary
@@ -2738,7 +3059,13 @@ mod tests {
                 .as_deref()
                 .is_some_and(|id| id.contains("/nested/"))
         }));
-        assert!(data.file_operations.is_empty());
+        assert_eq!(
+            data.file_operations
+                .iter()
+                .map(|operation| operation.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/lib.rs"]
+        );
 
         let opaque_call = data
             .tool_calls
@@ -2760,10 +3087,12 @@ mod tests {
             .iter()
             .find(|call| call.call_id.as_deref() == Some("fixture-structured-wrapper-b"))
             .unwrap();
-        assert_eq!(
-            structured_wrapper.command.as_deref(),
-            Some("*** Update File: src/wrapper.rs")
-        );
+        assert_eq!(structured_wrapper.tool_name.as_deref(), Some("exec"));
+        assert_eq!(structured_wrapper.command, None);
+        assert!(data.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == DiagnosticKind::OpaqueToolInput
+                && diagnostic.session_id.as_deref() == Some("fixture-wrapper-session-b")
+        }));
 
         assert!(
             !data
@@ -2774,6 +3103,46 @@ mod tests {
                         && result.is_duplicate
                 )
         );
+    }
+
+    #[test]
+    fn extracts_one_unambiguous_nested_browser_call_but_keeps_ambiguous_scripts_unknown() {
+        let data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-browser-session"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-browser-call","name":"js","input":"await tools.browser({url: \"https://example.test\"});"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-browser-call","exit_code":0,"status":"completed"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-ambiguous-wrapper","name":"exec","input":"await tools.exec_command({cmd: \"cargo test\"}); await tools.exec_command({cmd: \"cargo check\"});"}}"#,
+        );
+
+        let browser = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-browser-call"))
+            .unwrap();
+        assert_eq!(browser.tool_name.as_deref(), Some("browser"));
+        assert_eq!(browser.command, None);
+        assert!(
+            browser
+                .input_summary
+                .as_deref()
+                .is_some_and(|input| input.contains("tools.browser"))
+        );
+
+        let ambiguous = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-ambiguous-wrapper"))
+            .unwrap();
+        assert_eq!(ambiguous.tool_name.as_deref(), Some("exec"));
+        assert_eq!(ambiguous.command, None);
+
+        let prefixed = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-prefixed-session"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-prefixed-wrapper","name":"exec","input":"await mytools.exec_command({cmd: \"cargo test\"});"}}"#,
+        );
+        let prefixed = &prefixed.tool_calls[0];
+        assert_eq!(prefixed.tool_name.as_deref(), Some("exec"));
+        assert_eq!(prefixed.command, None);
     }
 
     #[test]

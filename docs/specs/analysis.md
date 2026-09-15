@@ -107,8 +107,12 @@ Emit a repeated-failure candidate when the shared threshold is met. Include:
 
 Do not infer that a command is wrong solely because it failed once.
 
-For a known wrapper tool such as `exec`, `js`, or `wait` without a canonical
-command, emit no failure event. For another non-shell tool without a canonical
+For an opaque known wrapper tool such as `exec`, `js`, or `wait` without a
+canonical command, emit no shell failure event; the adapter's bounded
+`opaque_tool_input` limitation remains visible in coverage. A single safe
+`tools.<name>({...})` call inside a wrapper is normalized before this lens, so
+its nested shell or patch result follows the ordinary tool contract without a
+second opaque-wrapper event. For another non-shell tool without a canonical
 command, use the `no_canonical_command` family, keep the failure evidence and
 state the unpacking limitation, leave `observed_commands` empty, and do not
 suggest documenting a shell prerequisite.

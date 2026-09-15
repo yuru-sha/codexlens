@@ -359,6 +359,7 @@ mod tests {
     use std::io::Cursor;
     use std::path::Path;
 
+    use crate::analysis::FindingScope;
     use crate::normalize::normalize_rollout;
     use crate::rollout::{PlainJsonlReader, parse_rollout_reader};
 
@@ -442,7 +443,7 @@ mod tests {
         let context = AnalysisContext::new(&data);
         let events = context.failure_events();
 
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 3);
         assert!(events.iter().all(|event| {
             event.tool == "exec_command"
                 && event.family == "cargo test"
@@ -454,10 +455,21 @@ mod tests {
         }));
 
         let findings = analyze(&context, &AnalysisOptions::default());
+        let failure = findings
+            .iter()
+            .find(|finding| finding.key == "exec_command|cargo test|exit_code_1")
+            .unwrap();
+        assert_eq!(failure.occurrences, 3);
+        assert_eq!(failure.distinct_sessions, 2);
+        assert_eq!(
+            failure.scope,
+            FindingScope::Project("/fixture/project".into())
+        );
+        assert!(failure.suggested_action.contains("cargo test"));
         assert!(
-            !findings
+            findings
                 .iter()
-                .any(|finding| finding.key.contains("no_canonical_command"))
+                .all(|finding| !finding.key.contains("no_canonical_command"))
         );
 
         let parsed_renderer_command = parse_rollout_reader(

@@ -22,3 +22,5 @@
 {"timestamp":"2026-01-02T00:00:08Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-wait-b","exit_code":1,"status":"failed","output":"wait failure"}}
 {"timestamp":"2026-01-02T00:00:09Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-structured-wrapper-b","name":"exec","input":{"command":"*** Update File: src/wrapper.rs"}}}
 {"timestamp":"2026-01-02T00:00:10Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-structured-wrapper-b","exit_code":0,"status":"completed","output":"wrapper completed"}}
+{"timestamp":"2026-01-02T00:00:11Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"fixture-nested-browser-b","name":"js","input":"await tools.browser({url: \"https://example.test\"});"}}
+{"timestamp":"2026-01-02T00:00:12Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"fixture-nested-browser-b","exit_code":0,"status":"completed","output":"browser completed"}}

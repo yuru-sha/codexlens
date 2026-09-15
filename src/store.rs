@@ -1282,6 +1282,7 @@ fn diagnostic_kind_from_db(value: &str) -> DiagnosticKind {
         "state_schema_mismatch" => DiagnosticKind::StateSchemaMismatch,
         "state_query" => DiagnosticKind::StateQuery,
         "metadata_conflict" => DiagnosticKind::MetadataConflict,
+        "opaque_tool_input" => DiagnosticKind::OpaqueToolInput,
         _ => DiagnosticKind::UnsupportedReader,
     }
 }

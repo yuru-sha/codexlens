@@ -28,8 +28,9 @@ identity values.
 usable identity. `rollout/state-fallback-rekey.jsonl` covers records emitted
 before rollout metadata supplies the canonical identity.
 
-`rollout/wrapper-tools.jsonl` covers direct shell calls, opaque wrapper calls
-containing nested shell/patch source, and non-shell wrapper failures.
+`rollout/wrapper-tools.jsonl` covers direct shell calls, safely extracted
+nested shell/patch/browser calls, ambiguous and opaque wrapper inputs, and
+non-shell wrapper failures.
 
 `rollout/tool-result-envelopes.jsonl` covers parsed renderer success, failure,
 timeout, malformed envelopes, unknown renderer text, and incidental failure
