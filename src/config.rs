@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use crate::model::{CanonicalData, Session};
+use crate::model::{CanonicalData, CanonicalDiagnostic, Session, SourceRef};
 pub use crate::model::{Surface, SurfaceKind, SurfaceLoadMode, SurfaceScope, SurfaceUsageState};
 
 pub const DEFAULT_PROJECT_DOC_MAX_BYTES: usize = 32 * 1024;
@@ -605,6 +605,82 @@ pub fn discover_surfaces(
             .then_with(|| left.id.cmp(&right.id))
     });
     surfaces
+}
+
+/// Recompute surface usage after reporting filters have selected a subset of sessions.
+pub fn recompute_surface_usage(data: &mut CanonicalData) {
+    let mut surfaces = std::mem::take(&mut data.surfaces);
+    for surface in &mut surfaces {
+        surface.observed_uses = 0;
+        surface.observed_sessions = 0;
+        surface.usage_state = SurfaceUsageState::Unknown;
+        surface
+            .limitations
+            .retain(|limitation| limitation != "usage evidence is incomplete");
+    }
+    let usage_evidence_complete = !data.sessions.is_empty()
+        && !data
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic_relevant_to_data(data, diagnostic));
+    apply_usage(
+        &mut surfaces,
+        data,
+        &SurfaceInventoryOptions {
+            include_subagents: true,
+            usage_evidence_complete,
+        },
+    );
+    data.surfaces = surfaces;
+}
+
+fn diagnostic_relevant_to_data(data: &CanonicalData, diagnostic: &CanonicalDiagnostic) -> bool {
+    if diagnostic.session_id.as_ref().is_some_and(|session_id| {
+        data.sessions
+            .iter()
+            .any(|session| &session.id == session_id)
+    }) {
+        return true;
+    }
+    let same_source = |source: &SourceRef| {
+        source.kind == diagnostic.source.kind && source.path == diagnostic.source.path
+    };
+    data.sessions
+        .iter()
+        .any(|session| same_source(&session.provenance))
+        || data.turns.iter().any(|turn| same_source(&turn.provenance))
+        || data
+            .records
+            .iter()
+            .any(|record| same_source(&record.provenance))
+        || data
+            .messages
+            .iter()
+            .any(|message| same_source(&message.provenance))
+        || data
+            .tool_calls
+            .iter()
+            .any(|call| same_source(&call.provenance))
+        || data
+            .tool_results
+            .iter()
+            .any(|result| same_source(&result.provenance))
+        || data
+            .file_operations
+            .iter()
+            .any(|operation| same_source(&operation.provenance))
+        || data
+            .token_usage
+            .iter()
+            .any(|usage| same_source(&usage.provenance))
+        || data
+            .instruction_snapshots
+            .iter()
+            .any(|snapshot| same_source(&snapshot.provenance))
+        || data
+            .instruction_joins
+            .iter()
+            .any(|join| same_source(&join.provenance))
 }
 
 fn add_config_declarations(
@@ -1372,7 +1448,9 @@ fn skill_description_bytes(content: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CanonicalData, Session, SourceRef, ToolCall};
+    use crate::model::{
+        CanonicalData, CanonicalDiagnostic, DiagnosticKind, Session, SourceRef, ToolCall,
+    };
 
     fn fixture_session(id: &str, project: &Path, cwd: &Path, parent_id: Option<&str>) -> Session {
         Session {
@@ -1492,6 +1570,46 @@ mod tests {
 
         assert_eq!(result.config, InstructionConfig::default());
         assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn unrelated_source_diagnostics_do_not_make_selected_usage_unknown() {
+        let mut session = fixture_session(
+            "project-a-session",
+            Path::new("/project-a"),
+            Path::new("/project-a"),
+            None,
+        );
+        session.provenance = SourceRef::rollout(PathBuf::from("/project-a.jsonl"), 1);
+        let mut data = CanonicalData {
+            sessions: vec![session],
+            diagnostics: vec![CanonicalDiagnostic {
+                kind: DiagnosticKind::MalformedJson,
+                source: SourceRef::rollout(PathBuf::from("/project-b.jsonl"), 1),
+                session_id: None,
+                message: "synthetic unrelated source diagnostic".to_owned(),
+            }],
+            surfaces: vec![Surface {
+                id: "project-a-skill".to_owned(),
+                kind: SurfaceKind::Skill,
+                name: "project-a-skill".to_owned(),
+                path: Some(PathBuf::from("/project-a/skill/SKILL.md")),
+                scope: SurfaceScope::Project(PathBuf::from("/project-a")),
+                enabled: Some(true),
+                load_mode: SurfaceLoadMode::OnDemand,
+                static_bytes: Some(32),
+                startup_bytes: Some(0),
+                observed_uses: 0,
+                observed_sessions: 0,
+                usage_state: SurfaceUsageState::Unknown,
+                limitations: Vec::new(),
+            }],
+            ..CanonicalData::default()
+        };
+
+        recompute_surface_usage(&mut data);
+
+        assert_eq!(data.surfaces[0].usage_state, SurfaceUsageState::Unused);
     }
 
     #[test]

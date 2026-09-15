@@ -1,9 +1,10 @@
 # MVP readiness review
 
-Status: Phase 5 complete; ready for Phase 6 release preparation.
+Status: Phase 5 implementation complete; product rebaseline #137 is pending,
+so this document is not a current release-readiness approval.
 
 Review scope: the refactor, Phase 5 input/reporting work, and safe
-proposal-apply workflow through the current MVP endpoint. The review checks the
+proposal-apply workflow through the historical MVP endpoint. The review checks the
 architecture, session-format, analysis, and post-MVP write contract against the
 implementation, then verifies the supported CLI surface and its boundaries.
 
@@ -47,7 +48,7 @@ bounded local monitoring.
 - Reporting and apply read the derived store without reopening raw rollout/state
   input. `optimize --diff` never writes target instruction files, while
   `optimize --apply` writes only its validated write set and retains backups.
-- No blocking issue remains for the current MVP reporting path. The
+- No blocking issue remains for the historical MVP reporting path. The
   architecture specification now records that corrections/findings are
   derived in memory; [#54](https://github.com/yuru-sha/codexlens/issues/54)
   closed the clarification. Any future persisted lens output needs its own
@@ -70,6 +71,14 @@ The entry contracts and required compatibility/privacy test gates are in
 The store-schema wording for `corrections` and `findings` was clarified and
 closed in [#54](https://github.com/yuru-sha/codexlens/issues/54); the current
 CLI derives those results in memory from canonical data.
+
+## Product rebaseline gate
+
+The historical Phase 5 gate does not establish completion of the full cclens
+counterpart contract. Issue [#137](https://github.com/yuru-sha/codexlens/issues/137)
+must still be satisfied for every required view, the complete optimize
+briefing, bounded synthetic end-to-end evidence, and a real-history smoke
+procedure before a new readiness or release claim is made.
 
 ## Phase 6 entry condition
 

@@ -16,7 +16,10 @@ pub use apply::{
     ApplyError, ApplyPlan, ApplyReport, RecoveryStatus, prepare_apply, prepare_apply_proposals,
 };
 pub use diff::{DiffBatch, DiffError, RenderedDiff, SkippedProposal, render_diff, render_diffs};
-pub use proposal::{Proposal, ProposalAction, ProposalError, ProposalPlan, proposals_for_findings};
+pub use proposal::{
+    Proposal, ProposalAction, ProposalError, ProposalPlan, proposals_for_findings,
+    proposals_for_findings_and_waste,
+};
 pub use report::{
     CoverageLimitation, DEFAULT_SESSION_LIMIT, DoctorFinding, DoctorGroup, DoctorOptions,
     DoctorReport, ReportCoverage, SessionSummary, coverage_limitations_json, doctor,
