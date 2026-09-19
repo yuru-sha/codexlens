@@ -1,6 +1,6 @@
 # MVP readiness review
 
-Status: Phase 5 implementation complete; product rebaseline #137 is pending,
+Status: Phase 5 implementation complete; product rebaseline #143 is pending,
 so this document is not a current release-readiness approval.
 
 Review scope: the refactor, Phase 5 input/reporting work, and safe
@@ -75,10 +75,11 @@ CLI derives those results in memory from canonical data.
 ## Product rebaseline gate
 
 The historical Phase 5 gate does not establish completion of the full cclens
-counterpart contract. Issue [#137](https://github.com/yuru-sha/codexlens/issues/137)
-must still be satisfied for every required view, the complete optimize
-briefing, bounded synthetic end-to-end evidence, and a real-history smoke
-procedure before a new readiness or release claim is made.
+counterpart contract. Issue [#143](https://github.com/yuru-sha/codexlens/issues/143)
+must still be satisfied for the documented CLI help, every required view, the
+complete optimize briefing, bounded synthetic end-to-end evidence, and the
+aggregate-only real-history smoke procedure before a new readiness or release
+claim is made.
 
 ## Phase 6 entry condition
 

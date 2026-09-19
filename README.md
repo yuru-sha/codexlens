@@ -8,8 +8,8 @@ Analyze Codex sessions and turn recurring friction into actionable
 > Foundation MVP status: local ingestion, instruction capture, deterministic
 > lenses, bounded reporting views, local monitoring, compressed rollout
 > readers, versioned JSON output, and safe `optimize --apply` are implemented.
-> The full cclens-compatible command contract is being rebaselined in
-> [#137](https://github.com/yuru-sha/codexlens/issues/137); this is not a
+> The full cclens-compatible command contract is being finalized in
+> [#143](https://github.com/yuru-sha/codexlens/issues/143); this is not a
 > claim that the product rebaseline is complete.
 > Explicit `analyze`/`refresh` commands update the derived store; read views
 > consume that store without refreshing it. `--frozen` makes the store-only
@@ -164,6 +164,13 @@ The bounded, human-reviewed finding evaluation plan is in
 It is a planning worksheet: real history requires explicit owner authorization,
 and `optimize --apply` is outside the pilot.
 
+The aggregate-only real-history smoke procedure is
+[`scripts/real_history_smoke.py`](scripts/real_history_smoke.py), documented in
+the [CLI specification](docs/specs/cli.md#real-history-smoke-procedure). Keep
+the selected input, store, report, and any command output outside this
+repository; the runner records only bounded counts, coverage and limitation
+summaries, store freshness, timings, and raw-input immutability.
+
 The command examples below use an existing derived store and opt into the
 read-only `--frozen` boundary:
 
@@ -225,8 +232,9 @@ refresh/frozen reporting (#58), versioned JSON reporting (#59), bounded local
 live monitoring (#60), and safe optimize apply (#61) are implemented. Future
 changes must preserve the explicit boundaries documented above.
 
-Product readiness remains pending the cclens contract rebaseline in [#137](https://github.com/yuru-sha/codexlens/issues/137); the historical Phase 5
-milestones do not close that issue.
+Product readiness remains pending the cclens contract and end-to-end smoke
+gate in [#143](https://github.com/yuru-sha/codexlens/issues/143); the historical
+Phase 5 milestones do not close that issue.
 
 Phase 6 is the release-preparation phase. Its release checklist and source
 release procedure are recorded in [docs/release.md](docs/release.md).

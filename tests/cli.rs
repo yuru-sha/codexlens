@@ -1060,6 +1060,58 @@ fn query_renders_table_markdown_and_json_from_an_existing_store() {
 }
 
 #[test]
+fn cli_help_documents_command_semantics_and_read_only_boundaries() {
+    let help = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    for description in [
+        "Build or update the derived SQLite store",
+        "Refresh (unless --frozen) and report all canonical findings",
+        "Show configured surfaces, ownership, and observed use",
+        "Explain always-on context cost and residuals",
+        "Show where tool, Skill, model, prompt, and subagent effort goes",
+        "Rank actionable configuration and workflow opportunities",
+        "Report recurring tool failures with scoped fixes",
+        "Report repeated edit/failure loops and targets",
+        "Report steering, correction, question, and instruction patterns",
+        "Show bounded, action-first health fixes by scope",
+        "Run a bounded read-only SQL query",
+        "Print/diff a reviewable optimization plan or apply it explicitly",
+    ] {
+        assert!(
+            stdout.contains(description),
+            "missing help text: {description}\n{stdout}"
+        );
+    }
+
+    let sql_help = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["sql", "--help"])
+        .output()
+        .unwrap();
+    assert!(sql_help.status.success());
+    let sql_stdout = String::from_utf8_lossy(&sql_help.stdout);
+    assert!(sql_stdout.contains("One read-only SQL statement or stdin"));
+    assert!(sql_stdout.contains("50 columns and 50 rows"));
+
+    let analyze_help = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["analyze", "--help"])
+        .output()
+        .unwrap();
+    assert!(analyze_help.status.success());
+    assert!(
+        String::from_utf8_lossy(&analyze_help.stdout)
+            .contains("refresh progress goes to stderr and JSON stdout stays one document")
+    );
+}
+
+#[test]
 fn query_rejects_writes_and_bounds_rows_without_creating_a_store() {
     let store = fixture_store();
     {
@@ -2185,6 +2237,52 @@ fn first_run_analyze_refreshes_and_uses_a_private_default_store() {
 
     let _ = fs::remove_dir_all(home);
     let _ = fs::remove_dir_all(state_home);
+}
+
+#[test]
+fn analyze_refresh_keeps_progress_off_json_stdout_and_frozen_is_store_only() {
+    let (home, source) = refresh_home();
+    let store = temp_store_path("analyze-json-boundary");
+    let output = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["analyze", "--codex-home"])
+        .arg(&home)
+        .args(["--store"])
+        .arg(&store)
+        .args(["--format", "json"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["command"], "analyze");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Refreshed store:"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Refreshed store:"));
+
+    let before = fs::read(&store).unwrap();
+    fs::write(&source, b"synthetic raw input changed after analyze\n").unwrap();
+    let frozen = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["analyze", "--store"])
+        .arg(&store)
+        .args(["--format", "json", "--frozen"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        frozen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&frozen.stderr)
+    );
+    let frozen_document: Value = serde_json::from_slice(&frozen.stdout).unwrap();
+    assert_eq!(frozen_document["command"], "analyze");
+    assert!(frozen.stderr.is_empty());
+    assert_eq!(fs::read(&store).unwrap(), before);
+
+    let _ = fs::remove_dir_all(home);
+    let _ = fs::remove_file(store);
 }
 
 #[test]
@@ -3376,6 +3474,8 @@ fn final_audit_records_release_evidence_and_boundaries() {
 
     assert!(readme.contains("docs/readiness/final-audit.md"));
     assert!(readiness.contains("final-audit.md"));
+    assert!(audit.contains("#143 remains pending"));
+    assert!(audit.contains("not a current readiness approval"));
     for marker in [
         "cargo fmt --all -- --check",
         "cargo clippy --all-targets --all-features -- -D warnings",
@@ -3501,6 +3601,8 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
     assert!(readme.contains("Phase 5 compressed rollout reader milestone"));
     assert!(readme.contains("Phase 5 safe optimize apply"));
     assert!(readme.contains("Phase 6"));
+    assert!(readme.contains("scripts/real_history_smoke.py"));
+    assert!(readme.contains("raw-input immutability"));
     assert!(!readme.contains("## Deliberately deferred"));
     for stale in [
         "optimize --apply is unavailable",
