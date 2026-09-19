@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    CanonicalData, InstructionSnapshotAccuracy, InstructionSnapshotSource, SourceRef, Surface,
-    SurfaceKind, SurfaceLoadMode, SurfaceScope, SurfaceUsageState,
+    CanonicalData, InstructionFileState, InstructionScope, InstructionSnapshotAccuracy,
+    InstructionSnapshotSource, SourceRef, Surface, SurfaceKind, SurfaceLoadMode, SurfaceScope,
+    SurfaceUsageState,
 };
 
 use super::{
@@ -237,7 +238,7 @@ pub fn doctor_opportunities(
         merge_doctor_opportunity(&mut by_target, opportunity.clone());
     }
     for row in &overhead.rows {
-        let Some(opportunity) = overhead_opportunity(row) else {
+        let Some(opportunity) = overhead_opportunity(data, row) else {
             continue;
         };
         merge_doctor_opportunity(&mut by_target, opportunity);
@@ -268,14 +269,22 @@ pub fn doctor_opportunities(
     opportunities
 }
 
-fn overhead_opportunity(row: &OverheadRow) -> Option<ViewOpportunity> {
+fn overhead_opportunity(data: &CanonicalData, row: &OverheadRow) -> Option<ViewOpportunity> {
     let readable = row
         .readable_startup_bytes
         .filter(|bytes| *bytes > HEAVY_STARTUP_BYTES)?;
     if row.unknown_cost || row.evidence.is_empty() {
         return None;
     }
-    let target = scope_target(&row.scope);
+    let exact_target = overhead_target(data, &row.scope, row.session_count);
+    let target = exact_target
+        .clone()
+        .unwrap_or_else(|| scope_target(&row.scope));
+    let confidence = if exact_target.is_some() {
+        FindingConfidence::High
+    } else {
+        FindingConfidence::Medium
+    };
     Some(ViewOpportunity {
         id: format!("overhead:{}", row.scope),
         title: format!("Reduce startup context overhead for {}", row.scope),
@@ -291,7 +300,7 @@ fn overhead_opportunity(row: &OverheadRow) -> Option<ViewOpportunity> {
         } else {
             FindingSeverity::Medium
         },
-        confidence: FindingConfidence::High,
+        confidence,
         occurrences: row.session_count,
         distinct_sessions: row.session_count,
         action: format!("Review and slim always-on configuration at {target}"),
@@ -299,6 +308,12 @@ fn overhead_opportunity(row: &OverheadRow) -> Option<ViewOpportunity> {
         evidence: bounded_evidence(row.evidence.clone()),
         limitations: {
             let mut limitations = row.limitations.clone();
+            if exact_target.is_none() {
+                limitations.push(
+                    "An exact instruction target was not selected because scope evidence was missing or ambiguous; optimize will report this as skipped"
+                        .to_owned(),
+                );
+            }
             ensure_limitations(&mut limitations);
             limitations
         },
@@ -1647,6 +1662,61 @@ fn scope_target(scope: &FindingScope) -> String {
     }
 }
 
+fn overhead_target(
+    data: &CanonicalData,
+    scope: &FindingScope,
+    session_count: usize,
+) -> Option<String> {
+    let target_scope = match scope {
+        FindingScope::Global => InstructionScope::Global,
+        FindingScope::Project(_) => InstructionScope::ProjectRoot,
+        FindingScope::Instruction(path) => return Some(path.to_string_lossy().into_owned()),
+        FindingScope::Path(path) => return Some(path.clone()),
+    };
+    let project = match scope {
+        FindingScope::Project(path) => Some(path),
+        _ => None,
+    };
+    let mut paths_by_session = BTreeMap::<PathBuf, BTreeSet<String>>::new();
+    for join in &data.instruction_joins {
+        if project.is_some_and(|project| join.project_root.as_ref() != Some(project)) {
+            continue;
+        }
+        let Some(path) = join
+            .resolution
+            .chain
+            .iter()
+            .find(|file| {
+                file.scope == target_scope
+                    && matches!(
+                        file.state,
+                        InstructionFileState::Selected | InstructionFileState::Truncated
+                    )
+                    && file.content.is_some()
+            })
+            .map(|file| file.path.clone())
+        else {
+            continue;
+        };
+        paths_by_session
+            .entry(path)
+            .or_default()
+            .insert(join.session_id.clone());
+    }
+    let path = paths_by_session
+        .into_iter()
+        .max_by(|left, right| {
+            left.1
+                .len()
+                .cmp(&right.1.len())
+                .then_with(|| right.0.cmp(&left.0))
+        })
+        .and_then(|(path, sessions)| {
+            (session_count > 0 && sessions.len() * 2 > session_count).then_some(path)
+        });
+    path.map(|path| path.to_string_lossy().into_owned())
+}
+
 fn finding_opportunity(
     data: &CanonicalData,
     finding: &Finding,
@@ -2048,6 +2118,86 @@ mod tests {
             .find(|row| row.id == "percentile-rule")
             .expect("percentile row");
         assert!(row.action.is_none());
+    }
+
+    #[test]
+    fn overhead_opportunity_uses_the_stored_project_instruction_path() {
+        let target = PathBuf::from("/fixture/project/project-instructions.md");
+        let mut data =
+            crate::advisor::test_support::data_with_join(vec![crate::advisor::test_support::file(
+                target.to_str().unwrap(),
+                InstructionScope::ProjectRoot,
+                "project guidance\n",
+            )]);
+        data.surfaces = vec![surface(
+            "heavy-rule",
+            SurfaceKind::Rule,
+            "heavy.rules",
+            "/fixture/project/heavy.rules",
+            SurfaceScope::Project("/fixture/project".into()),
+            SurfaceLoadMode::StartupFull,
+            Some(8_192),
+            SurfaceUsageState::Used,
+            1,
+        )];
+        data.instruction_snapshots = vec![InstructionSnapshot {
+            session_id: Some("session".to_owned()),
+            turn_id: Some("turn".to_owned()),
+            source: InstructionSnapshotSource::Rollout,
+            accuracy: InstructionSnapshotAccuracy::Observed,
+            content: Some("project guidance\n".to_owned()),
+            content_hash: None,
+            byte_count: 8_192,
+            chain: Vec::new(),
+            effective_chain_hash: None,
+            truncated: false,
+            provenance: crate::model::SourceRef::rollout("views.jsonl".into(), 1),
+        }];
+
+        let overhead = overhead(&data);
+        let opportunity = doctor_opportunities(&data, &[], &waste(&data), &overhead)
+            .into_iter()
+            .find(|opportunity| opportunity.id == "overhead:project:/fixture/project")
+            .expect("project overhead opportunity");
+
+        assert_eq!(opportunity.target, target.display().to_string());
+
+        let mut ambiguous = data.clone();
+        let mut missing_join_session = ambiguous.sessions[0].clone();
+        missing_join_session.id = "missing-join-session".to_owned();
+        ambiguous.sessions.push(missing_join_session);
+        let snapshot = |session_id: &str| InstructionSnapshot {
+            session_id: Some(session_id.to_owned()),
+            turn_id: Some("turn".to_owned()),
+            source: InstructionSnapshotSource::Rollout,
+            accuracy: InstructionSnapshotAccuracy::Observed,
+            content: Some("project guidance\n".to_owned()),
+            content_hash: None,
+            byte_count: 8_192,
+            chain: Vec::new(),
+            effective_chain_hash: None,
+            truncated: false,
+            provenance: crate::model::SourceRef::rollout("views.jsonl".into(), 1),
+        };
+        ambiguous.instruction_snapshots =
+            vec![snapshot("session"), snapshot("missing-join-session")];
+        let ambiguous_overhead = super::overhead(&ambiguous);
+        let ambiguous_opportunity =
+            doctor_opportunities(&ambiguous, &[], &waste(&ambiguous), &ambiguous_overhead)
+                .into_iter()
+                .find(|opportunity| opportunity.id == "overhead:project:/fixture/project")
+                .expect("ambiguous project overhead opportunity");
+        assert_eq!(
+            ambiguous_opportunity.target, "/fixture/project/AGENTS.md",
+            "a missing join must not establish a strict-majority target"
+        );
+        assert!(
+            ambiguous_opportunity
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("exact instruction target"))
+        );
+        assert_eq!(ambiguous_opportunity.confidence, FindingConfidence::Medium);
     }
 
     #[test]
