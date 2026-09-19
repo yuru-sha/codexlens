@@ -558,8 +558,16 @@ fn main() -> Result<()> {
                 ViewReport::Waste(report) => report,
                 _ => unreachable!("waste report variant"),
             };
+            let overhead = match filter_view_report(
+                ViewReport::Overhead(codexlens::analysis::views::overhead(&scoped_data)),
+                &store.scope,
+            ) {
+                ViewReport::Overhead(report) => report,
+                _ => unreachable!("overhead report variant"),
+            };
+            let opportunities = doctor_opportunities(&scoped_data, &findings, &waste, &overhead);
             let proposal_plan =
-                proposals_for_findings_and_waste(&scoped_data, &findings, &waste.opportunities);
+                proposals_for_findings_and_waste(&scoped_data, &findings, &opportunities);
             if print {
                 run_optimize_print(
                     &scoped_data,
