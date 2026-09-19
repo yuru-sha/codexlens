@@ -2187,8 +2187,12 @@ mod tests {
                 .into_iter()
                 .find(|opportunity| opportunity.id == "overhead:project:/fixture/project")
                 .expect("ambiguous project overhead opportunity");
+        let fallback_target = PathBuf::from("/fixture/project")
+            .join("AGENTS.md")
+            .display()
+            .to_string();
         assert_eq!(
-            ambiguous_opportunity.target, "/fixture/project/AGENTS.md",
+            ambiguous_opportunity.target, fallback_target,
             "a missing join must not establish a strict-majority target"
         );
         assert!(
