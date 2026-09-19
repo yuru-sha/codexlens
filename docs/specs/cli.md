@@ -299,20 +299,41 @@ from those aliases.
 ## Real-history smoke procedure
 
 Real history is an explicitly selected local source, not a committed fixture.
-After confirming the source scope, run:
+It is never a CI input and must not be copied into a fixture or a GitHub
+artifact. After confirming the source scope, keep the store, report, and any
+captured command output outside this repository and run the standard-library
+runner:
 
 ```bash
-codexlens refresh --codex-home /absolute/path/to/codex-home --store /tmp/codexlens-smoke.sqlite
-codexlens analyze --store /tmp/codexlens-smoke.sqlite --frozen --format json > /tmp/codexlens-analyze.json
-codexlens doctor --store /tmp/codexlens-smoke.sqlite --frozen
-codexlens optimize --print --store /tmp/codexlens-smoke.sqlite --frozen
-codexlens sql --store /tmp/codexlens-smoke.sqlite --format json \
-  'SELECT COUNT(*) AS sessions FROM sessions'
+python3 -B scripts/real_history_smoke.py \
+  --binary target/debug/codexlens \
+  --codex-home /absolute/path/to/codex-home \
+  --store /tmp/codexlens-smoke/store.sqlite \
+  --report /tmp/codexlens-smoke/report.json \
+  --scope project:/absolute/path/to/project \
+  --require-actionable
 ```
 
-Record store freshness, coverage status, non-empty matching views, bounded
-evidence, global/project routing, and the exact skipped limitations. Compare
-raw input hashes before/after; do not use `--apply` in the smoke procedure.
+Omit `--require-actionable` when the selected source is expected to be empty or
+partial; keep the resulting `actionable_output=false` and coverage status as
+evidence rather than treating it as healthy. The runner executes `refresh`,
+frozen JSON `analyze`, `doctor`, and `optimize --print`, while capturing no raw
+stdout/stderr in the report. The aggregate report records:
+
+- the selected scope;
+- coverage status, session/record counts, bounded limitation summaries, and
+  the omitted limitation count;
+- store freshness state, source-file count, and latest ingestion timestamp;
+- finding count and per-kind finding counts;
+- total, reviewable, and skipped proposal counts;
+- total and per-command runtime; and
+- before/after aggregate hashes, sizes, and `raw_input_immutable`.
+
+`coverage.partial_or_unknown` is the separate partial/unknown-coverage signal.
+Review `actionable_output`, coverage limitations, and the exact selected scope
+locally. Do not use `optimize --apply` in the smoke procedure. A successful
+run is evidence for the selected source only; it is not a product-readiness or
+release claim.
 
 ## Acceptance tests
 

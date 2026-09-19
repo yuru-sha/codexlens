@@ -56,109 +56,173 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Build or update the derived SQLite store from Codex inputs")]
     Refresh {
         #[command(flatten)]
         refresh: RefreshOptions,
     },
+    #[command(about = "Refresh (unless --frozen) and report all canonical findings")]
     Analyze {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "List bounded session metadata and coverage")]
     Sessions {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "Show configured surfaces, ownership, and observed use")]
     Inventory {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "Explain always-on context cost and residuals")]
     Overhead {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "Show where tool, Skill, model, prompt, and subagent effort goes")]
     Usage {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "Rank actionable configuration and workflow opportunities")]
     Waste {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "Report recurring tool failures with scoped fixes")]
     Failures {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "Report repeated edit/failure loops and targets")]
     Stuck {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "Report steering, correction, question, and instruction patterns")]
     Prompts {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "Report correction-lens findings")]
     Corrections {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "Report legacy rework findings")]
     Rework {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "Report verification-lens findings")]
     Verification {
         #[command(flatten)]
         store: StoreOptions,
     },
     #[command(alias = "rediscovery")]
+    #[command(about = "Report knowledge-lens findings")]
     Knowledge {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "Report instruction-lens findings")]
     Instructions {
         #[command(flatten)]
         store: StoreOptions,
     },
+    #[command(about = "Show bounded, action-first health fixes by scope")]
     Doctor {
         #[command(flatten)]
         store: StoreOptions,
-        #[arg(long, value_name = "COUNT")]
+        #[arg(
+            long,
+            value_name = "COUNT",
+            help = "Limit opportunities per scope to at most five"
+        )]
         limit: Option<usize>,
     },
+    #[command(about = "Run a bounded read-only SQL query (compatibility alias)")]
     Query {
-        #[arg(value_name = "SQL")]
+        #[arg(
+            value_name = "SQL",
+            help = "One read-only SQL statement; reads stdin when omitted"
+        )]
         sql: Option<String>,
         #[command(flatten)]
         options: QueryOptions,
     },
+    #[command(about = "Run a bounded read-only SQL query")]
     Sql {
-        #[arg(value_name = "SQL")]
+        #[arg(
+            value_name = "SQL",
+            help = "One read-only SQL statement or stdin; output is limited to 50 columns and 50 rows"
+        )]
         sql: Option<String>,
         #[command(flatten)]
         options: QueryOptions,
     },
+    #[command(about = "Print/diff a reviewable optimization plan or apply it explicitly")]
     Optimize {
         #[command(flatten)]
         store: StoreOptions,
-        #[arg(long, conflicts_with = "apply")]
+        #[arg(
+            long,
+            conflicts_with = "apply",
+            help = "Render bounded reviewable diffs without writing"
+        )]
         diff: bool,
-        #[arg(long, conflicts_with = "diff")]
+        #[arg(
+            long,
+            conflicts_with = "diff",
+            help = "Apply the validated plan after explicit confirmation"
+        )]
         apply: bool,
-        #[arg(long, requires = "apply")]
+        #[arg(
+            long,
+            requires = "apply",
+            help = "Confirm the non-interactive apply operation"
+        )]
         yes: bool,
-        #[arg(long, conflicts_with_all = ["diff", "apply"])]
+        #[arg(
+            long,
+            conflicts_with_all = ["diff", "apply"],
+            help = "Print the complete bounded advisor briefing without writing"
+        )]
         print: bool,
     },
+    #[command(about = "Ingest one local source incrementally and optionally write a cursor")]
     Monitor {
         #[command(flatten)]
         store: MonitorStoreOptions,
-        #[arg(long, value_name = "PATH")]
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "One local rollout JSONL or state SQLite source"
+        )]
         source: PathBuf,
-        #[arg(long, value_enum, default_value_t = MonitorKind::Rollout)]
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = MonitorKind::Rollout,
+            help = "Source format to monitor"
+        )]
         kind: MonitorKind,
-        #[arg(long, value_name = "COUNT")]
+        #[arg(long, value_name = "COUNT", help = "Stop after this many polls")]
         max_polls: Option<usize>,
-        #[arg(long, default_value_t = 500, value_name = "MILLISECONDS")]
+        #[arg(
+            long,
+            default_value_t = 500,
+            value_name = "MILLISECONDS",
+            help = "Delay between polls"
+        )]
         interval_ms: u64,
-        #[arg(long, value_name = "PATH")]
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Write the bounded cursor at a clean stop"
+        )]
         cursor: Option<PathBuf>,
     },
 }
@@ -208,32 +272,60 @@ impl FromStr for ScopeFilter {
 
 #[derive(Debug, Clone, Args)]
 struct StoreOptions {
-    #[arg(long, short = 's', value_name = "PATH")]
+    #[arg(
+        long,
+        short = 's',
+        value_name = "PATH",
+        help = "Derived SQLite store (default: per-user state directory)"
+    )]
     store: Option<PathBuf>,
-    #[arg(long, alias = "home", value_name = "PATH")]
+    #[arg(
+        long,
+        alias = "home",
+        value_name = "PATH",
+        help = "Absolute Codex home to read when refreshing"
+    )]
     codex_home: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, help = "Include archived sessions in reporting selection")]
     include_archived: bool,
-    #[arg(long)]
+    #[arg(long, help = "Include sub-agent sessions in reporting selection")]
     include_subagents: bool,
     #[arg(
         long,
         default_value = "all",
-        value_name = "global|project|project:PATH"
+        value_name = "global|project|project:PATH",
+        help = "Render global findings, all projects, or one project path"
     )]
     scope: ScopeFilter,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Table,
+        help = "Output format; JSON keeps progress on stderr"
+    )]
     format: OutputFormat,
-    #[arg(long, value_name = "DAYS")]
+    #[arg(
+        long,
+        value_name = "DAYS",
+        help = "Limit selection to this many recent session days"
+    )]
     days: Option<u64>,
     #[arg(
         long,
-        help = "Read exactly this derived store without refreshing raw inputs"
+        help = "Read exactly this derived store without refreshing raw inputs; refresh progress goes to stderr and JSON stdout stays one document"
     )]
     frozen: bool,
-    #[arg(long, value_name = "RFC3339")]
+    #[arg(
+        long,
+        value_name = "RFC3339",
+        help = "Inclusive lower bound for the half-open report period"
+    )]
     since: Option<String>,
-    #[arg(long, value_name = "RFC3339")]
+    #[arg(
+        long,
+        value_name = "RFC3339",
+        help = "Exclusive upper bound for the half-open report period"
+    )]
     until: Option<String>,
 }
 
@@ -245,9 +337,19 @@ impl StoreOptions {
 
 #[derive(Debug, Clone, Args)]
 struct QueryOptions {
-    #[arg(long, short = 's', value_name = "PATH")]
+    #[arg(
+        long,
+        short = 's',
+        value_name = "PATH",
+        help = "Existing derived store; never created or refreshed"
+    )]
     store: Option<PathBuf>,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Table,
+        help = "Output format for bounded query rows"
+    )]
     format: OutputFormat,
 }
 
@@ -291,10 +393,16 @@ struct MonitorStoreOptions {
         long,
         short = 's',
         default_value = ".codexlens.sqlite",
-        value_name = "PATH"
+        value_name = "PATH",
+        help = "Writable derived SQLite store for incremental ingestion"
     )]
     store: PathBuf,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Table,
+        help = "Output format for monitor status"
+    )]
     format: OutputFormat,
     #[arg(
         long,
@@ -313,16 +421,26 @@ struct RefreshOptions {
         long,
         short = 's',
         default_value = ".codexlens.sqlite",
-        value_name = "PATH"
+        value_name = "PATH",
+        help = "Derived SQLite store to create or update"
     )]
     store: PathBuf,
-    #[arg(long, alias = "home", value_name = "PATH")]
+    #[arg(
+        long,
+        alias = "home",
+        value_name = "PATH",
+        help = "Absolute Codex home containing rollout and state inputs"
+    )]
     codex_home: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, help = "Include archived sessions while ingesting")]
     include_archived: bool,
-    #[arg(long)]
+    #[arg(long, help = "Include sub-agent sessions while ingesting")]
     include_subagents: bool,
-    #[arg(long, value_name = "PATH")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Optional configuration file to capture"
+    )]
     config: Option<PathBuf>,
 }
 

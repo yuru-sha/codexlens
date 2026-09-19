@@ -9,6 +9,7 @@ esac
 
 python_bin=${PYTHON:-python3}
 "$python_bin" -B scripts/test_check_privacy.py
+"$python_bin" -B scripts/test_real_history_smoke.py
 "$python_bin" -B scripts/check_privacy.py
 "$python_bin" -B scripts/check_privacy.py --staged
 git diff --check
