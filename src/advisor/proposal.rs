@@ -342,6 +342,10 @@ impl Proposal {
         data: &CanonicalData,
         opportunity: &crate::analysis::views::ViewOpportunity,
     ) -> Result<Self, &'static str> {
+        // overhead_opportunity assigns High only after strict-majority target resolution.
+        if opportunity.confidence != FindingConfidence::High {
+            return Err("the overhead target is missing or ambiguous");
+        }
         let target_path = PathBuf::from(&opportunity.target);
         let expected_target_hash = file_hash(data, &target_path).ok_or(
             "the overhead target has no readable stored instruction baseline or exact scope target",
@@ -1143,6 +1147,47 @@ mod tests {
         assert_eq!(proposal.evidence_count, 2);
         assert!(proposal.proposed_text.is_none());
         assert!(proposal.existing_text.is_none());
+    }
+
+    #[test]
+    fn ambiguous_overhead_target_is_skipped_without_proposal_metadata() {
+        let path = PathBuf::from("/fixture/project/AGENTS.md");
+        let data = data_with_join(vec![file(
+            path.to_str().unwrap(),
+            InstructionScope::ProjectRoot,
+            "root guidance\n",
+        )]);
+        let opportunity = crate::analysis::views::ViewOpportunity {
+            id: "overhead:project:/fixture/project".to_owned(),
+            title: "Reduce startup context overhead".to_owned(),
+            scope: FindingScope::Project(PathBuf::from("/fixture/project")),
+            owner: "/fixture/project".to_owned(),
+            target: path.display().to_string(),
+            impact: "8192 bytes of always-on configuration are included".to_owned(),
+            severity: FindingSeverity::High,
+            confidence: FindingConfidence::Medium,
+            occurrences: 2,
+            distinct_sessions: 1,
+            action: "Review and slim always-on configuration".to_owned(),
+            follow_up: "codexlens inventory --scope project:/fixture/project".to_owned(),
+            evidence: finding(
+                FindingScope::Project(PathBuf::from("/fixture/project")),
+                FindingType::Gap,
+                None,
+            )
+            .evidence,
+            limitations: vec![
+                "An exact instruction target was not selected because scope evidence was missing or ambiguous"
+                    .to_owned(),
+            ],
+        };
+
+        let plan = proposals_for_findings_and_waste(&data, &[], &[opportunity]);
+
+        assert!(plan.proposals.is_empty());
+        assert_eq!(plan.skipped.len(), 1);
+        assert!(plan.skipped[0].proposal.is_none());
+        assert!(plan.skipped[0].reason.contains("missing or ambiguous"));
     }
 
     #[test]
