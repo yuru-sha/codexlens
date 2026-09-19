@@ -18,6 +18,57 @@ class SmokeError(RuntimeError):
     """A bounded, user-actionable smoke-run failure."""
 
 
+LIMITATION_SUMMARIES = {
+    "missing_activity_timestamp": "missing activity timestamp",
+    "missing_lifecycle_timestamp": "missing lifecycle timestamp",
+    "invalid_timestamp": "invalid timestamp",
+    "oversized_line": "oversized input line",
+    "unreadable": "unreadable input",
+    "malformed_json": "malformed JSON",
+    "state_schema_mismatch": "state schema mismatch",
+    "state_query": "state query failure",
+    "metadata_conflict": "conflicting metadata",
+    "opaque_tool_input": "opaque tool input",
+    "unsupported_reader": "unsupported input reader",
+}
+
+
+def nonnegative_count(value: Any) -> int:
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def limitation_summary(limitation: Any) -> dict[str, Any]:
+    if not isinstance(limitation, dict):
+        return {
+            "kind": "unknown",
+            "summary": "coverage limitation",
+            "selected_sessions": 0,
+            "selected_records": 0,
+            "affected_lenses": [],
+        }
+    kind = str(limitation.get("kind", "unknown"))[:64]
+    lenses = limitation.get("affected_lenses")
+    return {
+        "kind": kind,
+        "summary": LIMITATION_SUMMARIES.get(kind, "coverage limitation"),
+        "selected_sessions": nonnegative_count(limitation.get("selected_sessions")),
+        "selected_records": nonnegative_count(limitation.get("selected_records")),
+        "affected_lenses": [str(lens)[:64] for lens in lenses[:8]]
+        if isinstance(lenses, list)
+        else [],
+    }
+
+
+def freshness_summary(analyze_data: dict[str, Any], doctor: dict[str, Any]) -> dict[str, Any]:
+    freshness = analyze_data.get("freshness") or doctor.get("freshness") or {}
+    latest = freshness.get("latest_ingested_at")
+    return {
+        "state": str(freshness.get("state", "unknown"))[:32],
+        "source_count": nonnegative_count(freshness.get("source_count")),
+        "latest_ingested_at": None if latest is None else str(latest)[:64],
+    }
+
+
 def snapshot_inputs(root: Path) -> dict[str, int | str]:
     """Hash regular files without returning their paths or contents."""
 
@@ -86,9 +137,12 @@ def build_report(
             "partial_or_unknown": coverage.get("status") in {"partial", "unknown"}
             or bool(limitations),
             "limitations_count": len(limitations),
+            "limitations": [limitation_summary(limitation) for limitation in limitations],
+            "limitations_omitted": nonnegative_count(coverage.get("limitations_omitted")),
             "session_count": coverage.get("session_count", 0),
             "record_count": coverage.get("record_count", 0),
         },
+        "freshness": freshness_summary(analyze_data, doctor),
         "finding_count": sum(finding_counts.values()),
         "finding_counts": finding_counts,
         "proposal_count": len(rendered) + len(skipped),
@@ -105,14 +159,20 @@ def build_report(
     }
 
 
-def run_process(binary: str, arguments: list[str], timeout: float) -> tuple[float, bytes]:
+def run_process(
+    binary: str,
+    arguments: list[str],
+    timeout: float,
+    *,
+    capture_stdout: bool = False,
+) -> tuple[float, bytes]:
     started = time.monotonic()
     try:
         result = subprocess.run(
             [binary, *arguments],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             check=False,
             timeout=timeout,
         )
@@ -120,7 +180,7 @@ def run_process(binary: str, arguments: list[str], timeout: float) -> tuple[floa
         raise SmokeError("smoke command could not complete") from error
     if result.returncode:
         raise SmokeError(f"smoke command failed with exit code {result.returncode}")
-    return time.monotonic() - started, result.stdout
+    return time.monotonic() - started, result.stdout or b""
 
 
 def run_command(binary: str, arguments: list[str], timeout: float) -> float:
@@ -134,7 +194,12 @@ def run_json(
     timeout: float,
     expected_command: str,
 ) -> tuple[float, dict[str, Any]]:
-    duration, stdout = run_process(binary, arguments, timeout)
+    duration, stdout = run_process(
+        binary,
+        arguments,
+        timeout,
+        capture_stdout=True,
+    )
     try:
         document = json.loads(stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:

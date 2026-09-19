@@ -321,7 +321,9 @@ frozen JSON `analyze`, `doctor`, and `optimize --print`, while capturing no raw
 stdout/stderr in the report. The aggregate report records:
 
 - the selected scope;
-- coverage status, session/record counts, and limitation count;
+- coverage status, session/record counts, bounded limitation summaries, and
+  the omitted limitation count;
+- store freshness state, source-file count, and latest ingestion timestamp;
 - finding count and per-kind finding counts;
 - total, reviewable, and skipped proposal counts;
 - total and per-command runtime; and

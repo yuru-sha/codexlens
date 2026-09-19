@@ -168,8 +168,8 @@ The aggregate-only real-history smoke procedure is
 [`scripts/real_history_smoke.py`](scripts/real_history_smoke.py), documented in
 the [CLI specification](docs/specs/cli.md#real-history-smoke-procedure). Keep
 the selected input, store, report, and any command output outside this
-repository; the runner records only bounded counts, coverage, timings, and
-raw-input immutability.
+repository; the runner records only bounded counts, coverage and limitation
+summaries, store freshness, timings, and raw-input immutability.
 
 The command examples below use an existing derived store and opt into the
 read-only `--frozen` boundary:
