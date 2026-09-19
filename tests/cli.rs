@@ -9,7 +9,8 @@ use codexlens::advisor::DoctorReport;
 use codexlens::discovery::{DiscoveredInput, InputKind, ReaderKind};
 use codexlens::model::{
     DiagnosticKind, InstructionFile, InstructionFileKind, InstructionFileState, InstructionScope,
-    ProjectRootStatus, Surface, SurfaceKind, SurfaceLoadMode, SurfaceScope, SurfaceUsageState,
+    InstructionSnapshot, InstructionSnapshotAccuracy, InstructionSnapshotSource, ProjectRootStatus,
+    SourceRef, Surface, SurfaceKind, SurfaceLoadMode, SurfaceScope, SurfaceUsageState,
 };
 use codexlens::rollout::RolloutParseOptions;
 use codexlens::store::{IngestInputKind, IngestOptions, SCHEMA_VERSION, Store};
@@ -891,6 +892,18 @@ fn rendered_diff_store() -> (PathBuf, PathBuf, PathBuf) {
 }
 
 fn rendered_diff_store_with_content(content: &str) -> (PathBuf, PathBuf, PathBuf) {
+    rendered_diff_store_with_options(content, false)
+}
+
+fn rendered_overhead_store() -> (PathBuf, PathBuf, PathBuf) {
+    let content = "synthetic overhead guidance\n".repeat(400);
+    rendered_diff_store_with_options(&content, true)
+}
+
+fn rendered_diff_store_with_options(
+    content: &str,
+    include_overhead: bool,
+) -> (PathBuf, PathBuf, PathBuf) {
     let source = fixture_store();
     let mut data = {
         let store = Store::open_read_only(&source).unwrap();
@@ -947,6 +960,42 @@ fn rendered_diff_store_with_content(content: &str) -> (PathBuf, PathBuf, PathBuf
         join.resolution.byte_count = content.len();
         join.resolution.truncated = false;
         join.resolution.diagnostics.clear();
+    }
+    if include_overhead {
+        data.surfaces.push(Surface {
+            id: "synthetic-heavy-instruction".to_owned(),
+            kind: SurfaceKind::Instruction,
+            name: "AGENTS.md".to_owned(),
+            path: Some(target.clone()),
+            scope: SurfaceScope::Project(project_root.clone()),
+            enabled: Some(true),
+            load_mode: SurfaceLoadMode::StartupFull,
+            static_bytes: Some(8_192),
+            startup_bytes: Some(8_192),
+            observed_uses: data.sessions.len(),
+            observed_sessions: data.sessions.len(),
+            usage_state: SurfaceUsageState::Used,
+            limitations: Vec::new(),
+        });
+        let content_hash = codexlens::instructions::content_hash(content.as_bytes());
+        data.instruction_snapshots = data
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| InstructionSnapshot {
+                session_id: Some(session.id.clone()),
+                turn_id: None,
+                source: InstructionSnapshotSource::Rollout,
+                accuracy: InstructionSnapshotAccuracy::Observed,
+                content: Some(content.to_owned()),
+                content_hash: Some(content_hash.clone()),
+                byte_count: content.len(),
+                chain: Vec::new(),
+                effective_chain_hash: Some(content_hash.clone()),
+                truncated: false,
+                provenance: SourceRef::rollout(PathBuf::from("synthetic.jsonl"), index + 1),
+            })
+            .collect();
     }
 
     let store_path = temp_store_path("rendered-store");
@@ -1210,6 +1259,65 @@ fn optimize_chain_preserves_the_finding_target_and_evidence() {
             .and_then(|finding| finding["target"].as_str()),
         Some(target_value)
     );
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn optimize_routes_doctor_overhead_to_a_review_only_skip() {
+    let (store, target, project_root) = rendered_overhead_store();
+    let before_target = fs::read(&target).unwrap();
+
+    let doctor = parse_json_report(&run_args(&["doctor", "--format", "json"], &store), "doctor");
+    let overhead = doctor["data"]["top_fixes"]
+        .as_array()
+        .and_then(|fixes| {
+            fixes.iter().find(|fix| {
+                fix["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("overhead:project:"))
+            })
+        })
+        .expect("synthetic overhead opportunity");
+    assert_eq!(
+        overhead["target"],
+        target.display().to_string(),
+        "doctor should retain the concrete overhead target"
+    );
+
+    let optimize = parse_json_report(
+        &run_args(&["optimize", "--print", "--format", "json"], &store),
+        "optimize",
+    );
+    let skipped = optimize["data"]["proposals"]["skipped"].as_array().unwrap();
+    let proposal = skipped
+        .iter()
+        .find(|skipped| {
+            skipped["proposal"]["heuristic"] == "measured always-on startup context overhead"
+        })
+        .map(|skipped| &skipped["proposal"])
+        .expect("overhead proposal metadata");
+    assert_eq!(proposal["target_path"], target.display().to_string());
+    assert_eq!(proposal["action"], "modify");
+    assert_eq!(proposal["review_only"], true);
+    assert!(proposal["proposed_text"].is_null());
+    assert!(
+        proposal["evidence"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())
+    );
+
+    let diff = run_args(&["optimize", "--diff"], &store);
+    assert!(
+        diff.status.success(),
+        "{}",
+        String::from_utf8_lossy(&diff.stderr)
+    );
+    assert!(String::from_utf8_lossy(&diff.stdout).contains("Proposal add"));
+    assert!(String::from_utf8_lossy(&diff.stderr).contains("review-only"));
+    assert_eq!(fs::read(&target).unwrap(), before_target);
 
     let _ = fs::remove_file(store);
     let _ = fs::remove_file(target);

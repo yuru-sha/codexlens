@@ -338,6 +338,57 @@ impl Proposal {
         Ok(proposal)
     }
 
+    fn from_overhead_opportunity(
+        data: &CanonicalData,
+        opportunity: &crate::analysis::views::ViewOpportunity,
+    ) -> Result<Self, &'static str> {
+        // overhead_opportunity assigns High only after strict-majority target resolution.
+        if opportunity.confidence != FindingConfidence::High {
+            return Err("the overhead target is missing or ambiguous");
+        }
+        let target_path = PathBuf::from(&opportunity.target);
+        let expected_target_hash = file_hash(data, &target_path).ok_or(
+            "the overhead target has no readable stored instruction baseline or exact scope target",
+        )?;
+        let evidence = bounded_evidence(&opportunity.evidence, MAX_PROPOSAL_TEXT_BYTES);
+        if evidence.is_empty() {
+            return Err("overhead evidence is unavailable");
+        }
+        let mut limitations = opportunity.limitations.clone();
+        limitations.push(
+            "aggregate startup overhead does not identify a deterministic replacement; review the target manually"
+                .to_owned(),
+        );
+        let proposal = Self {
+            target_scope: opportunity.scope.clone(),
+            target_path,
+            action: ProposalAction::Modify,
+            review_only: true,
+            observed_problem: bounded_excerpt(&opportunity.impact, MAX_PROPOSAL_TEXT_BYTES),
+            evidence_count: opportunity.occurrences,
+            distinct_sessions: opportunity.distinct_sessions,
+            confidence: opportunity.confidence,
+            heuristic: "measured always-on startup context overhead".to_owned(),
+            evidence,
+            proposed_text: None,
+            existing_text: None,
+            source_path: None,
+            expected_target_hash: Some(expected_target_hash),
+            expected_source_hash: None,
+            target_rationale: format!(
+                "The selected owner is {}; the hash-guarded target {} owns the scoped always-on configuration measured in this opportunity",
+                opportunity.owner,
+                opportunity.target
+            ),
+            limitations,
+            review_reminder: "This is review-only metadata; inspect the guarded configuration and edit it manually if the measured overhead still applies".to_owned(),
+        };
+        proposal
+            .validate()
+            .map_err(|_| "overhead proposal validation failed")?;
+        Ok(proposal)
+    }
+
     fn from_review_only_surface(
         surface: &crate::model::Surface,
         opportunity: &crate::analysis::views::ViewOpportunity,
@@ -604,15 +655,24 @@ pub fn proposals_for_findings_and_waste(
 ) -> ProposalPlan {
     let mut plan = proposals_for_findings(data, findings);
     for opportunity in opportunities {
-        if !opportunity.id.starts_with("surface:") {
+        let target_path = if opportunity.id.starts_with("surface:") {
+            surface_target_path(data, opportunity)
+        } else if opportunity.id.starts_with("overhead:") {
+            PathBuf::from(&opportunity.target)
+        } else {
             continue;
-        }
-        match Proposal::from_surface_opportunity(data, opportunity) {
+        };
+        let result = if opportunity.id.starts_with("surface:") {
+            Proposal::from_surface_opportunity(data, opportunity)
+        } else {
+            Proposal::from_overhead_opportunity(data, opportunity)
+        };
+        match result {
             Ok(proposal) if proposal.review_only => {
                 let target_path = proposal.target_path.clone();
                 plan.skipped.push(SkippedProposal {
                     target_path,
-                    reason: "configuration waste is actionable but this proposal is review-only; inspect the guarded declaration and edit configuration manually".to_owned(),
+                    reason: "configuration opportunity is actionable but this proposal is review-only; inspect the guarded declaration and edit configuration manually".to_owned(),
                     proposal: Some(proposal),
                 });
             }
@@ -628,8 +688,8 @@ pub fn proposals_for_findings_and_waste(
                 proposal: None,
             }),
             Err(reason) => plan.skipped.push(SkippedProposal {
-                target_path: surface_target_path(data, opportunity),
-                reason: format!("configuration waste is actionable but {reason}"),
+                target_path,
+                reason: format!("configuration opportunity is actionable but {reason}"),
                 proposal: None,
             }),
         }
@@ -1041,6 +1101,93 @@ mod tests {
             plan.proposals[0].proposed_text.as_deref(),
             Some("repeated guidance\n")
         );
+    }
+
+    #[test]
+    fn overhead_opportunity_is_retained_as_a_review_only_proposal() {
+        let path = PathBuf::from("/fixture/project/AGENTS.md");
+        let data = data_with_join(vec![file(
+            path.to_str().unwrap(),
+            InstructionScope::ProjectRoot,
+            "root guidance\n",
+        )]);
+        let opportunity = crate::analysis::views::ViewOpportunity {
+            id: "overhead:project:/fixture/project".to_owned(),
+            title: "Reduce startup context overhead".to_owned(),
+            scope: FindingScope::Project(PathBuf::from("/fixture/project")),
+            owner: "/fixture/project".to_owned(),
+            target: path.display().to_string(),
+            impact: "8192 bytes of always-on configuration are included".to_owned(),
+            severity: FindingSeverity::High,
+            confidence: FindingConfidence::High,
+            occurrences: 2,
+            distinct_sessions: 1,
+            action: "Review and slim always-on configuration".to_owned(),
+            follow_up: "codexlens inventory --scope project:/fixture/project".to_owned(),
+            evidence: finding(
+                FindingScope::Project(PathBuf::from("/fixture/project")),
+                FindingType::Gap,
+                None,
+            )
+            .evidence,
+            limitations: vec!["synthetic limitation".to_owned()],
+        };
+
+        let plan = proposals_for_findings_and_waste(&data, &[], &[opportunity]);
+
+        assert!(plan.proposals.is_empty());
+        assert_eq!(plan.skipped.len(), 1);
+        let proposal = plan.skipped[0]
+            .proposal
+            .as_ref()
+            .expect("overhead proposal metadata");
+        assert!(proposal.review_only);
+        assert_eq!(proposal.action, ProposalAction::Modify);
+        assert_eq!(proposal.target_path, path);
+        assert_eq!(proposal.evidence_count, 2);
+        assert!(proposal.proposed_text.is_none());
+        assert!(proposal.existing_text.is_none());
+    }
+
+    #[test]
+    fn ambiguous_overhead_target_is_skipped_without_proposal_metadata() {
+        let path = PathBuf::from("/fixture/project/AGENTS.md");
+        let data = data_with_join(vec![file(
+            path.to_str().unwrap(),
+            InstructionScope::ProjectRoot,
+            "root guidance\n",
+        )]);
+        let opportunity = crate::analysis::views::ViewOpportunity {
+            id: "overhead:project:/fixture/project".to_owned(),
+            title: "Reduce startup context overhead".to_owned(),
+            scope: FindingScope::Project(PathBuf::from("/fixture/project")),
+            owner: "/fixture/project".to_owned(),
+            target: path.display().to_string(),
+            impact: "8192 bytes of always-on configuration are included".to_owned(),
+            severity: FindingSeverity::High,
+            confidence: FindingConfidence::Medium,
+            occurrences: 2,
+            distinct_sessions: 1,
+            action: "Review and slim always-on configuration".to_owned(),
+            follow_up: "codexlens inventory --scope project:/fixture/project".to_owned(),
+            evidence: finding(
+                FindingScope::Project(PathBuf::from("/fixture/project")),
+                FindingType::Gap,
+                None,
+            )
+            .evidence,
+            limitations: vec![
+                "An exact instruction target was not selected because scope evidence was missing or ambiguous"
+                    .to_owned(),
+            ],
+        };
+
+        let plan = proposals_for_findings_and_waste(&data, &[], &[opportunity]);
+
+        assert!(plan.proposals.is_empty());
+        assert_eq!(plan.skipped.len(), 1);
+        assert!(plan.skipped[0].proposal.is_none());
+        assert!(plan.skipped[0].reason.contains("missing or ambiguous"));
     }
 
     #[test]
