@@ -1,6 +1,7 @@
 # Final regression and safety audit
 
-Status: passed for the Phase 6 release-preparation candidate.
+Status: historical evidence for the Phase 6 release-preparation candidate;
+not a current readiness approval while cclens rebaseline #143 remains pending.
 
 Audited implementation/test candidate: `481cd60b8549273b367dbd364c74fb8a6b70a937`.
 This audit record is a documentation-only follow-up and does not change the
