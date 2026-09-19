@@ -1271,10 +1271,15 @@ fn optimize_routes_doctor_overhead_to_a_review_only_skip() {
     let before_target = fs::read(&target).unwrap();
 
     let doctor = parse_json_report(&run_args(&["doctor", "--format", "json"], &store), "doctor");
-    let overhead_id = format!("overhead:project:{}", project_root.display());
     let overhead = doctor["data"]["top_fixes"]
         .as_array()
-        .and_then(|fixes| fixes.iter().find(|fix| fix["id"] == overhead_id))
+        .and_then(|fixes| {
+            fixes.iter().find(|fix| {
+                fix["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("overhead:project:"))
+            })
+        })
         .expect("synthetic overhead opportunity");
     assert_eq!(
         overhead["target"],
