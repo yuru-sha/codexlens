@@ -1,7 +1,9 @@
 # MVP readiness review
 
-Status: Phase 5 implementation complete; product rebaseline #143 is pending,
-so this document is not a current release-readiness approval.
+Status: Rebaseline #143 was closed by merged #156; its implementation and
+synthetic/CLI gates are complete, and current main hosted CI passes. This
+document is not a current release-readiness approval until an owner-authorized
+real-history smoke run is recorded for an explicitly selected local source.
 
 Review scope: the refactor, Phase 5 input/reporting work, and safe
 proposal-apply workflow through the historical MVP endpoint. The review checks the
@@ -72,14 +74,16 @@ The store-schema wording for `corrections` and `findings` was clarified and
 closed in [#54](https://github.com/yuru-sha/codexlens/issues/54); the current
 CLI derives those results in memory from canonical data.
 
-## Product rebaseline gate
+## Product rebaseline and remaining readiness gate
 
-The historical Phase 5 gate does not establish completion of the full cclens
-counterpart contract. Issue [#143](https://github.com/yuru-sha/codexlens/issues/143)
-must still be satisfied for the documented CLI help, every required view, the
-complete optimize briefing, bounded synthetic end-to-end evidence, and the
-aggregate-only real-history smoke procedure before a new readiness or release
-claim is made.
+The product rebaseline in [#143](https://github.com/yuru-sha/codexlens/issues/143)
+was closed by merged [#156](https://github.com/yuru-sha/codexlens/pull/156).
+That delivery completed the documented CLI help, required views, optimize
+briefing, bounded synthetic end-to-end evidence, and aggregate-only
+real-history smoke procedure; current main hosted CI passes. The remaining
+readiness evidence is an owner-authorized real-history smoke run against an
+explicitly selected local source before a new readiness or release claim is
+made.
 
 ## Phase 6 entry condition
 
