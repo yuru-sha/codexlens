@@ -213,10 +213,17 @@ def run_json(
 
 def outside(path: Path, root: Path) -> bool:
     try:
-        path.resolve().relative_to(root.resolve())
+        path.relative_to(root)
     except ValueError:
         return True
     return False
+
+
+def resolve_path(path: Path, description: str) -> Path:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError) as error:
+        raise SmokeError(f"could not resolve {description}") from error
 
 
 def same_output_target(store: Path, report: Path) -> bool:
@@ -258,10 +265,10 @@ def main(argv: list[str] | None = None) -> int:
             raise SmokeError("--codex-home must be an existing absolute directory")
         if not store.is_absolute() or not report_path.is_absolute():
             raise SmokeError("--store and --report must be absolute paths")
-        codex_home = codex_home.resolve()
-        store = store.resolve()
-        report_path = report_path.resolve()
-        repository_root = Path(__file__).resolve().parent.parent
+        codex_home = resolve_path(codex_home, "--codex-home path")
+        store = resolve_path(store, "--store path")
+        report_path = resolve_path(report_path, "--report path")
+        repository_root = resolve_path(Path(__file__), "repository root").parent.parent
         if not outside(store, repository_root) or not outside(report_path, repository_root):
             raise SmokeError("--store and --report must stay outside the repository")
         if same_output_target(store, report_path):

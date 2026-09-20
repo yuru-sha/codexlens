@@ -1,5 +1,6 @@
 """Synthetic contract checks for the aggregate-only real-history smoke runner."""
 
+import os
 from contextlib import redirect_stderr
 import io
 import json
@@ -47,12 +48,14 @@ class RealHistorySmokeTests(unittest.TestCase):
             codex_home.mkdir()
             store = root / "store.sqlite"
             store.write_text("store sentinel", encoding="utf-8")
+            hard_link = root / "store-hard-link.sqlite"
+            os.link(store, hard_link)
             alias_parent = root / "alias-parent"
             alias_parent.mkdir()
             canonical_alias = alias_parent / ".." / store.name
             before = store.read_bytes()
 
-            for report in (store, canonical_alias):
+            for report in (store, canonical_alias, hard_link):
                 error = self.run_rejected_smoke(codex_home, store, report)
                 self.assertIn("different files", error)
                 self.assertEqual(store.read_bytes(), before)
@@ -78,6 +81,36 @@ class RealHistorySmokeTests(unittest.TestCase):
                 error = self.run_rejected_smoke(codex_home, store, report)
                 self.assertIn("outside the repository", error)
                 self.assertEqual(local_target.read_bytes(), before)
+
+    def test_unresolvable_output_paths_fail_with_bounded_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            store = root / "store.sqlite"
+            report = root / "report.json"
+            store.write_text("store sentinel", encoding="utf-8")
+            report.write_text("report sentinel", encoding="utf-8")
+            before = (store.read_bytes(), report.read_bytes())
+            original_resolve = Path.resolve
+
+            for unresolvable_path, description in (
+                (store, "--store path"),
+                (report, "--report path"),
+            ):
+                def fail_resolution(path, *args, **kwargs):
+                    if path == unresolvable_path:
+                        raise RuntimeError("symlink loop: /private/path")
+                    return original_resolve(path, *args, **kwargs)
+
+                with patch.object(
+                    Path, "resolve", autospec=True, side_effect=fail_resolution
+                ):
+                    error = self.run_rejected_smoke(codex_home, store, report)
+
+                self.assertIn(f"could not resolve {description}", error)
+                self.assertNotIn("/private/path", error)
+                self.assertEqual((store.read_bytes(), report.read_bytes()), before)
 
     def test_runner_discards_non_json_output_but_keeps_json_stdout(self):
         completed = subprocess.CompletedProcess(
