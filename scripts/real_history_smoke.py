@@ -219,6 +219,17 @@ def outside(path: Path, root: Path) -> bool:
     return False
 
 
+def same_output_target(store: Path, report: Path) -> bool:
+    if store == report:
+        return True
+    try:
+        return store.samefile(report)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise SmokeError("could not compare --store and --report paths") from error
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codex-home", required=True, help="explicit absolute Codex input directory")
@@ -250,6 +261,11 @@ def main(argv: list[str] | None = None) -> int:
         codex_home = codex_home.resolve()
         store = store.resolve()
         report_path = report_path.resolve()
+        repository_root = Path(__file__).resolve().parent.parent
+        if not outside(store, repository_root) or not outside(report_path, repository_root):
+            raise SmokeError("--store and --report must stay outside the repository")
+        if same_output_target(store, report_path):
+            raise SmokeError("--store and --report must be different files")
         if not outside(store, codex_home) or not outside(report_path, codex_home):
             raise SmokeError("--store and --report must stay outside --codex-home")
         if args.timeout <= 0:
