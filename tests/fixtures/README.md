@@ -52,6 +52,10 @@ events, and a malformed line.
 `rollout/coverage-limitations.jsonl` covers a bounded incomplete turn and a
 valid sibling event for coverage-reporting tests.
 
+`rollout/filtered-coverage-period.jsonl` covers a complete in-period session
+and an out-of-period session with invalid/missing event timestamps and a
+source-scoped diagnostic.
+
 `analysis/command-contract.jsonl` is the bounded golden rollout for the CLI
 contract: a global recurring failure, a project recurring failure, a repeated
 edit sequence, and classified user steering. Its companion test adds synthetic

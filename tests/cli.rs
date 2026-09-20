@@ -444,6 +444,25 @@ fn coverage_timestamp_fallback_store() -> PathBuf {
     path
 }
 
+fn filtered_coverage_period_store() -> PathBuf {
+    let path = temp_store_path("filtered-coverage-period");
+    let mut store = Store::open(&path).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rollout/filtered-coverage-period.jsonl");
+    store
+        .ingest_rollout_file(&fixture, &RolloutParseOptions::default())
+        .unwrap();
+    let changed = store
+        .connection()
+        .execute(
+            "UPDATE messages SET timestamp = 'invalid-out-of-period' WHERE session_id = 'fixture-filtered-out-of-range' AND role = 'assistant'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    path
+}
+
 fn coverage_limitation_store() -> PathBuf {
     let path = fixture_store();
     let mut store = Store::open(&path).unwrap();
@@ -2971,6 +2990,49 @@ fn filtered_coverage_preserves_invalid_event_timestamps() {
     assert_eq!(coverage["state"], "partial");
     assert_eq!(coverage["missing_activity_timestamps"], 0);
     assert!(coverage["invalid_activity_timestamps"].as_u64().unwrap() > 0);
+    assert!(
+        coverage["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|limitation| {
+                limitation["kind"] == "invalid_timestamp"
+                    && limitation["source"]["line"].is_number()
+            })
+    );
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn filtered_coverage_ignores_out_of_period_unknowns_and_diagnostics() {
+    let store = filtered_coverage_period_store();
+    let json_args = [
+        "analyze",
+        "--format",
+        "json",
+        "--since",
+        "2026-01-03T00:00:00Z",
+        "--until",
+        "2026-01-04T00:00:00Z",
+    ];
+
+    let output = run_args(&json_args, &store);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document = parse_json_report(&output, "analyze");
+    let coverage = &document["data"]["coverage"];
+    assert_eq!(coverage["status"], "observed");
+    assert_eq!(coverage["included_sessions"], 1);
+    assert_eq!(coverage["included_records"], 5);
+    assert_eq!(coverage["invalid_activity_timestamps"], 0);
+    assert_eq!(coverage["missing_activity_timestamps"], 0);
+    assert_eq!(coverage["limitations"], json!([]));
+    assert_eq!(coverage["unknown_timestamp_events"], 1);
+    assert_eq!(coverage["state"], "partial");
 
     let _ = fs::remove_file(store);
 }

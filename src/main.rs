@@ -2933,17 +2933,9 @@ fn period_report_coverage_from_data(
         report_coverage_for_period_selection(&eligible_data, period, &selected.data);
     report_coverage.session_count = selected.coverage.included_sessions;
     report_coverage.record_count = selected.coverage.included_records;
-    report_coverage.status = match selected.coverage.state {
-        PeriodCoverageState::Empty => "empty",
-        PeriodCoverageState::Complete
-            if report_coverage.limitations.is_empty()
-                && report_coverage.limitations_omitted == 0 =>
-        {
-            "observed"
-        }
-        PeriodCoverageState::Complete | PeriodCoverageState::Partial => "partial",
+    if matches!(selected.coverage.state, PeriodCoverageState::Empty) {
+        report_coverage.status = "empty".to_owned();
     }
-    .to_owned();
     (report_coverage, selected.coverage)
 }
 
