@@ -3436,7 +3436,16 @@ fn readiness_document_tracks_phase5_completion_and_phase6_entry_condition() {
 
     assert!(readme.contains("docs/readiness/mvp.md"));
     assert!(readme.contains("docs/specs/post-mvp.md"));
+    assert!(readme.contains("#156"));
+    assert!(readme.contains("owner-authorized"));
+    assert!(readme.contains("real-history smoke run"));
     assert!(readiness.contains("../specs/post-mvp.md"));
+    assert!(readiness.contains("#156"));
+    assert!(readiness.contains("owner-authorized"));
+    assert!(readiness.contains("real-history smoke run"));
+    assert!(!readme.contains("being finalized in"));
+    assert!(!readme.contains("remains pending the cclens contract"));
+    assert!(!readiness.contains("product rebaseline #143 is pending"));
     for marker in [
         "cargo fmt --all -- --check",
         "cargo clippy --all-targets --all-features -- -D warnings",
@@ -3474,8 +3483,9 @@ fn final_audit_records_release_evidence_and_boundaries() {
 
     assert!(readme.contains("docs/readiness/final-audit.md"));
     assert!(readiness.contains("final-audit.md"));
-    assert!(audit.contains("#143 remains pending"));
-    assert!(audit.contains("not a current readiness approval"));
+    assert!(audit.contains("#143 was pending when this audit ran"));
+    assert!(audit.contains("current readiness approval"));
+    assert!(!audit.contains("#143 remains pending"));
     for marker in [
         "cargo fmt --all -- --check",
         "cargo clippy --all-targets --all-features -- -D warnings",
