@@ -655,12 +655,14 @@ fn report_coverage_filtered(
         observations.observe_timestamp(
             session.created_at.as_deref(),
             &session.provenance,
+            &record_times,
             "session.created_at",
             "missing_activity_timestamp",
         );
         observations.observe_timestamp(
             session.updated_at.as_deref(),
             &session.provenance,
+            &record_times,
             "session.updated_at",
             "missing_activity_timestamp",
         );
@@ -669,12 +671,14 @@ fn report_coverage_filtered(
         observations.observe_timestamp(
             turn.started_at.as_deref(),
             &turn.provenance,
+            &record_times,
             "turn.started_at",
             "missing_lifecycle_timestamp",
         );
         observations.observe_timestamp(
             turn.completed_at.as_deref(),
             &turn.provenance,
+            &record_times,
             "turn.completed_at",
             "missing_lifecycle_timestamp",
         );
@@ -692,6 +696,7 @@ fn report_coverage_filtered(
         observations.observe_timestamp(
             record.timestamp.as_deref(),
             &record.provenance,
+            &record_times,
             "record.timestamp",
             "missing_activity_timestamp",
         );
@@ -724,7 +729,7 @@ fn report_coverage_filtered(
         );
     }
     for diagnostic in &data.diagnostics {
-        observations.add_diagnostic(diagnostic);
+        observations.add_diagnostic(diagnostic, &record_times);
     }
 
     let CoverageObservations {
@@ -836,10 +841,15 @@ impl<'period, 'source> CoverageObservations<'period, 'source> {
         &mut self,
         timestamp: Option<&str>,
         source: &'source SourceRef,
+        record_times: &HashMap<SourceKey, Option<Timestamp>>,
         field: &str,
         missing_kind: &'static str,
     ) {
+        let source_record_outside_period = self.source_record_outside_period(source, record_times);
         let Some(timestamp) = timestamp else {
+            if source_record_outside_period {
+                return;
+            }
             self.missing_activity_timestamps += 1;
             self.add_limitation(
                 missing_kind,
@@ -851,6 +861,9 @@ impl<'period, 'source> CoverageObservations<'period, 'source> {
             return;
         };
         let Some(parsed) = Timestamp::parse(timestamp) else {
+            if source_record_outside_period {
+                return;
+            }
             self.invalid_activity_timestamps += 1;
             self.add_limitation(
                 "invalid_timestamp",
@@ -867,6 +880,20 @@ impl<'period, 'source> CoverageObservations<'period, 'source> {
         self.timestamps.push((parsed, timestamp.to_owned()));
     }
 
+    fn source_record_outside_period(
+        &self,
+        source: &SourceRef,
+        record_times: &HashMap<SourceKey, Option<Timestamp>>,
+    ) -> bool {
+        self.period.is_some_and(|period| {
+            record_times
+                .get(&(source.path.clone(), source.line))
+                .copied()
+                .flatten()
+                .is_some_and(|timestamp| !period.contains(timestamp))
+        })
+    }
+
     fn observe_event_timestamp(
         &mut self,
         value: Option<&str>,
@@ -876,16 +903,23 @@ impl<'period, 'source> CoverageObservations<'period, 'source> {
         missing_kind: &'static str,
     ) {
         if let Some(value) = value {
-            self.observe_timestamp(Some(value), source, field, missing_kind);
+            self.observe_timestamp(Some(value), source, record_times, field, missing_kind);
         } else if let Some(timestamp) = event_timestamp(None, source, record_times) {
             let formatted = timestamp.format();
-            self.observe_timestamp(Some(&formatted), source, field, missing_kind);
+            self.observe_timestamp(Some(&formatted), source, record_times, field, missing_kind);
         } else {
-            self.observe_timestamp(None, source, field, missing_kind);
+            self.observe_timestamp(None, source, record_times, field, missing_kind);
         }
     }
 
-    fn add_diagnostic(&mut self, diagnostic: &'source crate::model::CanonicalDiagnostic) {
+    fn add_diagnostic(
+        &mut self,
+        diagnostic: &'source crate::model::CanonicalDiagnostic,
+        record_times: &HashMap<SourceKey, Option<Timestamp>>,
+    ) {
+        if self.source_record_outside_period(&diagnostic.source, record_times) {
+            return;
+        }
         self.add_limitation(
             diagnostic.kind.as_str(),
             &diagnostic.source,

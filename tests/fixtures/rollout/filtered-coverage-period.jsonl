@@ -1,0 +1,11 @@
+{"timestamp":"2026-01-03T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-filtered-in-range","cwd":"/fixture/filtered/in-range","project":"/fixture/filtered/in-range","updated_at":"2026-01-03T00:00:04.000Z"}}
+{"timestamp":"2026-01-03T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"fixture-filtered-in-range-turn","cwd":"/fixture/filtered/in-range"}}
+{"timestamp":"2026-01-03T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Synthetic in-range user message."}]}}
+{"timestamp":"2026-01-03T00:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Synthetic in-range assistant message."}]}}
+{"timestamp":"2026-01-03T00:00:04.000Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"fixture-filtered-in-range-turn"}}
+{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-filtered-out-of-range","cwd":"/fixture/filtered/out-of-range","project":"/fixture/filtered/out-of-range","updated_at":"2026-01-01T00:00:04.000Z"}}
+{"timestamp":"2026-01-01T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"fixture-filtered-out-of-range-turn","cwd":"/fixture/filtered/out-of-range"}}
+{"timestamp":"2026-01-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","timestamp":"invalid-out-of-period","content":[{"type":"output_text","text":"Synthetic out-of-period invalid timestamp."}]}}
+{"timestamp":"2026-01-01T00:00:03.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Synthetic out-of-period missing timestamp."}]}}
+{"timestamp":"2026-01-01T00:00:04.000Z","type":"event_msg","payload":{"type":"turn_complete","turn_id":"fixture-filtered-out-of-range-turn"}}
+{"timestamp":"2026-01-01T00:00:05.000Z","type":"session_meta","payload":{"id":"fixture-filtered-out-of-range","cwd":"/fixture/filtered/out-of-range-conflict","project":"/fixture/filtered/out-of-range"}}
