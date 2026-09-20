@@ -3493,10 +3493,9 @@ mod tests {
 
     #[test]
     fn renderer_like_explicit_streams_use_fallback_output() {
-        let data = parse(
-            r#"{"type":"session_meta","payload":{"id":"fixture-explicit-renderer-streams"}}
-{"type":"response_item","payload":{"type":"custom_tool_call_output","stdout":"Script completed\nerror: explicit stdout failure","stderr":"Script failed\nexplicit stderr failure"}}"#,
-        );
+        let data = parse(include_str!(
+            "../tests/fixtures/rollout/explicit-renderer-streams.jsonl"
+        ));
 
         let result = &data.tool_results[0];
         assert_eq!(result.outcome, ToolOutcome::Failed);
