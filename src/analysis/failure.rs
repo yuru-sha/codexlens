@@ -440,10 +440,43 @@ mod tests {
             ))),
         );
         let data = normalize_rollout(&parsed);
+
+        let structured_wrapper = data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-structured-wrapper-failure"))
+            .expect("structured wrapper failure call");
+        assert_eq!(structured_wrapper.tool_name.as_deref(), Some("exec"));
+        assert_eq!(structured_wrapper.command, None);
+        assert_eq!(structured_wrapper.provenance.line, Some(29));
+        let input = structured_wrapper.input_summary.as_deref().unwrap();
+        assert!(input.contains("*** Update File: src/wrapper.rs"));
+        assert!(input.len() <= crate::model::MAX_TOOL_SUMMARY_BYTES);
+
+        let structured_wrapper_result = data
+            .tool_results
+            .iter()
+            .find(|result| result.call_id.as_deref() == Some("fixture-structured-wrapper-failure"))
+            .expect("structured wrapper failure result");
+        assert_eq!(structured_wrapper_result.command, None);
+        assert_eq!(structured_wrapper_result.exit_code, Some(1));
+        assert_eq!(structured_wrapper_result.outcome, ToolOutcome::Failed);
+        assert_eq!(structured_wrapper_result.provenance.line, Some(30));
+        assert!(data.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == crate::model::DiagnosticKind::OpaqueToolInput
+                && diagnostic.source.line == Some(29)
+        }));
+        assert!(
+            data.file_operations
+                .iter()
+                .all(|operation| !operation.path.ends_with("src/wrapper.rs"))
+        );
+
         let context = AnalysisContext::new(&data);
         let events = context.failure_events();
 
         assert_eq!(events.len(), 4);
+        assert!(events.iter().all(|event| event.source.line != Some(30)));
         assert!(events.iter().all(|event| {
             event.tool == "exec_command"
                 && event.family == "cargo test"
@@ -481,6 +514,12 @@ mod tests {
             )),
         );
         let renderer_data = normalize_rollout(&parsed_renderer_command);
+        let renderer_call = renderer_data
+            .tool_calls
+            .iter()
+            .find(|call| call.call_id.as_deref() == Some("fixture-wrapper-renderer-call"))
+            .unwrap();
+        assert_eq!(renderer_call.command, None);
         let renderer_context = AnalysisContext::new(&renderer_data);
         let renderer_events = renderer_context.failure_events();
         assert!(renderer_events.is_empty());
