@@ -502,9 +502,19 @@ mod tests {
                 .iter()
                 .map(|event| event.category.as_str())
                 .collect::<Vec<_>>(),
-            vec!["exit_code_23", "timeout", "renderer_failed"]
+            vec!["exit_code_23", "timeout", "renderer_failed", "output_error"]
         );
-        assert!(events.iter().all(|event| event.structured));
+        assert!(events[..3].iter().all(|event| event.structured));
+        assert!(!events[3].structured);
+        let renderer_payload_event = events
+            .iter()
+            .find(|event| event.session_id == "fixture-renderer-failure")
+            .unwrap();
+        assert!(
+            !renderer_payload_event
+                .description
+                .contains("command output did not include")
+        );
         assert!(
             !events
                 .iter()
