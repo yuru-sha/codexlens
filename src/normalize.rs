@@ -1926,11 +1926,7 @@ fn tool_result_from_payload(
         .or_else(|| payload.get("exit"))
         .and_then(value_i64);
     let status = string_field(payload, &["status"]);
-    let renderer = parse_renderer_status(&[
-        renderer_output.as_deref(),
-        stdout.as_deref(),
-        stderr.as_deref(),
-    ]);
+    let renderer = parse_renderer_status(&[renderer_output.as_deref()]);
     let (outcome, outcome_source) = classify_outcome(
         exit_code,
         status.as_deref(),
@@ -1948,7 +1944,7 @@ fn tool_result_from_payload(
         turn_id,
         command: payload.get("command").and_then(result_command_value),
         cwd: string_field(payload, &["cwd"]),
-        stdout: stdout.or(renderer_output),
+        stdout,
         stderr,
         duration_ms: payload
             .get("duration_ms")
@@ -3448,6 +3444,9 @@ mod tests {
             data.tool_results[1].outcome_source,
             OutcomeSource::ParsedRenderer
         );
+        assert_eq!(data.tool_results[1].stdout, None);
+        let deduplication_key = data.tool_results[1].deduplication_key.as_deref().unwrap();
+        assert!(!deduplication_key.contains("command output did not include"));
         assert_eq!(data.tool_results[2].outcome, ToolOutcome::Failed);
         assert_eq!(data.tool_results[2].status.as_deref(), Some("timeout"));
         assert_eq!(
@@ -3468,11 +3467,11 @@ mod tests {
             data.tool_results[5].outcome_source,
             OutcomeSource::ParsedRenderer
         );
-        assert_eq!(data.tool_results[6].outcome, ToolOutcome::Succeeded);
-        assert_eq!(data.tool_results[6].status.as_deref(), Some("completed"));
+        assert_eq!(data.tool_results[6].outcome, ToolOutcome::Failed);
+        assert_eq!(data.tool_results[6].status, None);
         assert_eq!(
             data.tool_results[6].outcome_source,
-            OutcomeSource::ParsedRenderer
+            OutcomeSource::OutputText
         );
         assert_eq!(data.tool_results[7].outcome, ToolOutcome::Unknown);
         assert_eq!(data.tool_results[7].outcome_source, OutcomeSource::Unknown);
@@ -3489,6 +3488,32 @@ mod tests {
         assert_eq!(
             data.tool_results[0].outcome_source,
             OutcomeSource::OutputText
+        );
+    }
+
+    #[test]
+    fn renderer_like_explicit_streams_use_fallback_output() {
+        let data = parse(
+            r#"{"type":"session_meta","payload":{"id":"fixture-explicit-renderer-streams"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","stdout":"Script completed\nerror: explicit stdout failure","stderr":"Script failed\nexplicit stderr failure"}}"#,
+        );
+
+        let result = &data.tool_results[0];
+        assert_eq!(result.outcome, ToolOutcome::Failed);
+        assert_eq!(result.outcome_source, OutcomeSource::OutputText);
+        assert_eq!(result.exit_code, None);
+        assert_eq!(result.status, None);
+        assert!(
+            result
+                .stdout
+                .as_deref()
+                .is_some_and(|value| value.starts_with("Script completed"))
+        );
+        assert!(
+            result
+                .stderr
+                .as_deref()
+                .is_some_and(|value| value.starts_with("Script failed"))
         );
     }
 
