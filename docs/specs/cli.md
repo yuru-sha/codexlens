@@ -320,6 +320,10 @@ evidence rather than treating it as healthy. The runner executes `refresh`,
 frozen JSON `analyze`, `doctor`, and `optimize --print`, while capturing no raw
 stdout/stderr in the report. The aggregate report records:
 
+Before `refresh`, the runner canonicalizes both output paths and rejects
+identical or same-file targets and any `--store` or `--report` path inside the
+repository.
+
 - the selected scope;
 - coverage status, session/record counts, bounded limitation summaries, and
   the omitted limitation count;
