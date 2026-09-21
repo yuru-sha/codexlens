@@ -2159,6 +2159,7 @@ fn command_contract_finding_stays_consistent_across_cli_chain() {
         .iter()
         .find(|finding| {
             finding["kind"] == analyze_finding["kind"]
+                && finding["key"] == analyze_finding["key"]
                 && finding["scope"] == analyze_finding["scope"]
                 && finding["target"] == waste_finding["target"]
         })
