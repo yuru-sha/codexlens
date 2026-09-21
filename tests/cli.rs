@@ -2119,6 +2119,126 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
 }
 
 #[test]
+fn command_contract_finding_stays_consistent_across_cli_chain() {
+    let store = command_contract_store();
+    let analyze = parse_json_report(
+        &run_args(&["analyze", "--format", "json"], &store),
+        "analyze",
+    );
+    let analyze_finding = analyze["data"]["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|group| group["findings"].as_array().unwrap())
+        .find(|finding| finding["kind"] == "stuck" && finding["key"] == "src/lib.rs|loop")
+        .expect("stable stuck finding in analyze");
+
+    let waste = parse_json_report(&run_args(&["waste", "--format", "json"], &store), "waste");
+    let waste_finding = waste["data"]["opportunities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["id"] == "stuck:src/lib.rs|loop")
+        .expect("same stable finding in waste");
+
+    let doctor = parse_json_report(&run_args(&["doctor", "--format", "json"], &store), "doctor");
+    let doctor_finding = doctor["data"]["top_fixes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["id"] == waste_finding["id"])
+        .expect("same stable finding in doctor");
+
+    let optimize = parse_json_report(
+        &run_args(&["optimize", "--print", "--format", "json"], &store),
+        "optimize",
+    );
+    let optimize_finding = optimize["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| {
+            finding["kind"] == analyze_finding["kind"]
+                && finding["key"] == analyze_finding["key"]
+                && finding["scope"] == analyze_finding["scope"]
+                && finding["target"] == waste_finding["target"]
+        })
+        .expect("same stable finding in optimize");
+    let optimize_opportunity = optimize["data"]["configuration_waste"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["id"] == waste_finding["id"])
+        .expect("same stable opportunity in optimize");
+
+    assert_eq!(analyze_finding["occurrences"], 4);
+    assert_eq!(analyze_finding["distinct_sessions"], 1);
+    assert_eq!(analyze_finding["affected_paths"][0], "src/lib.rs");
+    assert_eq!(waste_finding["id"], "stuck:src/lib.rs|loop");
+    assert_eq!(waste_finding["scope"], analyze_finding["scope"]);
+
+    let analyze_evidence = analyze_finding["evidence"].as_array().unwrap();
+    assert!(!analyze_evidence.is_empty());
+    let expected_evidence =
+        serde_json::Value::Array(analyze_evidence.iter().take(3).cloned().collect());
+    assert_eq!(expected_evidence.as_array().unwrap().len(), 3);
+    for (command, finding) in [
+        ("waste", waste_finding),
+        ("doctor", doctor_finding),
+        ("optimize", optimize_finding),
+        ("optimize waste", optimize_opportunity),
+    ] {
+        assert_eq!(
+            finding["scope"], analyze_finding["scope"],
+            "{command} scope"
+        );
+        assert_eq!(finding["target"], "src/lib.rs", "{command} target");
+        assert_eq!(
+            finding["action"], analyze_finding["suggested_action"],
+            "{command} action"
+        );
+        assert_eq!(finding["occurrences"], analyze_finding["occurrences"]);
+        assert_eq!(
+            finding["distinct_sessions"],
+            analyze_finding["distinct_sessions"]
+        );
+        assert_eq!(finding["evidence"], expected_evidence, "{command} evidence");
+    }
+    assert_eq!(optimize_finding["problem"], analyze_finding["summary"]);
+    assert_eq!(optimize_opportunity["id"], waste_finding["id"]);
+
+    let failure_finding = analyze["data"]["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|group| group["findings"].as_array().unwrap())
+        .find(|finding| {
+            finding["kind"] == "failure" && finding["scope"]["value"] == "/fixture/project-a"
+        })
+        .expect("synthetic project failure finding");
+    let failures = parse_json_report(
+        &run_args(&["failures", "--format", "json"], &store),
+        "failures",
+    );
+    let failure_opportunity = failures["data"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| {
+            row["category"] == "exit_code_1"
+                && row["opportunity"]["scope"] == failure_finding["scope"]
+        })
+        .map(|row| &row["opportunity"])
+        .expect("same canonical action in failures");
+    assert_eq!(
+        failure_opportunity["action"],
+        failure_finding["suggested_action"]
+    );
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
 fn command_contract_fixture_covers_empty_and_partial_reports() {
     let commands: &[(&[&str], &str)] = &[
         (&["analyze", "--format", "json"], "analyze"),

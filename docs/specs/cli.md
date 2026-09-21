@@ -239,7 +239,7 @@ added only as optional, bounded fields that older readers can ignore.
 | `stuck` | `measure`, `rows`, `omitted_count`; rows contain `path`, optional `session_id`, bounded `sequence` and `observed_commands`, and an actionable `opportunity` |
 | `doctor` | canonical finding-report fields plus `top_fixes`, `top_fixes_omitted_count`, `cost`, `config_pruning`, `looks_healthy`, and `analysis_sufficient`; known evidence-backed user-controlled overhead may appear in `top_fixes` |
 | `sql` / `query` | `columns`, `rows`, `omitted_column_count`, `omitted_count`; `query` is the same data with its own command label |
-| `optimize --print` | `findings`, `configuration_waste`, `overhead`, `proposals`, `next_steps`, and `limitations`; findings and waste carry explicit target/action/evidence |
+| `optimize --print` | `findings`, `configuration_waste`, `overhead`, `proposals`, `next_steps`, and `limitations`; findings include a bounded canonical `key`, and findings and waste carry explicit target/action/evidence |
 | `optimize --diff` | `rendered`, `skipped`, `rendered_omitted_count`, and `skipped_omitted_count`; filtered periods additionally include bounded `freshness` and `coverage` inside `data` |
 
 Human output uses the same field order as the corresponding table renderer:
