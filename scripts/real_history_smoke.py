@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -69,8 +70,10 @@ def freshness_summary(analyze_data: dict[str, Any], doctor: dict[str, Any]) -> d
     }
 
 
-def snapshot_inputs(root: Path) -> dict[str, int | str]:
-    """Hash regular files without returning their paths or contents."""
+def snapshot_inputs(
+    root: Path, output_paths: tuple[Path, ...] = ()
+) -> dict[str, int | str]:
+    """Hash inputs without exposing paths, rejecting output aliases."""
 
     entries: list[bytes] = []
     byte_count = 0
@@ -88,6 +91,15 @@ def snapshot_inputs(root: Path) -> dict[str, int | str]:
             path = Path(directory) / name
             if path.is_symlink() or not path.is_file():
                 continue
+            for output in output_paths:
+                try:
+                    aliases_input = path.samefile(output)
+                except FileNotFoundError:
+                    continue
+                except OSError as error:
+                    raise SmokeError("could not compare smoke outputs with Codex inputs") from error
+                if aliases_input:
+                    raise SmokeError("smoke output aliases a selected Codex input")
             digest = hashlib.sha256()
             try:
                 with path.open("rb") as stream:
@@ -230,9 +242,40 @@ def same_output_target(store: Path, report: Path) -> bool:
     if store == report:
         return True
     try:
-        return store.samefile(report)
+        if store.samefile(report):
+            return True
     except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise SmokeError("could not compare --store and --report paths") from error
+    if store.as_posix().casefold() != report.as_posix().casefold():
         return False
+    return not case_sensitive_filesystem(store.parent)
+
+
+def case_sensitive_filesystem(directory: Path) -> bool:
+    while True:
+        try:
+            directory.stat()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise SmokeError("could not compare --store and --report paths") from error
+        else:
+            if directory.is_dir():
+                break
+        if directory.parent == directory:
+            raise SmokeError("could not compare --store and --report paths")
+        directory = directory.parent
+
+    # Probe the volume directly; the host OS does not determine its case rules.
+    try:
+        with tempfile.TemporaryDirectory(prefix="CodexLensCaseProbe-", dir=directory) as name:
+            probe = Path(name)
+            try:
+                return not probe.samefile(probe.with_name(probe.name.swapcase()))
+            except FileNotFoundError:
+                return True
     except OSError as error:
         raise SmokeError("could not compare --store and --report paths") from error
 
@@ -277,15 +320,14 @@ def main(argv: list[str] | None = None) -> int:
             raise SmokeError("--store and --report must stay outside --codex-home")
         if args.timeout <= 0:
             raise SmokeError("--timeout must be positive")
-        store.parent.mkdir(parents=True, exist_ok=True)
-
         selection = ["--store", str(store), "--scope", args.scope]
         if args.include_archived:
             selection.append("--include-archived")
         if args.include_subagents:
             selection.append("--include-subagents")
 
-        before = snapshot_inputs(codex_home)
+        before = snapshot_inputs(codex_home, (store, report_path))
+        store.parent.mkdir(parents=True, exist_ok=True)
         durations: dict[str, float] = {}
         refresh = ["refresh", "--codex-home", str(codex_home), "--store", str(store)]
         if args.include_archived:
