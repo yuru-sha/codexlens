@@ -3375,6 +3375,7 @@ fn briefing_finding_json(data: &CanonicalData, finding: &Finding) -> serde_json:
         "severity": finding.severity.as_str(),
         "confidence": finding.confidence.as_str(),
         "scope": finding_scope_json(&finding.scope),
+        "key": bounded_text(&finding.key),
         "problem": bounded_text(&finding.summary),
         "impact": format!("{} occurrences across {} sessions", finding.occurrences, finding.distinct_sessions),
         "occurrences": finding.occurrences,

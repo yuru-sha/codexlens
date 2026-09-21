@@ -333,7 +333,6 @@ fn opportunity_from_finding(data: &CanonicalData, finding: &Finding) -> Option<V
         data,
         finding,
         finding_target(data, finding),
-        finding.suggested_action.clone(),
     ))
 }
 
@@ -970,12 +969,7 @@ pub fn failures_with_options(data: &CanonicalData, options: &AnalysisOptions) ->
                 return None;
             }
             let target = finding_target(data, &finding);
-            let action = if finding.observed_commands.is_empty() {
-                finding.suggested_action.clone()
-            } else {
-                format!("Fix the recurring {category} prerequisite for {}", target)
-            };
-            let opportunity = finding_opportunity(data, &finding, target, action);
+            let opportunity = finding_opportunity(data, &finding, target);
             if opportunity.evidence.is_empty() {
                 return None;
             }
@@ -1009,12 +1003,7 @@ pub fn stuck_with_options(data: &CanonicalData, options: &AnalysisOptions) -> St
                 .cloned()
                 .unwrap_or_else(|| finding_target(data, &finding));
             let target = finding_target(data, &finding);
-            let opportunity = finding_opportunity(
-                data,
-                &finding,
-                target,
-                format!("Fix the failure/edit loop at {path}; verify the next change before repeating it"),
-            );
+            let opportunity = finding_opportunity(data, &finding, target);
             let row = StuckRow {
                 path,
                 session_id: finding
@@ -1717,14 +1706,9 @@ fn overhead_target(
     path.map(|path| path.to_string_lossy().into_owned())
 }
 
-fn finding_opportunity(
-    data: &CanonicalData,
-    finding: &Finding,
-    target: String,
-    action: String,
-) -> ViewOpportunity {
+fn finding_opportunity(data: &CanonicalData, finding: &Finding, target: String) -> ViewOpportunity {
     let target = bounded_excerpt(&target, 512);
-    let action = bounded_excerpt(&action, 512);
+    let action = bounded_excerpt(&finding.suggested_action, 512);
     let mut limitations = finding.limitations.clone();
     ensure_limitations(&mut limitations);
     ViewOpportunity {
@@ -2587,12 +2571,7 @@ mod tests {
         let mut waste_finding =
             crate::advisor::test_support::finding(FindingScope::Global, FindingType::Failure, None);
         waste_finding.key = "shared".to_owned();
-        let waste_opportunity = finding_opportunity(
-            &data,
-            &waste_finding,
-            "AGENTS.md".to_owned(),
-            waste_finding.suggested_action.clone(),
-        );
+        let waste_opportunity = finding_opportunity(&data, &waste_finding, "AGENTS.md".to_owned());
         let mut gap = crate::advisor::test_support::finding(
             FindingScope::Project(PathBuf::from("/fixture/project")),
             FindingType::Gap,
