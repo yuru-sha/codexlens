@@ -86,13 +86,10 @@ The Issue #166 attempt below does not satisfy that gate.
 
 ## Issue #166 real-history smoke outcome
 
-- Latest authorized attempt: exit 1; `raw_input_immutable=false`.
-- Before/after snapshot: +2 files, +32,768 bytes; the runner does not attribute
-  the mutation.
-- Coverage: `empty`; `partial_or_unknown=false` (0 sessions, 0 records, 0
-  limitations).
-- Findings: 0. Proposals: 50 total, 0 reviewable, 50 skipped.
-- `actionable_output=false`.
+- Latest authorized attempt: exit 1; no aggregate report was produced, so
+  `raw_input_immutable` was not recorded.
+- Coverage, findings, proposal, and actionability metrics are unavailable for
+  this attempt.
 
 This run is not readiness evidence. The readiness gate remains open until a run
 records `raw_input_immutable=true`.
