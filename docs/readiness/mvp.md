@@ -86,13 +86,13 @@ The Issue #166 attempt below does not satisfy that gate.
 
 ## Issue #166 real-history smoke outcome
 
-- Final attempt: exit 1; `raw_input_immutable=false`.
-- Before/after snapshot: 0 file-count delta, +8,240 bytes; the runner does not
-  attribute the mutation.
-- Coverage: `partial`; `partial_or_unknown=true` (119 sessions, 163,119
-  records, 12 limitations).
-- Findings: 13. Proposals: 50 total, 0 reviewable, 50 skipped.
-- `actionable_output=true`.
+- Latest authorized attempt: exit 1; `raw_input_immutable=false`.
+- Before/after snapshot: +2 files, +32,768 bytes; the runner does not attribute
+  the mutation.
+- Coverage: `empty`; `partial_or_unknown=false` (0 sessions, 0 records, 0
+  limitations).
+- Findings: 0. Proposals: 50 total, 0 reviewable, 50 skipped.
+- `actionable_output=false`.
 
 This run is not readiness evidence. The readiness gate remains open until a run
 records `raw_input_immutable=true`.
