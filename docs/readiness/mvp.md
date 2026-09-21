@@ -1,9 +1,9 @@
 # MVP readiness review
 
 Status: Rebaseline #143 was closed by merged #156; its implementation and
-synthetic/CLI gates are complete, and current main hosted CI passes. This
-document is not a current release-readiness approval until an owner-authorized
-real-history smoke run is recorded for an explicitly selected local source.
+synthetic/CLI gates are complete, and current main hosted CI passes. The
+owner-authorized real-history smoke recorded below did not pass, so this
+document is not a current release-readiness approval.
 
 Review scope: the refactor, Phase 5 input/reporting work, and safe
 proposal-apply workflow through the historical MVP endpoint. The review checks the
@@ -81,9 +81,21 @@ was closed by merged [#156](https://github.com/yuru-sha/codexlens/pull/156).
 That delivery completed the documented CLI help, required views, optimize
 briefing, bounded synthetic end-to-end evidence, and aggregate-only
 real-history smoke procedure; current main hosted CI passes. The remaining
-readiness evidence is an owner-authorized real-history smoke run against an
-explicitly selected local source before a new readiness or release claim is
-made.
+readiness evidence is a successful owner-authorized real-history smoke run.
+The Issue #166 attempt below does not satisfy that gate.
+
+## Issue #166 real-history smoke outcome
+
+- Initial attempt: exit 1; the smoke command did not complete, and no report
+  was produced.
+- Extended-timeout retry: exit 1; report produced, but
+  `raw_input_immutable=false`.
+- Coverage: `partial`; `partial_or_unknown=true`.
+- Findings: 0. Proposals: 50 total, 0 reviewable, 50 skipped.
+- `actionable_output=true`.
+
+This result is not readiness evidence: coverage was partial and the raw-input
+immutability check failed. Keep the readiness gate open.
 
 ## Phase 6 entry condition
 
