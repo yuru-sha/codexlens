@@ -1,30 +1,27 @@
 """Synthetic contract checks for the aggregate-only real-history smoke runner."""
 
-import os
-from contextlib import redirect_stderr
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from real_history_smoke import build_report, main, run_command, run_json
+
+FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
 
 
 class RealHistorySmokeTests(unittest.TestCase):
     def run_rejected_smoke(self, codex_home: Path, store: Path, report: Path) -> str:
         with (
-            patch("real_history_smoke.run_command") as run_command_mock,
-            patch("real_history_smoke.run_json") as run_json_mock,
+            patch("real_history_smoke.subprocess.run") as subprocess_run_mock,
             redirect_stderr(io.StringIO()) as stderr,
         ):
-            run_command_mock.return_value = 0.0
-            run_json_mock.side_effect = lambda _binary, _arguments, _timeout, command: (
-                0.0,
-                {"command": command, "data": {}},
-            )
             result = main(
                 [
                     "--codex-home",
@@ -37,8 +34,7 @@ class RealHistorySmokeTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 1, stderr.getvalue())
-        run_command_mock.assert_not_called()
-        run_json_mock.assert_not_called()
+        subprocess_run_mock.assert_not_called()
         return stderr.getvalue()
 
     def test_rejects_canonical_output_collisions_before_refresh(self):
@@ -59,6 +55,94 @@ class RealHistorySmokeTests(unittest.TestCase):
                 error = self.run_rejected_smoke(codex_home, store, report)
                 self.assertIn("different files", error)
                 self.assertEqual(store.read_bytes(), before)
+
+    def test_rejects_output_hard_links_to_selected_inputs_before_refresh(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            rollout_dir = codex_home / "sessions"
+            rollout_dir.mkdir(parents=True)
+            state = codex_home / "state_001.sqlite"
+            rollout = rollout_dir / "rollout-001.jsonl"
+            state_fixture = FIXTURE_ROOT / "discovery" / "state_a.sqlite"
+            rollout_fixture = FIXTURE_ROOT / "discovery" / "sessions" / "2026" / "a.jsonl"
+            shutil.copyfile(state_fixture, state)
+            shutil.copyfile(rollout_fixture, rollout)
+            store = root / "store.sqlite"
+            report = root / "report.json"
+            store.write_bytes(b"store sentinel")
+            os.link(state, report)
+
+            error = self.run_rejected_smoke(codex_home, store, report)
+            self.assertIn("Codex input", error)
+            self.assertEqual(state.read_bytes(), state_fixture.read_bytes())
+            self.assertEqual(store.read_bytes(), b"store sentinel")
+            self.assertEqual(report.read_bytes(), state_fixture.read_bytes())
+
+            store_alias = root / "rollout-store.sqlite"
+            separate_report = root / "separate-report.json"
+            os.link(rollout, store_alias)
+            separate_report.write_bytes(b"report sentinel")
+            error = self.run_rejected_smoke(codex_home, store_alias, separate_report)
+            self.assertIn("Codex input", error)
+            self.assertEqual(rollout.read_bytes(), rollout_fixture.read_bytes())
+            self.assertEqual(store_alias.read_bytes(), rollout_fixture.read_bytes())
+            self.assertEqual(separate_report.read_bytes(), b"report sentinel")
+
+    def test_case_only_missing_outputs_follow_filesystem_case_sensitivity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            state = codex_home / "state_001.sqlite"
+            state_fixture = FIXTURE_ROOT / "discovery" / "state_a.sqlite"
+            shutil.copyfile(state_fixture, state)
+
+            probe = root / "CaseProbe"
+            probe.write_bytes(b"probe")
+            try:
+                case_insensitive = (root / "caseprobe").exists()
+            finally:
+                probe.unlink()
+
+            store = root / "Smoke.sqlite"
+            report = root / "smoke.SQLITE"
+            self.assertFalse(store.exists())
+            self.assertFalse(report.exists())
+
+            if case_insensitive:
+                error = self.run_rejected_smoke(codex_home, store, report)
+                self.assertIn("different files", error)
+                self.assertFalse(store.exists())
+                self.assertFalse(report.exists())
+            else:
+                with (
+                    patch(
+                        "real_history_smoke.run_command", return_value=0.0
+                    ) as run_command_mock,
+                    patch("real_history_smoke.run_json") as run_json_mock,
+                    redirect_stdout(io.StringIO()),
+                ):
+                    run_json_mock.side_effect = lambda _binary, _arguments, _timeout, command: (
+                        0.0,
+                        {"command": command, "data": {}},
+                    )
+                    result = main(
+                        [
+                            "--codex-home",
+                            str(codex_home),
+                            "--store",
+                            str(store),
+                            "--report",
+                            str(report),
+                        ]
+                    )
+
+                self.assertEqual(result, 0)
+                run_command_mock.assert_called_once()
+                self.assertEqual(run_json_mock.call_count, 3)
+                self.assertTrue(report.is_file())
+            self.assertEqual(state.read_bytes(), state_fixture.read_bytes())
 
     def test_rejects_repository_local_outputs_before_refresh(self):
         repository_root = Path(__file__).resolve().parents[1]

@@ -321,8 +321,11 @@ frozen JSON `analyze`, `doctor`, and `optimize --print`, while capturing no raw
 stdout/stderr in the report. The aggregate report records:
 
 Before `refresh`, the runner canonicalizes both output paths and rejects
-identical or same-file targets and any `--store` or `--report` path inside the
-repository.
+identical or same-file targets, case-only aliases on case-insensitive
+filesystems even when neither target exists, outputs that share file identity
+with a regular file in the selected Codex home, and either output inside the
+repository. Distinct case-only paths remain valid on case-sensitive
+filesystems.
 
 - the selected scope;
 - coverage status, session/record counts, bounded limitation summaries, and
