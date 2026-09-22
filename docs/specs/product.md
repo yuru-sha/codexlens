@@ -20,8 +20,10 @@ change the setup, and what concrete change to try.
 
 The adapter reads the default Codex home, including session transcripts,
 thread/state indexes, global configuration, installed Skills, MCP/tool
-surfaces when discoverable, and project instruction files. Raw inputs remain
-unchanged and secrets are never copied into reports.
+surfaces when discoverable, and project instruction files. CodexLens does not
+modify these raw inputs; it may observe files added or changed by Codex or other
+processes during live incremental analysis. Secrets are never copied into
+reports.
 
 The derived store is per-user because the analysis spans projects. Reports
 separate `global` configuration from `project:<path>` configuration. Main
@@ -134,4 +136,6 @@ doctor output must not print hundreds of findings or full prompt/tool output.
   that merely dump the same finding list.
 - Human reports are bounded and actionable; JSON/Markdown preserve the same
   target/action semantics without progress text mixed into JSON stdout.
-- The raw Codex home and project sources remain unchanged.
+- CodexLens does not modify the raw Codex home or project sources; concurrent
+  changes made by Codex or other processes do not violate this read-only
+  contract.

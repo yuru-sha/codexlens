@@ -144,6 +144,54 @@ class RealHistorySmokeTests(unittest.TestCase):
                 self.assertTrue(report.is_file())
             self.assertEqual(state.read_bytes(), state_fixture.read_bytes())
 
+    def test_concurrent_input_addition_is_reported_without_failing_the_smoke(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            store = root / "store.sqlite"
+            report = root / "report.json"
+            external_rollout = codex_home / "sessions" / "concurrent.jsonl"
+
+            def refresh(_binary, _arguments, _timeout):
+                external_rollout.parent.mkdir()
+                external_rollout.write_bytes(b"{}\n")
+                return 0.1
+
+            with (
+                patch("real_history_smoke.run_command", side_effect=refresh),
+                patch("real_history_smoke.run_json") as run_json_mock,
+                redirect_stdout(io.StringIO()),
+            ):
+                run_json_mock.side_effect = lambda _binary, _arguments, _timeout, command: (
+                    0.1,
+                    {"command": command, "data": {"coverage": {"status": "complete"}}},
+                )
+                result = main(
+                    [
+                        "--codex-home",
+                        str(codex_home),
+                        "--store",
+                        str(store),
+                        "--report",
+                        str(report),
+                    ]
+                )
+
+            self.assertEqual(result, 0)
+            report_data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertFalse(report_data["raw_input_immutable"])
+            self.assertEqual(
+                report_data["raw_input_after"]["file_count"]
+                - report_data["raw_input_before"]["file_count"],
+                1,
+            )
+            self.assertEqual(
+                report_data["raw_input_after"]["byte_count"]
+                - report_data["raw_input_before"]["byte_count"],
+                3,
+            )
+
     def test_rejects_repository_local_outputs_before_refresh(self):
         repository_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory(

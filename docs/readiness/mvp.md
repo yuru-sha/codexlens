@@ -1,9 +1,9 @@
 # MVP readiness review
 
 Status: Rebaseline #143 was closed by merged #156; its implementation and
-synthetic/CLI gates are complete, and current main hosted CI passes. This
-document is not a current release-readiness approval until an owner-authorized
-real-history smoke run is recorded for an explicitly selected local source.
+synthetic/CLI gates are complete, and current main hosted CI passes. The
+owner-authorized real-history smoke below satisfies Issue #166's acceptance
+criteria; this review records evidence and is not a release-readiness approval.
 
 Review scope: the refactor, Phase 5 input/reporting work, and safe
 proposal-apply workflow through the historical MVP endpoint. The review checks the
@@ -74,16 +74,35 @@ The store-schema wording for `corrections` and `findings` was clarified and
 closed in [#54](https://github.com/yuru-sha/codexlens/issues/54); the current
 CLI derives those results in memory from canonical data.
 
-## Product rebaseline and remaining readiness gate
+## Product rebaseline and Issue #166 smoke evidence
 
 The product rebaseline in [#143](https://github.com/yuru-sha/codexlens/issues/143)
 was closed by merged [#156](https://github.com/yuru-sha/codexlens/pull/156).
 That delivery completed the documented CLI help, required views, optimize
 briefing, bounded synthetic end-to-end evidence, and aggregate-only
-real-history smoke procedure; current main hosted CI passes. The remaining
-readiness evidence is an owner-authorized real-history smoke run against an
-explicitly selected local source before a new readiness or release claim is
-made.
+real-history smoke procedure; current main hosted CI passes. Issue #166 requires
+a completed owner-authorized real-history smoke run with a sanitized record of
+command outcome, coverage, actionability, and stability diagnostics. Partial coverage
+and `raw_input_immutable=false` are reported outcomes, not additional failure
+conditions. The run below satisfies Issue #166's acceptance criteria; this
+record does not itself approve a release.
+
+## Issue #166 real-history smoke outcome
+
+- Latest completed owner-authorized run: exit 0; `raw_input_immutable=false`.
+- Before/after snapshot: +4 files and +5,037,632 bytes; the runner does not
+  attribute the mutation.
+- Coverage: partial; `partial_or_unknown=true`; 120 sessions, 166,336 records,
+  12 limitations.
+- Findings: 22. Proposals: 50 total, 0 reviewable, 50 skipped;
+  `actionable_output=true`.
+
+This completed run satisfies Issue #166's acceptance criteria: command
+execution succeeded, the aggregate result was recorded, and actionable output
+was present when required. Partial coverage and zero reviewable proposals are
+reported results, not additional acceptance failures. `raw_input_immutable`
+and the whole-home snapshot delta are diagnostic only; they do not attribute
+the changes to CodexLens.
 
 ## Phase 6 entry condition
 
