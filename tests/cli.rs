@@ -5385,11 +5385,16 @@ fn optimize_json_sends_capped_unlinked_skip_details_to_stderr() {
             .as_u64()
             .is_some_and(|count| count > 0)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let visible_skips = document["data"]["proposals"]["skipped"].as_array().unwrap();
     let omitted_unknown = unavailable_targets
         .iter()
-        .find(|target| !stdout.contains(&target.to_string_lossy().to_string()))
+        .find(|target| {
+            let target = target.to_string_lossy();
+            !visible_skips
+                .iter()
+                .any(|row| row["target_path"].as_str() == Some(target.as_ref()))
+        })
         .expect("at least one unknown skip should be omitted from bounded JSON");
     assert!(stderr.contains(&omitted_unknown.to_string_lossy().to_string()));
 
