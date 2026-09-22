@@ -147,9 +147,13 @@ baseline carry bounded review-only metadata instead of before/after snippets.
 `--print` prints the briefing; otherwise
 the implementation may launch the configured Codex CLI only through a private
 temporary file. No mutating write is allowed without explicit confirmation.
-The `--print` briefing has the same action semantics in table, Markdown, and
-JSON: findings, configuration waste, user-controlled or unknown overhead,
-reviewable proposals, explicit skips/limitations, and the exact next workflow.
+The `--print` briefing routes the same opportunities shown by `doctor` into its
+prioritized findings, putting recurring work friction before configuration
+trimming. Review-only opportunities name the target and sections to inspect,
+state the root-cause question and possible change, and preserve unknowns without
+inventing before/after text. Stdout stays bounded; detailed omitted findings,
+proposals, and skips go to stderr in every format. JSON stdout includes the same
+action semantics and explicit omitted/skipped counts.
 An actionable non-shell failure is retained even when no canonical shell
 command can be inferred; it is never turned into a shell prerequisite.
 
