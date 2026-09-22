@@ -88,16 +88,19 @@ gate.
 
 ## Issue #166 real-history smoke outcome
 
-- Latest authorized attempt: exit 1; no aggregate report was produced, so
-  `raw_input_immutable` was not recorded.
-- Coverage, findings, proposal, and actionability metrics are unavailable for
-  this attempt.
+- Latest completed owner-authorized run: exit 0; `raw_input_immutable=false`.
+- Before/after snapshot: +4 files and +5,037,632 bytes; the runner does not
+  attribute the mutation.
+- Coverage: partial; `partial_or_unknown=true`; 120 sessions, 166,336 records,
+  12 limitations.
+- Findings: 22. Proposals: 50 total, 0 reviewable, 50 skipped;
+  `actionable_output=true`.
 
-This run is not readiness evidence because it produced no aggregate report.
-`raw_input_immutable` is a diagnostic of whole-home stability during the run;
-it does not attribute concurrent changes and is not itself a readiness gate.
-The readiness gate remains open until a completed run produces reviewable
-aggregate evidence for the selected source.
+This run is not readiness evidence because coverage is partial and no proposals
+are reviewable. `raw_input_immutable` and the whole-home snapshot delta are
+diagnostic only; they do not identify which process changed the input. The
+readiness gate remains open until a completed run provides reviewed coverage
+and reviewable aggregate evidence for the selected source.
 
 ## Phase 6 entry condition
 
