@@ -5407,7 +5407,7 @@ fn optimize_json_sends_capped_unlinked_skip_details_to_stderr() {
 }
 
 #[test]
-fn optimize_print_json_counts_and_reports_json_only_diff_skips() {
+fn optimize_print_formats_report_diff_skips_consistently() {
     let (store, target, project_root) =
         rendered_diff_store_with_content("token=synthetic-redaction-value\n");
     let surfaces = (0..50)
@@ -5431,6 +5431,34 @@ fn optimize_print_json_counts_and_reports_json_only_diff_skips() {
         .unwrap()
         .replace_surfaces(&surfaces)
         .unwrap();
+
+    for args in [
+        &["optimize", "--print"][..],
+        &["optimize", "--print", "--format", "markdown"][..],
+    ] {
+        let output = run_args(args, &store);
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let target_line = format!("  target: {}", target.display());
+        let opportunity_lines = stdout
+            .lines()
+            .skip_while(|line| *line != target_line)
+            .take(8)
+            .collect::<Vec<_>>();
+        assert!(
+            opportunity_lines
+                .iter()
+                .any(|line| line.contains("Proposal status: skipped")),
+            "proposal status was not skipped for {target_line}"
+        );
+        assert!(
+            opportunity_lines
+                .iter()
+                .any(|line| { line.contains("Skip reason:") && line.contains("redaction") }),
+            "redaction skip reason was missing for {target_line}"
+        );
+        assert!(!stdout.contains("synthetic-redaction-value"));
+    }
 
     let output = run_args(&["optimize", "--print", "--format", "json"], &store);
     assert!(output.status.success());

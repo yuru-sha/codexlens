@@ -3159,10 +3159,7 @@ fn run_optimize_print(
     let coverage = coverage_for_scope(data, selection, &options.scope);
     let period = selection.map(|selection| period_for_scope(selection, &options.scope));
     let batch = proposal_batch(proposal_plan);
-    let json_batch = matches!(options.format, OutputFormat::Json)
-        .then(|| json_presentation_batch(&batch))
-        .transpose()?;
-    let json_batch = json_batch.as_ref().unwrap_or(&batch);
+    let batch = presentation_batch(&batch)?;
     options.format.write_report(
         "OPTIMIZE",
         || {
@@ -3187,18 +3184,18 @@ fn run_optimize_print(
                 findings,
                 opportunities,
                 waste,
-                json_batch,
+                &batch,
                 freshness,
                 &coverage,
                 options,
                 period.as_ref(),
             )
         },
-        || render_optimize_json_omitted_details(data, findings, opportunities, json_batch),
+        || render_optimize_json_omitted_details(data, findings, opportunities, &batch),
     )
 }
 
-fn json_presentation_batch(batch: &DiffBatch) -> Result<DiffBatch> {
+fn presentation_batch(batch: &DiffBatch) -> Result<DiffBatch> {
     let mut normalized = DiffBatch {
         rendered: Vec::with_capacity(batch.rendered.len()),
         skipped: batch.skipped.clone(),
@@ -3929,7 +3926,7 @@ fn render_optimize_human_with_period(
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, OutputFormat, json_presentation_batch, render_optimize_json_omitted_details,
+        Cli, Command, OutputFormat, presentation_batch, render_optimize_json_omitted_details,
         session_selection_options, unlinked_skipped_proposals,
     };
     use clap::Parser;
@@ -4044,7 +4041,7 @@ mod tests {
                 .collect(),
         };
 
-        let batch = json_presentation_batch(&batch).unwrap();
+        let batch = presentation_batch(&batch).unwrap();
         let output =
             render_optimize_json_omitted_details(&CanonicalData::default(), &[], &[], &batch)
                 .unwrap();
