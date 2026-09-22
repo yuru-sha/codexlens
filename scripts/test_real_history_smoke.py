@@ -155,7 +155,7 @@ class RealHistorySmokeTests(unittest.TestCase):
 
             def refresh(_binary, _arguments, _timeout):
                 external_rollout.parent.mkdir()
-                external_rollout.write_text("{}\n", encoding="utf-8")
+                external_rollout.write_bytes(b"{}\n")
                 return 0.1
 
             with (
