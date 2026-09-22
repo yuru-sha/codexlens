@@ -81,8 +81,10 @@ was closed by merged [#156](https://github.com/yuru-sha/codexlens/pull/156).
 That delivery completed the documented CLI help, required views, optimize
 briefing, bounded synthetic end-to-end evidence, and aggregate-only
 real-history smoke procedure; current main hosted CI passes. The remaining
-readiness evidence is a successful owner-authorized real-history smoke run.
-The Issue #166 attempt below does not satisfy that gate.
+readiness evidence is a completed owner-authorized real-history smoke run with
+actionable output when matching evidence is expected and reviewed coverage.
+The Issue #166 attempt below did not produce a report and does not satisfy that
+gate.
 
 ## Issue #166 real-history smoke outcome
 
@@ -91,8 +93,11 @@ The Issue #166 attempt below does not satisfy that gate.
 - Coverage, findings, proposal, and actionability metrics are unavailable for
   this attempt.
 
-This run is not readiness evidence. The readiness gate remains open until a run
-records `raw_input_immutable=true`.
+This run is not readiness evidence because it produced no aggregate report.
+`raw_input_immutable` is a diagnostic of whole-home stability during the run;
+it does not attribute concurrent changes and is not itself a readiness gate.
+The readiness gate remains open until a completed run produces reviewable
+aggregate evidence for the selected source.
 
 ## Phase 6 entry condition
 
