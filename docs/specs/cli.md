@@ -338,19 +338,24 @@ filesystems.
 - finding count and per-kind finding counts;
 - total, reviewable, and skipped proposal counts;
 - total and per-command runtime; and
-- before/after aggregate hashes, sizes, and `raw_input_immutable` as a signal
-  that the selected Codex home changed during the run.
+- before/after hashes and sizes for selected `state_*.sqlite` and rollout
+  JSONL inputs, summarized by `raw_input_immutable`; and
+- before/after whole-home hashes and sizes, summarized separately by
+  `codex_home_unchanged`.
 
 `coverage.partial_or_unknown` is the separate partial/unknown-coverage signal.
 Review `actionable_output`, coverage limitations, and the exact selected scope
-locally. The before/after comparison covers the whole selected Codex home and
-cannot attribute changes to the smoke process; concurrent writes by Codex or
-other processes may make `raw_input_immutable=false`. That value is diagnostic
-and does not by itself fail the smoke. The smoke fails on validation,
-command-execution, or report errors, or when `--require-actionable` is set and
-no actionable output is produced. Do not use `optimize --apply` in the smoke
-procedure. A successful run is one readiness input for the selected source; it
-is not, by itself, a product readiness or release approval.
+locally. `raw_input_immutable` compares only the history files selected for
+ingestion: state databases and rollout JSONL under `sessions`, plus
+`archived_sessions` when `--include-archived` is selected. The separate
+`codex_home_unchanged` value covers all regular files in the selected Codex
+home; unrelated concurrent writes may make it false without changing selected
+history inputs. Neither comparison attributes a change to the smoke process.
+The smoke fails on validation, command-execution, or report errors, or when
+`--require-actionable` is set and no actionable output is produced. Do not use
+`optimize --apply` in the smoke procedure. A successful run is one readiness
+input for the selected source; it is not, by itself, a product readiness or
+release approval.
 
 ## Acceptance tests
 

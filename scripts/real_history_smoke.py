@@ -119,11 +119,101 @@ def snapshot_inputs(
     }
 
 
+def snapshot_history_inputs(
+    root: Path, include_archived: bool = False
+) -> dict[str, int | str]:
+    """Hash the state and rollout files selected by CodexLens discovery."""
+
+    try:
+        root = root.resolve(strict=True)
+        candidates: set[Path] = set()
+
+        def add_file(path: Path) -> None:
+            identity = path.resolve(strict=True)
+            try:
+                identity.relative_to(root)
+            except ValueError:
+                return
+            if identity.is_file():
+                candidates.add(identity)
+
+        for path in root.iterdir():
+            if path.name.startswith("state_") and path.name.endswith(".sqlite"):
+                add_file(path)
+
+        rollout_roots = [root / "sessions"]
+        if include_archived:
+            rollout_roots.append(root / "archived_sessions")
+        for rollout_root in rollout_roots:
+            if not rollout_root.exists():
+                continue
+            pending = [rollout_root]
+            visited: set[Path] = set()
+            while pending:
+                directory = pending.pop()
+                identity = directory.resolve(strict=True)
+                try:
+                    identity.relative_to(root)
+                except ValueError:
+                    continue
+                if identity in visited or not directory.is_dir():
+                    continue
+                visited.add(identity)
+                for path in sorted(directory.iterdir(), key=lambda item: item.name):
+                    if path.is_dir():
+                        pending.append(path)
+                    elif path.name.endswith((".jsonl", ".jsonl.zst")) and path.is_file():
+                        add_file(path)
+    except (OSError, RuntimeError) as error:
+        raise SmokeError("could not snapshot selected Codex history inputs") from error
+
+    entries: list[bytes] = []
+    byte_count = 0
+    for path in sorted(candidates):
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with path.open("rb") as stream:
+                before = os.fstat(stream.fileno())
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
+                after = os.fstat(stream.fileno())
+            current = path.stat()
+        except OSError as error:
+            raise SmokeError("could not snapshot selected Codex history inputs") from error
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino):
+            raise SmokeError("selected Codex history inputs changed while snapshotting")
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        entries.append(relative + b"\0" + digest.digest() + b"\n")
+        byte_count += size
+
+    return {
+        "file_count": len(entries),
+        "byte_count": byte_count,
+        "tree_sha256": hashlib.sha256(b"".join(entries)).hexdigest(),
+    }
+
+
 def build_report(
     *,
     scope: str,
-    before: dict[str, int | str],
-    after: dict[str, int | str],
+    home_before: dict[str, int | str],
+    home_after: dict[str, int | str],
+    raw_before: dict[str, int | str],
+    raw_after: dict[str, int | str],
     durations: dict[str, float],
     analyze: dict[str, Any],
     doctor: dict[str, Any],
@@ -165,9 +255,12 @@ def build_report(
         "command_runtime_seconds": {
             name: round(duration, 3) for name, duration in durations.items()
         },
-        "raw_input_immutable": before == after,
-        "raw_input_before": before,
-        "raw_input_after": after,
+        "raw_input_immutable": raw_before == raw_after,
+        "raw_input_before": raw_before,
+        "raw_input_after": raw_after,
+        "codex_home_unchanged": home_before == home_after,
+        "codex_home_before": home_before,
+        "codex_home_after": home_after,
     }
 
 
@@ -326,7 +419,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.include_subagents:
             selection.append("--include-subagents")
 
-        before = snapshot_inputs(codex_home, (store, report_path))
+        home_before = snapshot_inputs(codex_home, (store, report_path))
+        raw_before = snapshot_history_inputs(codex_home, args.include_archived)
         store.parent.mkdir(parents=True, exist_ok=True)
         durations: dict[str, float] = {}
         refresh = ["refresh", "--codex-home", str(codex_home), "--store", str(store)]
@@ -353,11 +447,14 @@ def main(argv: list[str] | None = None) -> int:
             args.timeout,
             "optimize",
         )
-        after = snapshot_inputs(codex_home)
+        home_after = snapshot_inputs(codex_home)
+        raw_after = snapshot_history_inputs(codex_home, args.include_archived)
         report = build_report(
             scope=args.scope,
-            before=before,
-            after=after,
+            home_before=home_before,
+            home_after=home_after,
+            raw_before=raw_before,
+            raw_after=raw_after,
             durations=durations,
             analyze=analyze,
             doctor=doctor,
@@ -377,7 +474,8 @@ def main(argv: list[str] | None = None) -> int:
         f"{report['finding_count']} findings, {report['proposal_count']} proposals, "
         f"coverage={report['coverage']['status']}, "
         f"actionable={str(report['actionable_output']).lower()}, "
-        f"raw_input_immutable={str(report['raw_input_immutable']).lower()}"
+        f"raw_input_immutable={str(report['raw_input_immutable']).lower()}, "
+        f"codex_home_unchanged={str(report['codex_home_unchanged']).lower()}"
     )
     return 0
 
