@@ -100,9 +100,36 @@ record does not itself approve a release.
 This completed run satisfies Issue #166's acceptance criteria: command
 execution succeeded, the aggregate result was recorded, and actionable output
 was present when required. Partial coverage and zero reviewable proposals are
-reported results, not additional acceptance failures. `raw_input_immutable`
-and the whole-home snapshot delta are diagnostic only; they do not attribute
-the changes to CodexLens.
+reported results, not additional acceptance failures. The older smoke schema
+used `raw_input_immutable` for its whole-home snapshot; those historical values
+do not attribute changes to CodexLens. The current schema separately compares
+selected history inputs and the whole-home snapshot.
+
+## Issue #167 current-main smoke recheck
+
+- Binary commit: `78a81856b6694075515101fecb97c18bc0fe0f61`; run date:
+  2026-09-22; source: the owner-selected default Codex home; scope: `all`.
+- Result: exit 0 in 963.902 seconds; 439 sessions, 366,773 records, partial
+  coverage, 12 limitations, and 33,538 limitations omitted from the bounded
+  report.
+- Findings: 112 total (51 gap, 16 rework, 10 stale, 1 stuck, 34 verification).
+  Proposals: 50 total, 0 reviewable, 50 skipped; `actionable_output=true`.
+- Legacy whole-home snapshot: changed by +2 files and +9,885,862 bytes. This
+  earlier run predates the selected-history comparison and does not identify
+  the writer or prove the parent Issue's raw-input-unchanged criterion.
+
+## Issue #167 selected-history recheck (PR head)
+
+- Binary commit: `8342337ef6342072c94c7c40583d9dbc24975f1d`; run date:
+  2026-09-22; source: the owner-selected default Codex home; scope: `all`.
+- Result: exit 0; 440 sessions, 369,687 records, partial coverage, 12
+  limitations, and 33,716 limitations omitted from the bounded report.
+- Findings: 112 total (51 gap, 16 rework, 10 stale, 1 stuck, 34 verification).
+  Proposals: 50 total, 0 reviewable, 50 skipped; `actionable_output=true`.
+- Selected-history snapshot: `raw_input_immutable=false`; +2 files and
+  +3,714,178 bytes. The whole-home snapshot was also changed (+0 files,
+  +4,836,109 bytes). The smoke does not identify the writer, so the parent
+  Issue's raw-input-unchanged criterion remains unmet.
 
 ## Phase 6 entry condition
 

@@ -17,6 +17,31 @@ FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
 
 
 class RealHistorySmokeTests(unittest.TestCase):
+    def run_mocked_smoke(
+        self, codex_home: Path, store: Path, report: Path, refresh, extra_arguments=()
+    ):
+        with (
+            patch("real_history_smoke.run_command", side_effect=refresh),
+            patch("real_history_smoke.run_json") as run_json_mock,
+            redirect_stdout(io.StringIO()),
+        ):
+            run_json_mock.side_effect = lambda _binary, _arguments, _timeout, command: (
+                0.1,
+                {"command": command, "data": {"coverage": {"status": "complete"}}},
+            )
+            result = main(
+                [
+                    "--codex-home",
+                    str(codex_home),
+                    "--store",
+                    str(store),
+                    "--report",
+                    str(report),
+                    *extra_arguments,
+                ]
+            )
+        return result, json.loads(report.read_text(encoding="utf-8"))
+
     def run_rejected_smoke(self, codex_home: Path, store: Path, report: Path) -> str:
         with (
             patch("real_history_smoke.subprocess.run") as subprocess_run_mock,
@@ -89,6 +114,27 @@ class RealHistorySmokeTests(unittest.TestCase):
             self.assertEqual(store_alias.read_bytes(), rollout_fixture.read_bytes())
             self.assertEqual(separate_report.read_bytes(), b"report sentinel")
 
+    def test_rejects_case_alias_outputs_inside_codex_home_before_filesystem_probe(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            state = codex_home / "state_001.sqlite"
+            state_fixture = FIXTURE_ROOT / "discovery" / "state_a.sqlite"
+            shutil.copyfile(state_fixture, state)
+            before = state.read_bytes()
+
+            store = codex_home / "Smoke.sqlite"
+            report = codex_home / "smoke.SQLITE"
+            with patch("real_history_smoke.case_sensitive_filesystem") as filesystem_probe:
+                error = self.run_rejected_smoke(codex_home, store, report)
+
+            self.assertIn("outside --codex-home", error)
+            filesystem_probe.assert_not_called()
+            self.assertEqual(state.read_bytes(), before)
+            self.assertFalse(store.exists())
+            self.assertFalse(report.exists())
+
     def test_case_only_missing_outputs_follow_filesystem_case_sensitivity(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -158,28 +204,11 @@ class RealHistorySmokeTests(unittest.TestCase):
                 external_rollout.write_bytes(b"{}\n")
                 return 0.1
 
-            with (
-                patch("real_history_smoke.run_command", side_effect=refresh),
-                patch("real_history_smoke.run_json") as run_json_mock,
-                redirect_stdout(io.StringIO()),
-            ):
-                run_json_mock.side_effect = lambda _binary, _arguments, _timeout, command: (
-                    0.1,
-                    {"command": command, "data": {"coverage": {"status": "complete"}}},
-                )
-                result = main(
-                    [
-                        "--codex-home",
-                        str(codex_home),
-                        "--store",
-                        str(store),
-                        "--report",
-                        str(report),
-                    ]
-                )
+            result, report_data = self.run_mocked_smoke(
+                codex_home, store, report, refresh
+            )
 
             self.assertEqual(result, 0)
-            report_data = json.loads(report.read_text(encoding="utf-8"))
             self.assertFalse(report_data["raw_input_immutable"])
             self.assertEqual(
                 report_data["raw_input_after"]["file_count"]
@@ -191,6 +220,89 @@ class RealHistorySmokeTests(unittest.TestCase):
                 - report_data["raw_input_before"]["byte_count"],
                 3,
             )
+
+    def test_unrelated_home_change_does_not_fail_raw_input_immutability(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            sessions_target = codex_home / "history-data"
+            sessions_target.mkdir(parents=True)
+            (sessions_target / "source.txt").write_bytes(b"{}\n")
+            (codex_home / "state_001.sqlite").write_bytes(b"synthetic state\n")
+            (codex_home / "sessions").symlink_to(sessions_target, target_is_directory=True)
+            (codex_home / "sessions" / "selected.jsonl").symlink_to(
+                sessions_target / "source.txt"
+            )
+            store = root / "store.sqlite"
+            report = root / "report.json"
+
+            def refresh(_binary, _arguments, _timeout):
+                logs = codex_home / "logs"
+                logs.mkdir()
+                (logs / "codex.log").write_bytes(b"unrelated\n")
+                return 0.1
+
+            result, report_data = self.run_mocked_smoke(
+                codex_home, store, report, refresh
+            )
+
+            self.assertEqual(result, 0)
+            self.assertTrue(report_data["raw_input_immutable"])
+            self.assertFalse(report_data["codex_home_unchanged"])
+            self.assertEqual(
+                report_data["raw_input_before"], report_data["raw_input_after"]
+            )
+            self.assertEqual(report_data["raw_input_before"]["file_count"], 2)
+
+    def test_selected_input_modification_breaks_raw_input_immutability(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            sessions = codex_home / "sessions"
+            sessions.mkdir(parents=True)
+            rollout = sessions / "selected.jsonl"
+            rollout.write_bytes(b"{}\n")
+            state = codex_home / "state_001.sqlite"
+            state.write_bytes(b"synthetic state\n")
+            store = root / "store.sqlite"
+            report = root / "report.json"
+
+            def refresh(_binary, _arguments, _timeout):
+                rollout.write_bytes(b'{"changed":true}\n')
+                state.write_bytes(b"modified synthetic state\n")
+                return 0.1
+
+            result, report_data = self.run_mocked_smoke(
+                codex_home, store, report, refresh
+            )
+
+            self.assertEqual(result, 0)
+            self.assertFalse(report_data["raw_input_immutable"])
+            self.assertNotEqual(
+                report_data["raw_input_before"], report_data["raw_input_after"]
+            )
+
+    def test_archived_input_modification_is_checked_when_selected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            archive = codex_home / "archived_sessions"
+            archive.mkdir(parents=True)
+            rollout = archive / "archived.jsonl"
+            rollout.write_bytes(b"{}\n")
+            store = root / "store.sqlite"
+            report = root / "report.json"
+
+            def refresh(_binary, _arguments, _timeout):
+                rollout.write_bytes(b'{"changed":true}\n')
+                return 0.1
+
+            result, report_data = self.run_mocked_smoke(
+                codex_home, store, report, refresh, ("--include-archived",)
+            )
+
+            self.assertEqual(result, 0)
+            self.assertFalse(report_data["raw_input_immutable"])
 
     def test_rejects_repository_local_outputs_before_refresh(self):
         repository_root = Path(__file__).resolve().parents[1]
@@ -261,8 +373,10 @@ class RealHistorySmokeTests(unittest.TestCase):
     def test_report_records_scope_counts_runtime_and_raw_immutability(self):
         report = build_report(
             scope="project:/synthetic/project",
-            before={"file_count": 2, "byte_count": 10, "tree_sha256": "same"},
-            after={"file_count": 2, "byte_count": 10, "tree_sha256": "same"},
+            home_before={"file_count": 2, "byte_count": 10, "tree_sha256": "same"},
+            home_after={"file_count": 2, "byte_count": 10, "tree_sha256": "same"},
+            raw_before={"file_count": 1, "byte_count": 2, "tree_sha256": "same"},
+            raw_after={"file_count": 1, "byte_count": 2, "tree_sha256": "same"},
             durations={"refresh": 0.1, "analyze": 0.2, "doctor": 0.3, "optimize": 0.4},
             analyze={
                 "data": {
