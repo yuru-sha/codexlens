@@ -906,6 +906,39 @@ fn parse_json_report(output: &Output, command: &str) -> Value {
     document
 }
 
+fn assert_human_limitation_details(output: &str, coverage: &Value) {
+    let limitation = coverage["limitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|limitation| limitation["kind"] == "oversized_line")
+        .expect("synthetic oversized-line limitation");
+    let selected_sessions = limitation["selected_sessions"].as_u64().unwrap();
+    let selected_records = limitation["selected_records"].as_u64().unwrap();
+    let affected_lenses = limitation["affected_lenses"].as_array().unwrap();
+    assert!(selected_sessions > 0);
+    assert!(selected_records > 0);
+    assert!(!affected_lenses.is_empty());
+
+    let line = output
+        .lines()
+        .find(|line| line.starts_with("Limitation oversized_line at "))
+        .expect("human report includes the oversized-line limitation");
+    assert!(
+        line.contains(limitation["message"].as_str().unwrap()),
+        "{line}"
+    );
+    assert!(
+        line.contains(&format!(
+            "selected sessions: {selected_sessions}; selected records: {selected_records}"
+        )),
+        "{line}"
+    );
+    for lens in affected_lenses {
+        assert!(line.contains(lens.as_str().unwrap()), "{line}");
+    }
+}
+
 fn rendered_diff_store() -> (PathBuf, PathBuf, PathBuf) {
     rendered_diff_store_with_content("Existing synthetic guidance.\n")
 }
@@ -2370,6 +2403,7 @@ fn command_contract_finding_stays_consistent_across_cli_chain() {
 fn command_contract_fixture_covers_empty_and_partial_reports() {
     let commands: &[(&[&str], &str)] = &[
         (&["analyze", "--format", "json"], "analyze"),
+        (&["sessions", "--format", "json"], "sessions"),
         (&["usage", "--format", "json"], "usage"),
         (&["inventory", "--format", "json"], "inventory"),
         (&["waste", "--format", "json"], "waste"),
@@ -2401,6 +2435,32 @@ fn command_contract_fixture_covers_empty_and_partial_reports() {
             assert_eq!(coverage["status"], expected_status, "{command}");
             if expected_status == "partial" {
                 assert!(!coverage["limitations"].as_array().unwrap().is_empty());
+
+                let mut human_args = vec![*command];
+                if *command == "optimize" {
+                    human_args.push("--print");
+                }
+                let human = run_args(&human_args, &store);
+                assert!(
+                    human.status.success(),
+                    "{command} human report failed: {}",
+                    String::from_utf8_lossy(&human.stderr)
+                );
+                let human_stdout = String::from_utf8_lossy(&human.stdout);
+                let coverage_summary = if *command == "analyze" {
+                    "Coverage: selected store (partial"
+                } else {
+                    "Coverage: partial"
+                };
+                assert!(
+                    human_stdout.contains(coverage_summary),
+                    "{command} omitted partial coverage: {human_stdout}"
+                );
+                assert!(
+                    human_stdout.contains("Limitations:"),
+                    "{command} omitted coverage limitations: {human_stdout}"
+                );
+                assert_human_limitation_details(&human_stdout, coverage);
             }
         }
 
@@ -2416,6 +2476,24 @@ fn command_contract_fixture_covers_empty_and_partial_reports() {
             optimize_diff["data"]["coverage"]["status"], expected_status,
             "optimize --diff"
         );
+        if expected_status == "partial" {
+            let human = run_args_with_flags(&["optimize", "--diff"], &period_flags, &store);
+            assert!(
+                human.status.success(),
+                "optimize --diff human report failed: {}",
+                String::from_utf8_lossy(&human.stderr)
+            );
+            let human_stdout = String::from_utf8_lossy(&human.stdout);
+            assert!(
+                human_stdout.contains("Coverage: selected store (partial"),
+                "optimize --diff omitted partial coverage: {human_stdout}"
+            );
+            assert!(
+                human_stdout.contains("Limitations:"),
+                "optimize --diff omitted coverage limitations: {human_stdout}"
+            );
+            assert_human_limitation_details(&human_stdout, &optimize_diff["data"]["coverage"]);
+        }
 
         for command in ["sql", "query"] {
             let output = if command == "sql" {

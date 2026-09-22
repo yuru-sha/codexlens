@@ -314,10 +314,10 @@ def main(argv: list[str] | None = None) -> int:
         repository_root = resolve_path(Path(__file__), "repository root").parent.parent
         if not outside(store, repository_root) or not outside(report_path, repository_root):
             raise SmokeError("--store and --report must stay outside the repository")
-        if same_output_target(store, report_path):
-            raise SmokeError("--store and --report must be different files")
         if not outside(store, codex_home) or not outside(report_path, codex_home):
             raise SmokeError("--store and --report must stay outside --codex-home")
+        if same_output_target(store, report_path):
+            raise SmokeError("--store and --report must be different files")
         if args.timeout <= 0:
             raise SmokeError("--timeout must be positive")
         selection = ["--store", str(store), "--scope", args.scope]

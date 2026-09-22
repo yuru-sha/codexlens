@@ -104,6 +104,20 @@ reported results, not additional acceptance failures. `raw_input_immutable`
 and the whole-home snapshot delta are diagnostic only; they do not attribute
 the changes to CodexLens.
 
+## Issue #167 current-main smoke recheck
+
+- Binary commit: `78a81856b6694075515101fecb97c18bc0fe0f61`; run date:
+  2026-09-22; source: the owner-selected default Codex home; scope: `all`.
+- Result: exit 0 in 963.902 seconds; 439 sessions, 366,773 records, partial
+  coverage, 12 limitations, and 33,538 limitations omitted from the bounded
+  report.
+- Findings: 112 total (51 gap, 16 rework, 10 stale, 1 stuck, 34 verification).
+  Proposals: 50 total, 0 reviewable, 50 skipped; `actionable_output=true`.
+- Input snapshot: `raw_input_immutable=false`; +2 files and +9,885,862 bytes.
+  The whole-home delta does not identify its writer. This run does not prove
+  the parent Issue's literal raw-input-unchanged criterion; the child #166
+  acceptance treats this aggregate signal as diagnostic, not as attribution.
+
 ## Phase 6 entry condition
 
 Phase 6 release-preparation work may proceed only when its issue:

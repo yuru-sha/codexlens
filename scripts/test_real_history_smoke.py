@@ -89,6 +89,27 @@ class RealHistorySmokeTests(unittest.TestCase):
             self.assertEqual(store_alias.read_bytes(), rollout_fixture.read_bytes())
             self.assertEqual(separate_report.read_bytes(), b"report sentinel")
 
+    def test_rejects_case_alias_outputs_inside_codex_home_before_filesystem_probe(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            state = codex_home / "state_001.sqlite"
+            state_fixture = FIXTURE_ROOT / "discovery" / "state_a.sqlite"
+            shutil.copyfile(state_fixture, state)
+            before = state.read_bytes()
+
+            store = codex_home / "Smoke.sqlite"
+            report = codex_home / "smoke.SQLITE"
+            with patch("real_history_smoke.case_sensitive_filesystem") as filesystem_probe:
+                error = self.run_rejected_smoke(codex_home, store, report)
+
+            self.assertIn("outside --codex-home", error)
+            filesystem_probe.assert_not_called()
+            self.assertEqual(state.read_bytes(), before)
+            self.assertFalse(store.exists())
+            self.assertFalse(report.exists())
+
     def test_case_only_missing_outputs_follow_filesystem_case_sensitivity(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
