@@ -5515,6 +5515,35 @@ fn optimize_print_formats_report_diff_skips_consistently() {
 }
 
 #[test]
+fn optimize_print_json_lists_normalized_skip_limitation_once() {
+    let (store, target, project_root) = rendered_diff_store_with_content("token=diff-secret\n");
+    let output = run_args(&["optimize", "--print", "--format", "json"], &store);
+    assert!(output.status.success());
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let skipped = document["data"]["proposals"]["skipped"].as_array().unwrap();
+    let redaction_reason = skipped
+        .iter()
+        .find_map(|row| {
+            let reason = row["reason"].as_str()?;
+            reason.contains("redaction").then_some(reason)
+        })
+        .expect("normalized redaction skip should be listed");
+    let limitations = document["data"]["limitations"].as_array().unwrap();
+    assert_eq!(
+        limitations
+            .iter()
+            .filter(|limitation| limitation.as_str() == Some(redaction_reason))
+            .count(),
+        1
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("diff-secret"));
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
+}
+
+#[test]
 fn optimize_keeps_ambiguous_same_target_skips_individual() {
     let store = fixture_store();
     let target = PathBuf::from("/synthetic/shared/AGENTS.md");

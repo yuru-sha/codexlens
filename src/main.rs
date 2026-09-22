@@ -3160,6 +3160,7 @@ fn run_optimize_print(
     let period = selection.map(|selection| period_for_scope(selection, &options.scope));
     let batch = proposal_batch(proposal_plan);
     let batch = presentation_batch(&batch)?;
+    let matches = optimize_proposal_matches(data, findings, opportunities, &batch);
     options.format.write_report(
         "OPTIMIZE",
         || {
@@ -3170,12 +3171,13 @@ fn run_optimize_print(
                     opportunities,
                     waste,
                     &batch,
+                    &matches,
                     freshness,
                     &coverage,
                     options,
                     period.as_ref(),
                 ),
-                render_optimize_omitted_details(data, findings, opportunities, &batch),
+                render_optimize_omitted_details(findings, opportunities, &batch, &matches),
             )
         },
         || {
@@ -3185,13 +3187,14 @@ fn run_optimize_print(
                 opportunities,
                 waste,
                 &batch,
+                &matches,
                 freshness,
                 &coverage,
                 options,
                 period.as_ref(),
             )
         },
-        || render_optimize_json_omitted_details(data, findings, opportunities, &batch),
+        || render_optimize_json_omitted_details(findings, opportunities, &batch, &matches),
     )
 }
 
@@ -3269,16 +3272,19 @@ fn finding_for_opportunity<'a>(
     })
 }
 
+struct OptimizeProposalMatches<'a> {
+    skipped_by_opportunity: Vec<Option<&'a codexlens::advisor::SkippedProposal>>,
+    rendered_by_opportunity: Vec<bool>,
+    linked_skipped: Vec<bool>,
+}
+
 fn proposal_matches_opportunity(
-    data: &CanonicalData,
-    findings: &[Finding],
     proposal: &codexlens::advisor::Proposal,
     opportunity: &ViewOpportunity,
+    friction_proposal: Option<&codexlens::advisor::Proposal>,
 ) -> bool {
     if optimize_opportunity_kind(opportunity) == OptimizeOpportunityKind::Friction {
-        return finding_for_opportunity(findings, opportunity)
-            .and_then(|finding| codexlens::advisor::Proposal::from_finding(data, finding))
-            .is_some_and(|expected| &expected == proposal);
+        return friction_proposal.is_some_and(|expected| expected == proposal);
     }
     proposal.target_path.as_path() == Path::new(&opportunity.target)
         && proposal.target_scope == opportunity.scope
@@ -3287,28 +3293,89 @@ fn proposal_matches_opportunity(
         && proposal.observed_problem == opportunity.impact
 }
 
-fn proposal_uniquely_matches_opportunity(
+fn unique_proposal_opportunity(
+    proposal: &codexlens::advisor::Proposal,
+    opportunities: &[ViewOpportunity],
+    friction_proposals: &[Option<codexlens::advisor::Proposal>],
+) -> Option<usize> {
+    let mut matched = None;
+    for (index, opportunity) in opportunities.iter().enumerate() {
+        if proposal_matches_opportunity(proposal, opportunity, friction_proposals[index].as_ref()) {
+            if matched.is_some() {
+                return None;
+            }
+            matched = Some(index);
+        }
+    }
+    matched
+}
+
+fn optimize_proposal_matches<'a>(
     data: &CanonicalData,
     findings: &[Finding],
-    proposal: &codexlens::advisor::Proposal,
-    opportunity: &ViewOpportunity,
     opportunities: &[ViewOpportunity],
-) -> bool {
-    proposal_matches_opportunity(data, findings, proposal, opportunity)
-        && opportunities
-            .iter()
-            .filter(|candidate| proposal_matches_opportunity(data, findings, proposal, candidate))
-            .take(2)
-            .count()
-            == 1
+    batch: &'a DiffBatch,
+) -> OptimizeProposalMatches<'a> {
+    let friction_proposals = opportunities
+        .iter()
+        .map(|opportunity| {
+            (optimize_opportunity_kind(opportunity) == OptimizeOpportunityKind::Friction)
+                .then(|| finding_for_opportunity(findings, opportunity))
+                .flatten()
+                .and_then(|finding| codexlens::advisor::Proposal::from_finding(data, finding))
+        })
+        .collect::<Vec<_>>();
+    let mut opportunities_by_target = BTreeMap::<PathBuf, Vec<usize>>::new();
+    for (index, opportunity) in opportunities.iter().enumerate() {
+        opportunities_by_target
+            .entry(PathBuf::from(&opportunity.target))
+            .or_default()
+            .push(index);
+    }
+    let mut skipped_by_target = BTreeMap::<PathBuf, usize>::new();
+    for skipped in &batch.skipped {
+        *skipped_by_target
+            .entry(skipped.target_path.clone())
+            .or_default() += 1;
+    }
+
+    let mut matches = OptimizeProposalMatches {
+        skipped_by_opportunity: vec![None; opportunities.len()],
+        rendered_by_opportunity: vec![false; opportunities.len()],
+        linked_skipped: vec![false; batch.skipped.len()],
+    };
+    for (skip_index, skipped) in batch.skipped.iter().enumerate() {
+        let opportunity_index = match skipped.proposal.as_ref() {
+            Some(proposal) => {
+                unique_proposal_opportunity(proposal, opportunities, &friction_proposals)
+            }
+            None if skipped_by_target.get(&skipped.target_path) == Some(&1) => {
+                opportunities_by_target
+                    .get(&skipped.target_path)
+                    .filter(|indices| indices.len() == 1)
+                    .map(|indices| indices[0])
+            }
+            None => None,
+        };
+        if let Some(index) = opportunity_index {
+            matches.linked_skipped[skip_index] = true;
+            matches.skipped_by_opportunity[index].get_or_insert(skipped);
+        }
+    }
+    for rendered in &batch.rendered {
+        if let Some(index) =
+            unique_proposal_opportunity(&rendered.proposal, opportunities, &friction_proposals)
+        {
+            matches.rendered_by_opportunity[index] = true;
+        }
+    }
+    matches
 }
 
 fn optimize_investigation(
-    data: &CanonicalData,
-    findings: &[Finding],
-    opportunities: &[ViewOpportunity],
     opportunity: &ViewOpportunity,
-    batch: &DiffBatch,
+    skipped: Option<&codexlens::advisor::SkippedProposal>,
+    rendered: bool,
 ) -> OptimizeInvestigation {
     let target = bounded_text(&opportunity.target);
     let (root_cause_question, inspect_sections) = match optimize_opportunity_kind(opportunity) {
@@ -3333,18 +3400,6 @@ fn optimize_investigation(
             "The target and affected workflow evidence",
         ),
     };
-    let skipped = batch.skipped.iter().find(|skipped| {
-        skipped_matches_opportunity(data, findings, skipped, opportunity, opportunities, batch)
-    });
-    let rendered = batch.rendered.iter().any(|rendered| {
-        proposal_uniquely_matches_opportunity(
-            data,
-            findings,
-            &rendered.proposal,
-            opportunity,
-            opportunities,
-        )
-    });
     let proposal = skipped.and_then(|skipped| skipped.proposal.as_ref());
     let proposal_status = if proposal.is_some_and(|proposal| proposal.review_only) {
         "review_only"
@@ -3374,9 +3429,9 @@ fn optimize_investigation(
 fn briefing_opportunity_json(
     data: &CanonicalData,
     findings: &[Finding],
-    opportunities: &[ViewOpportunity],
     opportunity: &ViewOpportunity,
-    batch: &DiffBatch,
+    opportunity_index: usize,
+    matches: &OptimizeProposalMatches<'_>,
 ) -> serde_json::Value {
     let mut row = opportunity_json(opportunity);
     let (kind, key) = opportunity
@@ -3393,7 +3448,11 @@ fn briefing_opportunity_json(
             row[field] = canonical[field].clone();
         }
     }
-    let investigation = optimize_investigation(data, findings, opportunities, opportunity, batch);
+    let investigation = optimize_investigation(
+        opportunity,
+        matches.skipped_by_opportunity[opportunity_index],
+        matches.rendered_by_opportunity[opportunity_index],
+    );
     row["investigation"] = serde_json::json!({
         "root_cause_question": bounded_text(&investigation.root_cause_question),
         "inspect_target": bounded_text(&opportunity.target),
@@ -3410,17 +3469,20 @@ fn briefing_opportunity_json(
 
 fn append_optimize_opportunity(
     output: &mut String,
-    data: &CanonicalData,
     opportunity: &ViewOpportunity,
     findings: &[Finding],
-    opportunities: &[ViewOpportunity],
-    batch: &DiffBatch,
+    opportunity_index: usize,
+    matches: &OptimizeProposalMatches<'_>,
 ) {
     let problem = finding_for_opportunity(findings, opportunity)
         .map_or(opportunity.title.as_str(), |finding| {
             finding.summary.as_str()
         });
-    let investigation = optimize_investigation(data, findings, opportunities, opportunity, batch);
+    let investigation = optimize_investigation(
+        opportunity,
+        matches.skipped_by_opportunity[opportunity_index],
+        matches.rendered_by_opportunity[opportunity_index],
+    );
     output.push_str(&format!(
         "- {}: {}\n  impact: {}\n  owner: {}\n  target: {}\n  action: {}\n  follow-up: {}\n  Root-cause question: {}\n  Inspect sections: {}\n  Proposal status: {}\n",
         bounded_text(&opportunity.id),
@@ -3449,75 +3511,27 @@ fn append_optimize_opportunity(
     append_evidence(output, &opportunity.evidence);
 }
 
-fn skipped_matches_opportunity(
-    data: &CanonicalData,
-    findings: &[Finding],
-    skipped: &codexlens::advisor::SkippedProposal,
-    opportunity: &ViewOpportunity,
-    opportunities: &[ViewOpportunity],
-    batch: &DiffBatch,
-) -> bool {
-    match skipped.proposal.as_ref() {
-        Some(proposal) => proposal_uniquely_matches_opportunity(
-            data,
-            findings,
-            proposal,
-            opportunity,
-            opportunities,
-        ),
-        None => {
-            let same_target = skipped.target_path.as_path() == Path::new(&opportunity.target);
-            same_target
-                && opportunities
-                    .iter()
-                    .filter(|candidate| {
-                        skipped.target_path.as_path() == Path::new(&candidate.target)
-                    })
-                    .count()
-                    == 1
-                && batch
-                    .skipped
-                    .iter()
-                    .filter(|candidate| candidate.target_path == skipped.target_path)
-                    .count()
-                    == 1
-        }
-    }
-}
-
 fn unlinked_skipped_proposals<'a>(
-    data: &CanonicalData,
-    findings: &[Finding],
     batch: &'a DiffBatch,
-    opportunities: &[ViewOpportunity],
+    matches: &OptimizeProposalMatches<'_>,
 ) -> Vec<&'a codexlens::advisor::SkippedProposal> {
     batch
         .skipped
         .iter()
-        .filter(|skipped| {
-            !opportunities.iter().any(|opportunity| {
-                skipped_matches_opportunity(
-                    data,
-                    findings,
-                    skipped,
-                    opportunity,
-                    opportunities,
-                    batch,
-                )
-            })
-        })
+        .zip(&matches.linked_skipped)
+        .filter_map(|(skipped, linked)| (!linked).then_some(skipped))
         .collect()
 }
 
 fn render_optimize_omitted_details(
-    data: &CanonicalData,
     findings: &[Finding],
     opportunities: &[ViewOpportunity],
     batch: &DiffBatch,
+    matches: &OptimizeProposalMatches<'_>,
 ) -> String {
     let mut output =
-        render_optimize_omitted_findings_and_proposals(data, findings, opportunities, batch);
-    let unlinked_skipped = unlinked_skipped_proposals(data, findings, batch, opportunities);
+        render_optimize_omitted_findings_and_proposals(findings, opportunities, batch, matches);
+    let unlinked_skipped = unlinked_skipped_proposals(batch, matches);
     if unlinked_skipped.len() > CLI_VIEW_ROW_LIMIT {
         output.push_str("Omitted proposal limitation details:\n");
         for skipped in unlinked_skipped.iter().skip(CLI_VIEW_ROW_LIMIT) {
@@ -3528,23 +3542,16 @@ fn render_optimize_omitted_details(
 }
 
 fn render_optimize_omitted_findings_and_proposals(
-    data: &CanonicalData,
     findings: &[Finding],
     opportunities: &[ViewOpportunity],
     batch: &DiffBatch,
+    matches: &OptimizeProposalMatches<'_>,
 ) -> String {
     let mut output = String::new();
     if opportunities.len() > CLI_VIEW_ROW_LIMIT {
         output.push_str("Omitted finding details:\n");
-        for opportunity in opportunities.iter().skip(CLI_VIEW_ROW_LIMIT) {
-            append_optimize_opportunity(
-                &mut output,
-                data,
-                opportunity,
-                findings,
-                opportunities,
-                batch,
-            );
+        for (index, opportunity) in opportunities.iter().enumerate().skip(CLI_VIEW_ROW_LIMIT) {
+            append_optimize_opportunity(&mut output, opportunity, findings, index, matches);
         }
     }
     if batch.rendered.len() > CLI_VIEW_ROW_LIMIT {
@@ -3558,13 +3565,13 @@ fn render_optimize_omitted_findings_and_proposals(
 }
 
 fn render_optimize_json_omitted_details(
-    data: &CanonicalData,
     findings: &[Finding],
     opportunities: &[ViewOpportunity],
     batch: &DiffBatch,
+    matches: &OptimizeProposalMatches<'_>,
 ) -> Result<String> {
     let mut output =
-        render_optimize_omitted_findings_and_proposals(data, findings, opportunities, batch);
+        render_optimize_omitted_findings_and_proposals(findings, opportunities, batch, matches);
     let diff: serde_json::Value = serde_json::from_str(&render_json_diff(batch)?)?;
     let mut visible_skipped = diff["data"]["skipped"]
         .as_array()
@@ -3639,6 +3646,7 @@ fn render_optimize_briefing_human(
     opportunities: &[ViewOpportunity],
     waste: &WasteReport,
     batch: &DiffBatch,
+    matches: &OptimizeProposalMatches<'_>,
     freshness: &StoreFreshness,
     coverage: &ReportCoverage,
     options: &StoreOptions,
@@ -3664,15 +3672,8 @@ fn render_optimize_briefing_human(
             );
         }
     } else {
-        for opportunity in opportunities.iter().take(CLI_VIEW_ROW_LIMIT) {
-            append_optimize_opportunity(
-                &mut output,
-                data,
-                opportunity,
-                findings,
-                opportunities,
-                batch,
-            );
+        for (index, opportunity) in opportunities.iter().enumerate().take(CLI_VIEW_ROW_LIMIT) {
+            append_optimize_opportunity(&mut output, opportunity, findings, index, matches);
         }
         append_omitted(&mut output, opportunities.len());
     }
@@ -3706,7 +3707,7 @@ fn render_optimize_briefing_human(
         }
         append_omitted(&mut output, batch.rendered.len());
     }
-    let unlinked_skipped = unlinked_skipped_proposals(data, findings, batch, opportunities);
+    let unlinked_skipped = unlinked_skipped_proposals(batch, matches);
     if !unlinked_skipped.is_empty() {
         output.push_str("\nOTHER PROPOSAL LIMITATIONS\n");
     }
@@ -3739,6 +3740,7 @@ fn render_optimize_briefing_json(
     opportunities: &[ViewOpportunity],
     waste: &WasteReport,
     batch: &DiffBatch,
+    matches: &OptimizeProposalMatches<'_>,
     freshness: &StoreFreshness,
     coverage: &ReportCoverage,
     options: &StoreOptions,
@@ -3747,9 +3749,10 @@ fn render_optimize_briefing_json(
     let overhead = filter_overhead(codexlens::analysis::views::overhead(data), &options.scope);
     let finding_rows = opportunities
         .iter()
+        .enumerate()
         .take(CLI_VIEW_ROW_LIMIT)
-        .map(|opportunity| {
-            briefing_opportunity_json(data, findings, opportunities, opportunity, batch)
+        .map(|(index, opportunity)| {
+            briefing_opportunity_json(data, findings, opportunity, index, matches)
         })
         .collect::<Vec<_>>();
     let safe_diff_document: serde_json::Value = serde_json::from_str(&render_json_diff(batch)?)?;
@@ -3779,14 +3782,6 @@ fn render_optimize_briefing_json(
                 .iter()
                 .take(CLI_VIEW_ROW_LIMIT)
                 .map(|skipped| bounded_text(&skipped.reason)),
-        )
-        .chain(
-            proposals["skipped"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .take(CLI_VIEW_ROW_LIMIT)
-                .filter_map(|skipped| skipped["reason"].as_str().map(str::to_owned)),
         )
         .collect::<Vec<_>>();
     let document = serde_json::json!({
@@ -3926,12 +3921,13 @@ fn render_optimize_human_with_period(
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, OutputFormat, presentation_batch, render_optimize_json_omitted_details,
-        session_selection_options, unlinked_skipped_proposals,
+        Cli, Command, OutputFormat, optimize_proposal_matches, presentation_batch,
+        render_optimize_json_omitted_details, session_selection_options,
+        unlinked_skipped_proposals,
     };
     use clap::Parser;
     use codexlens::advisor::{DiffBatch, Proposal, ProposalAction, RenderedDiff, SkippedProposal};
-    use codexlens::analysis::{Finding, FindingConfidence, FindingScope};
+    use codexlens::analysis::{FindingConfidence, FindingScope};
     use codexlens::model::{
         CanonicalData, Surface, SurfaceKind, SurfaceLoadMode, SurfaceScope, SurfaceUsageState,
     };
@@ -4013,7 +4009,8 @@ mod tests {
             ],
         };
 
-        let unlinked = unlinked_skipped_proposals(&data, &[] as &[Finding], &batch, &[opportunity]);
+        let matches = optimize_proposal_matches(&data, &[], &[opportunity], &batch);
+        let unlinked = unlinked_skipped_proposals(&batch, &matches);
 
         assert_eq!(unlinked.len(), 1);
         assert_eq!(unlinked[0].reason, "unlinked no-proposal skip");
@@ -4042,9 +4039,8 @@ mod tests {
         };
 
         let batch = presentation_batch(&batch).unwrap();
-        let output =
-            render_optimize_json_omitted_details(&CanonicalData::default(), &[], &[], &batch)
-                .unwrap();
+        let matches = optimize_proposal_matches(&CanonicalData::default(), &[], &[], &batch);
+        let output = render_optimize_json_omitted_details(&[], &[], &batch, &matches).unwrap();
 
         assert!(output.contains(&rendered_target.to_string_lossy().to_string()));
         assert!(output.contains("16384-byte JSON limit"));
