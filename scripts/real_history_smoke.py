@@ -369,9 +369,6 @@ def main(argv: list[str] | None = None) -> int:
         print(str(error), file=sys.stderr)
         return 1
 
-    if not report["raw_input_immutable"]:
-        print("real-history smoke failed: selected raw inputs changed", file=sys.stderr)
-        return 1
     if args.require_actionable and not report["actionable_output"]:
         print("real-history smoke found no actionable output", file=sys.stderr)
         return 1

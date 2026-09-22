@@ -334,13 +334,19 @@ filesystems.
 - finding count and per-kind finding counts;
 - total, reviewable, and skipped proposal counts;
 - total and per-command runtime; and
-- before/after aggregate hashes, sizes, and `raw_input_immutable`.
+- before/after aggregate hashes, sizes, and `raw_input_immutable` as a signal
+  that the selected Codex home changed during the run.
 
 `coverage.partial_or_unknown` is the separate partial/unknown-coverage signal.
 Review `actionable_output`, coverage limitations, and the exact selected scope
-locally. Do not use `optimize --apply` in the smoke procedure. A successful
-run is evidence for the selected source only; it is not a product-readiness or
-release claim.
+locally. The before/after comparison covers the whole selected Codex home and
+cannot attribute changes to the smoke process; concurrent writes by Codex or
+other processes may make `raw_input_immutable=false`. That value is diagnostic
+and does not by itself fail the smoke. The smoke fails on validation,
+command-execution, or report errors, or when `--require-actionable` is set and
+no actionable output is produced. Do not use `optimize --apply` in the smoke
+procedure. A successful run is one readiness input for the selected source; it
+is not, by itself, a product readiness or release approval.
 
 ## Acceptance tests
 
