@@ -1318,6 +1318,16 @@ fn optimize_chain_preserves_the_finding_target_and_evidence() {
         proposal["proposal"]["distinct_sessions"],
         top_fix["distinct_sessions"]
     );
+    let optimize_finding = optimize["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["id"] == top_fix["id"])
+        .expect("matching finding in optimize briefing");
+    assert_eq!(
+        optimize_finding["investigation"]["proposal_status"],
+        "reviewable"
+    );
     assert!(
         proposal["proposal"]["evidence"]
             .as_array()
@@ -1362,6 +1372,67 @@ fn optimize_routes_doctor_overhead_to_a_review_only_skip() {
         &run_args(&["optimize", "--print", "--format", "json"], &store),
         "optimize",
     );
+    let briefing_finding = optimize["data"]["findings"]
+        .as_array()
+        .and_then(|findings| {
+            findings
+                .iter()
+                .find(|finding| finding["id"] == overhead["id"])
+        })
+        .expect("doctor overhead opportunity in optimize findings");
+    for field in [
+        "id",
+        "scope",
+        "target",
+        "impact",
+        "occurrences",
+        "distinct_sessions",
+        "action",
+        "evidence",
+    ] {
+        assert_eq!(briefing_finding[field], overhead[field], "optimize {field}");
+    }
+    assert_eq!(
+        briefing_finding["investigation"]["proposal_status"],
+        "review_only"
+    );
+    assert!(
+        briefing_finding["investigation"]["root_cause_question"]
+            .as_str()
+            .is_some_and(|question| question.contains("sections"))
+    );
+    assert!(
+        briefing_finding["investigation"]["inspect_sections"]
+            .as_str()
+            .is_some_and(|sections| sections.contains("aggregate startup bytes"))
+    );
+    assert!(
+        briefing_finding["investigation"]["unknowns"]
+            .as_array()
+            .is_some_and(|unknowns| unknowns.iter().any(|value| value
+                .as_str()
+                .is_some_and(|text| text.contains("aggregate startup overhead"))))
+    );
+    let findings = optimize["data"]["findings"].as_array().unwrap();
+    let friction = findings
+        .iter()
+        .position(|finding| {
+            !finding["id"].as_str().unwrap().starts_with("surface:")
+                && !finding["id"].as_str().unwrap().starts_with("overhead:")
+        })
+        .expect("recurring friction opportunity");
+    let configuration = findings
+        .iter()
+        .position(|finding| {
+            finding["id"].as_str().unwrap().starts_with("surface:")
+                || finding["id"].as_str().unwrap().starts_with("overhead:")
+        })
+        .expect("configuration opportunity");
+    assert!(
+        friction < configuration,
+        "friction must precede configuration trimming"
+    );
+
     let skipped = optimize["data"]["proposals"]["skipped"].as_array().unwrap();
     let proposal = skipped
         .iter()
@@ -1388,6 +1459,63 @@ fn optimize_routes_doctor_overhead_to_a_review_only_skip() {
     );
     assert!(String::from_utf8_lossy(&diff.stdout).contains("Proposal add"));
     assert!(String::from_utf8_lossy(&diff.stderr).contains("review-only"));
+
+    let printed = run_args(&["optimize", "--print"], &store);
+    assert!(printed.status.success());
+    let stdout = String::from_utf8_lossy(&printed.stdout);
+    assert!(stdout.contains(overhead["id"].as_str().unwrap()));
+    assert!(stdout.contains("Root-cause question:"));
+    assert!(stdout.contains("Inspect sections:"));
+    assert!(stdout.contains("Proposal status: review-only"));
+    assert!(!stdout.contains("No selected findings were observed."));
+    assert_eq!(fs::read(&target).unwrap(), before_target);
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn optimize_print_keeps_a_bounded_plan_when_every_proposal_is_skipped() {
+    let (store, target, project_root) = rendered_overhead_store();
+    let before_target = fs::read(&target).unwrap();
+    {
+        let store = Store::open(&store).unwrap();
+        store
+            .connection()
+            .execute("DELETE FROM tool_results", [])
+            .unwrap();
+    }
+
+    let printed = run_args(&["optimize", "--print"], &store);
+    assert!(printed.status.success());
+    assert!(printed.stderr.is_empty());
+    let stdout = String::from_utf8_lossy(&printed.stdout);
+    assert!(
+        stdout.len() < 20_000,
+        "briefing exceeded its synthetic bound"
+    );
+    assert!(stdout.contains("No reviewable diffs were rendered."));
+    assert!(stdout.contains("Reduce startup context overhead"));
+    assert!(stdout.contains("Inspect sections:"));
+    assert!(stdout.contains("Review and slim always-on configuration at "));
+    assert!(!stdout.contains("No selected findings were observed."));
+
+    let optimize = parse_json_report(
+        &run_args(&["optimize", "--print", "--format", "json"], &store),
+        "optimize",
+    );
+    assert_eq!(optimize["data"]["counts"]["reviewable_proposal_count"], 0);
+    assert!(
+        optimize["data"]["counts"]["skipped_proposal_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+    assert!(
+        optimize["data"]["findings"]
+            .as_array()
+            .is_some_and(|findings| !findings.is_empty())
+    );
     assert_eq!(fs::read(&target).unwrap(), before_target);
 
     let _ = fs::remove_file(store);
@@ -5072,6 +5200,344 @@ fn doctor_marks_unknown_surface_usage_inconclusive() {
             .as_array()
             .unwrap()
             .is_empty()
+    );
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn optimize_reports_unavailable_surface_evidence_without_recommending_removal() {
+    let store = unknown_surface_store();
+
+    let human = run_args(&["optimize", "--print"], &store);
+    assert!(human.status.success());
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains(
+        "No findings had enough evidence for an actionable recommendation; skipped items are listed below."
+    ));
+    assert!(stdout.contains("/synthetic/unknown-skill/SKILL.md"));
+    assert!(
+        stdout.contains("configuration surface was skipped because usage evidence is unavailable")
+    );
+    assert!(!stdout.contains("Proposal remove"));
+    assert!(!stdout.contains("synthetic instruction snapshot"));
+
+    let json = run_args(&["optimize", "--print", "--format", "json"], &store);
+    let document = parse_json_report(&json, "optimize");
+    assert!(document["data"]["findings"].as_array().unwrap().is_empty());
+    let skipped = document["data"]["proposals"]["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["target_path"] == "/synthetic/unknown-skill/SKILL.md")
+        .expect("unavailable surface evidence should be listed as skipped");
+    assert!(skipped["proposal"].is_null());
+    assert!(
+        skipped["reason"]
+            .as_str()
+            .unwrap()
+            .contains("configuration surface was skipped because usage evidence is unavailable")
+    );
+    assert!(
+        document["data"]["counts"]["skipped_proposal_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+    assert!(!String::from_utf8_lossy(&json.stdout).contains("synthetic instruction snapshot"));
+    assert!(
+        !human
+            .stdout
+            .windows("synthetic instruction snapshot".len())
+            .any(|window| window == "synthetic instruction snapshot".as_bytes())
+    );
+
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn optimize_print_sends_omitted_opportunity_details_to_stderr() {
+    let store = fixture_store();
+    let project_root = temp_store_path("omitted-opportunities");
+    fs::create_dir(&project_root).unwrap();
+    let mut surfaces = Vec::new();
+    let mut targets = Vec::new();
+    for index in 0..=50 {
+        let target = project_root.join(format!("skill-{index:02}/SKILL.md"));
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "synthetic review-only surface\n").unwrap();
+        targets.push(target.clone());
+        surfaces.push(Surface {
+            id: format!("synthetic-unused-{index:02}"),
+            kind: SurfaceKind::Skill,
+            name: format!("synthetic-unused-{index:02}"),
+            path: Some(target),
+            scope: SurfaceScope::Global,
+            enabled: Some(true),
+            load_mode: SurfaceLoadMode::OnDemand,
+            static_bytes: Some(64),
+            startup_bytes: Some(0),
+            observed_uses: 0,
+            observed_sessions: 1,
+            usage_state: SurfaceUsageState::Unused,
+            limitations: Vec::new(),
+        });
+    }
+    Store::open(&store)
+        .unwrap()
+        .replace_surfaces(&surfaces)
+        .unwrap();
+
+    let human = run_args(&["optimize", "--print"], &store);
+    assert!(human.status.success());
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(stdout.contains("Omitted ") && stdout.contains(" additional rows."));
+    assert!(!stdout.contains("surface:synthetic-unused-50"));
+    assert!(stderr.contains("surface:synthetic-unused-50"));
+    assert!(stderr.contains("Skip reason: configuration opportunity is actionable"));
+
+    let json = run_args(&["optimize", "--print", "--format", "json"], &store);
+    assert!(json.status.success());
+    let document: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(document["schema_version"], 1);
+    assert_eq!(document["command"], "optimize");
+    assert!(
+        document["data"]["counts"]["finding_count"]
+            .as_u64()
+            .is_some_and(|count| count > 50)
+    );
+    assert!(
+        document["data"]["counts"]["finding_omitted_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+    assert!(!String::from_utf8_lossy(&json.stdout).contains("surface:synthetic-unused-50"));
+    assert!(String::from_utf8_lossy(&json.stderr).contains("surface:synthetic-unused-50"));
+
+    for target in targets {
+        let _ = fs::remove_file(target);
+    }
+    for index in 0..=50 {
+        let _ = fs::remove_dir(project_root.join(format!("skill-{index:02}")));
+    }
+    let _ = fs::remove_dir(project_root);
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn optimize_json_sends_capped_unlinked_skip_details_to_stderr() {
+    let store = fixture_store();
+    let project_root = temp_store_path("capped-skips");
+    fs::create_dir(&project_root).unwrap();
+    let mut surfaces = Vec::new();
+    let mut reviewable_targets = Vec::new();
+    let mut unavailable_targets = Vec::new();
+    for index in 0..20 {
+        let target = project_root.join(format!("a-skill-{index:02}/SKILL.md"));
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "synthetic review-only surface\n").unwrap();
+        reviewable_targets.push(target.clone());
+        surfaces.push(Surface {
+            id: format!("synthetic-reviewable-{index:02}"),
+            kind: SurfaceKind::Skill,
+            name: format!("synthetic-reviewable-{index:02}"),
+            path: Some(target),
+            scope: SurfaceScope::Global,
+            enabled: Some(true),
+            load_mode: SurfaceLoadMode::OnDemand,
+            static_bytes: Some(64),
+            startup_bytes: Some(0),
+            observed_uses: 0,
+            observed_sessions: 1,
+            usage_state: SurfaceUsageState::Unused,
+            limitations: Vec::new(),
+        });
+    }
+    for index in 0..40 {
+        let target = project_root.join(format!("z-unknown-{index:02}/SKILL.md"));
+        unavailable_targets.push(target.clone());
+        surfaces.push(Surface {
+            id: format!("synthetic-unknown-{index:02}"),
+            kind: SurfaceKind::Skill,
+            name: format!("synthetic-unknown-{index:02}"),
+            path: Some(target),
+            scope: SurfaceScope::Global,
+            enabled: Some(true),
+            load_mode: SurfaceLoadMode::OnDemand,
+            static_bytes: Some(64),
+            startup_bytes: Some(0),
+            observed_uses: 0,
+            observed_sessions: 0,
+            usage_state: SurfaceUsageState::Unknown,
+            limitations: vec!["synthetic usage evidence is unavailable".to_owned()],
+        });
+    }
+    Store::open(&store)
+        .unwrap()
+        .replace_surfaces(&surfaces)
+        .unwrap();
+
+    let output = run_args(&["optimize", "--print", "--format", "json"], &store);
+    assert!(output.status.success());
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        document["data"]["proposals"]["skipped_omitted_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let omitted_unknown = unavailable_targets
+        .iter()
+        .find(|target| !stdout.contains(&target.to_string_lossy().to_string()))
+        .expect("at least one unknown skip should be omitted from bounded JSON");
+    assert!(stderr.contains(&omitted_unknown.to_string_lossy().to_string()));
+
+    for target in reviewable_targets {
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_dir(target.parent().unwrap());
+    }
+    let _ = fs::remove_dir(project_root);
+    let _ = fs::remove_file(store);
+}
+
+#[test]
+fn optimize_print_json_counts_and_reports_json_only_diff_skips() {
+    let (store, target, project_root) =
+        rendered_diff_store_with_content("token=synthetic-redaction-value\n");
+    let surfaces = (0..50)
+        .map(|index| Surface {
+            id: format!("synthetic-unavailable-{index:02}"),
+            kind: SurfaceKind::Skill,
+            name: format!("synthetic-unavailable-{index:02}"),
+            path: Some(project_root.join(format!("000-skip-{index:02}.md"))),
+            scope: SurfaceScope::Global,
+            enabled: Some(true),
+            load_mode: SurfaceLoadMode::OnDemand,
+            static_bytes: Some(64),
+            startup_bytes: Some(0),
+            observed_uses: 0,
+            observed_sessions: 0,
+            usage_state: SurfaceUsageState::Unknown,
+            limitations: vec!["synthetic usage evidence is unavailable".to_owned()],
+        })
+        .collect::<Vec<_>>();
+    Store::open(&store)
+        .unwrap()
+        .replace_surfaces(&surfaces)
+        .unwrap();
+
+    let output = run_args(&["optimize", "--print", "--format", "json"], &store);
+    assert!(output.status.success());
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["command"], "optimize");
+    let proposals = &document["data"]["proposals"];
+    let counts = &document["data"]["counts"];
+    let rendered_count = proposals["rendered"].as_array().unwrap().len() as u64
+        + proposals["rendered_omitted_count"].as_u64().unwrap();
+    let skipped_count = proposals["skipped"].as_array().unwrap().len() as u64
+        + proposals["skipped_omitted_count"].as_u64().unwrap();
+    assert_eq!(counts["reviewable_proposal_count"], rendered_count);
+    assert_eq!(
+        counts["reviewable_proposal_omitted_count"],
+        proposals["rendered_omitted_count"]
+    );
+    assert_eq!(counts["skipped_proposal_count"], skipped_count);
+    assert_eq!(
+        counts["skipped_proposal_omitted_count"],
+        proposals["skipped_omitted_count"]
+    );
+    let redacted_opportunity = document["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| {
+            finding["investigation"]["inspect_target"] == target.to_string_lossy().as_ref()
+        })
+        .expect("redacted proposal should remain linked to its optimize finding");
+    assert_eq!(
+        redacted_opportunity["investigation"]["proposal_status"],
+        "skipped"
+    );
+    assert!(
+        redacted_opportunity["investigation"]["skip_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("redaction"))
+    );
+    assert!(
+        proposals["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["target_path"] != target.to_string_lossy().as_ref())
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&target.to_string_lossy().to_string()));
+    assert!(stderr.contains("redaction"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-redaction-value"));
+
+    let _ = fs::remove_file(store);
+    let _ = fs::remove_file(target);
+    let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn optimize_keeps_ambiguous_same_target_skips_individual() {
+    let store = fixture_store();
+    let target = PathBuf::from("/synthetic/shared/AGENTS.md");
+    Store::open(&store)
+        .unwrap()
+        .replace_surfaces(&[
+            Surface {
+                id: "synthetic-skip-a".to_owned(),
+                kind: SurfaceKind::Instruction,
+                name: "shared-a".to_owned(),
+                path: Some(target.clone()),
+                scope: SurfaceScope::Project(PathBuf::from("/synthetic/shared")),
+                enabled: Some(true),
+                load_mode: SurfaceLoadMode::StartupFull,
+                static_bytes: Some(64),
+                startup_bytes: Some(64),
+                observed_uses: 0,
+                observed_sessions: 1,
+                usage_state: SurfaceUsageState::Unused,
+                limitations: Vec::new(),
+            },
+            Surface {
+                id: "synthetic-skip-b".to_owned(),
+                kind: SurfaceKind::Instruction,
+                name: "shared-b".to_owned(),
+                path: Some(target.clone()),
+                scope: SurfaceScope::Project(PathBuf::from("/synthetic/shared")),
+                enabled: Some(true),
+                load_mode: SurfaceLoadMode::StartupFull,
+                static_bytes: Some(64),
+                startup_bytes: Some(64),
+                observed_uses: 0,
+                observed_sessions: 1,
+                usage_state: SurfaceUsageState::Unused,
+                limitations: Vec::new(),
+            },
+        ])
+        .unwrap();
+
+    let human = run_args(&["optimize", "--print"], &store);
+    assert!(human.status.success());
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    let reason = "Skipped /synthetic/shared/AGENTS.md: configuration opportunity is actionable but the configured surface has no readable stored instruction baseline";
+    assert_eq!(stdout.matches(reason).count(), 2, "{stdout}");
+
+    let json = parse_json_report(
+        &run_args(&["optimize", "--print", "--format", "json"], &store),
+        "optimize",
+    );
+    let skipped = json["data"]["proposals"]["skipped"].as_array().unwrap();
+    assert_eq!(
+        skipped
+            .iter()
+            .filter(|row| row["target_path"] == "/synthetic/shared/AGENTS.md")
+            .count(),
+        2
     );
 
     let _ = fs::remove_file(store);
