@@ -174,21 +174,29 @@ command can be inferred; it is never turned into a shell prerequisite.
 
 ## cclens behavioral oracle
 
-The user-facing shape is derived from cclens, while Codex-specific parsing
-remains behind codexlens' adapter. These are the exact source locations used as
-the behavioral oracle:
+The user-facing meaning is derived from cclens, while Codex-specific parsing
+remains behind codexlens' adapter. The comparison baseline is cclens commit
+[`3df5f76`](https://github.com/lambdalisue/cclens/commit/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70)
+(2026-09-24). The paired synthetic inputs live in
+[analysis/cclens-command-contract](../../tests/fixtures/analysis/cclens-command-contract)
+and [analysis/command-contract.jsonl](../../tests/fixtures/analysis/command-contract.jsonl).
+[reference-output.json](../../tests/fixtures/analysis/cclens-command-contract/reference-output.json)
+contains selected JSON content emitted by the pinned cclens executable. The
+CLI test checks shared semantic signals against that output while allowing
+product-specific envelopes, labels, and measurement values. These pinned
+source locations are the behavioral oracle:
 
-| Contract area | cclens source location |
+| Contract area | cclens source location at `3df5f76` |
 | --- | --- |
-| command enum, format flags, and dispatch/scope routing | [`src/cli.rs#L47-L223`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L47-L223), [`src/cli.rs#L225-L322`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L225-L322) |
-| doctor ordering, empty state, cost, pruning, and healthy state | [`src/cli.rs#L750-L1032`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L750-L1032) |
-| stuck, failure, prompt, overhead, analysis, usage, and inventory views | [`src/cli.rs#L1176-L1237`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L1176-L1237), [`src/cli.rs#L1242-L1379`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L1242-L1379), [`src/cli.rs#L1388-L1583`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L1388-L1583), [`src/cli.rs#L1584-L2220`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L1584-L2220) |
-| SQL bounds and read-only query behavior | [`src/cli.rs#L703-L746`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L703-L746) |
-| finding model, global/project routing, evidence, and action counts | [`src/core/optimize.rs#L11-L122`](https://github.com/lambdalisue/cclens/blob/main/src/core/optimize.rs#L11-L122) |
-| local-only optimization, privacy, concrete actions, and follow-up workflow | [`src/core/optimize.rs#L132-L213`](https://github.com/lambdalisue/cclens/blob/main/src/core/optimize.rs#L132-L213), [`src/core/optimize.rs#L215-L340`](https://github.com/lambdalisue/cclens/blob/main/src/core/optimize.rs#L215-L340) |
-| waste ranking and its actionable opportunity union | [`src/cli.rs#L2274-L2407`](https://github.com/lambdalisue/cclens/blob/main/src/cli.rs#L2274-L2407) |
-| doctor operational contract | [`doctor/SKILL.md#L8-L44`](https://github.com/lambdalisue/cclens/blob/main/plugins/cclens/skills/doctor/SKILL.md#L8-L44) |
-| optimize operational contract | [`optimize/SKILL.md#L8-L50`](https://github.com/lambdalisue/cclens/blob/main/plugins/cclens/skills/optimize/SKILL.md#L8-L50) |
+| command enum, format flags, and dispatch/scope routing | [`src/cli.rs#L41-L227`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/src/cli.rs#L41-L227), [`src/cli.rs#L227-L318`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/src/cli.rs#L227-L318) |
+| doctor ordering, empty state, cost, pruning, and healthy state | [`src/cli.rs#L756-L1037`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/src/cli.rs#L756-L1037) |
+| stuck, failures, prompts, overhead, usage, and inventory views | [`src/cli.rs#L1178-L1236`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/src/cli.rs#L1178-L1236), [`src/cli.rs#L1247-L1388`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/src/cli.rs#L1247-L1388), [`src/cli.rs#L1390-L1585`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/src/cli.rs#L1390-L1585), [`src/cli.rs#L1919-L2262`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/src/cli.rs#L1919-L2262) |
+| SQL bounds and read-only query behavior | [`src/cli.rs#L709-L755`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/src/cli.rs#L709-L755) |
+| finding model, global/project routing, evidence, and action counts | [`src/core/optimize.rs#L17-L144`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/src/core/optimize.rs#L17-L144) |
+| local-only optimization and briefing | [`src/core/optimize.rs#L219-L473`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/src/core/optimize.rs#L219-L473) |
+| waste ranking and actionable opportunities | [`src/cli.rs#L2284-L2416`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/src/cli.rs#L2284-L2416) |
+| doctor operational contract | [`doctor/SKILL.md`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/plugins/cclens/skills/doctor/SKILL.md) |
+| optimize operational contract | [`optimize/SKILL.md`](https://github.com/lambdalisue/cclens/blob/3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70/plugins/cclens/skills/optimize/SKILL.md) |
 
 ### Codex input mapping
 
@@ -306,8 +314,31 @@ data rather than rollout records.
 | one observed startup Skill above the bounded heavy threshold | inventory and waste may recommend slimming/re-scoping, with evidence |
 | `token=contract-private-value` in synthetic prompt/failure text | the marker is redacted from human, Markdown, and JSON evidence |
 
-The fixture is synthetic only; no real rollout, prompt, tool payload, path, or
-identifier may be copied into it.
+Both fixtures are synthetic only; no real rollout, prompt, tool payload, path,
+or identifier may be copied into them. The paired-signal checks in
+`command_contract_fixture_preserves_scopes_targets_and_evidence` compare
+codexlens report content to the cclens executable snapshot, not just parser or
+store behavior:
+
+| Fixture signal | cclens observable meaning | codexlens assertion in `tests/cli.rs` |
+| --- | --- | --- |
+| three synthetic sessions | `analyze` reports the number of ingested sessions | session count equals the cclens JSON output |
+| recurring failures in global and project scopes | `failures` groups recurring causes and routes each to an owner; `doctor` prioritizes actionable findings | `command_contract_fixture_preserves_scopes_targets_and_evidence`: failure categories, global/project routing, target/action/evidence, and doctor top fixes |
+| repeated edits and failure/edit loop | `stuck` identifies a bounded re-edit episode; `waste` and `doctor` surface its action | same test: `src/lib.rs` sequence, stable `stuck:src/lib.rs|loop` identity, and target/action/evidence through waste/doctor/optimize |
+| configured but unused Skill and observed heavy Skill | `inventory` reports usage/cost; `waste` ranks concrete cleanup | same test: inventory use state, remove/slim action, concrete target, and waste opportunity |
+| user steering prompts | `prompts` classifies steer/correct/question/instruct behavior | same test: non-empty typed `prompts` rows with bounded evidence |
+| multi-project session-start observations | `overhead` reports a global floor and per-project costs | same test: global row first and each project represented |
+| identical read-only session-count query | `sql` returns bounded query results | cclens and codexlens `sql`/ `query` return the same synthetic session count |
+| findings carried into the optimizer | `optimize --print` retains failures, stuck paths, and unused surfaces | same test: the corresponding codexlens `optimize --print` JSON findings and configuration waste retain those signals |
+| private marker in synthetic input | cclens-style reports retain bounded evidence without exposing raw sensitive content | same test: table, Markdown, and JSON outputs omit the marker |
+
+The cclens fixture README records the input structures and source revision
+used to construct it. The snapshot omits volatile paths and freshness fields.
+The test does not rebuild cclens; regenerating the reference requires building
+the pinned source and running
+`python3 scripts/refresh_cclens_contract_reference.py --source /path/to/cclens --cclens /path/to/cclens/target/debug/cclens`
+against the checked-in synthetic input. The script rejects any source revision
+other than the pinned SHA.
 
 `command_contract_fixture_covers_empty_and_partial_reports` also runs every
 analysis command against the existing empty-store and coverage-limitation

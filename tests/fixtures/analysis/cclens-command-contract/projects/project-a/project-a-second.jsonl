@@ -1,0 +1,3 @@
+{"type":"user","timestamp":"2026-02-02T00:00:00.000Z","cwd":"/fixture/project-a","message":{"content":"Run the synthetic test command."}}
+{"type":"assistant","timestamp":"2026-02-01T00:00:14.000Z","message":{"id":"m-project-fail-1","model":"claude-opus-4-7","usage":{"input_tokens":100,"output_tokens":10},"content":[{"type":"tool_use","id":"project-fail-1","name":"Bash","input":{"command":"cargo test"}}]}}
+{"type":"user","timestamp":"2026-02-02T00:00:02.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"project-fail-1","content":"test result: FAILED. 0 passed; 1 failed","is_error":true}]}}
