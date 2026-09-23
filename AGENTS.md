@@ -57,6 +57,12 @@ Prefer the standard library and existing dependencies. Do not add a
 dependency, abstraction, or output format without a concrete issue or
 measured need.
 
+## Commit Messages
+
+- Follow the commit-message policy in `CONTRIBUTING.md`.
+
+- Do not create commits unless the user explicitly requests it.
+
 ## Fixtures and privacy
 
 - Tests use only synthetic data under `tests/fixtures/`.
