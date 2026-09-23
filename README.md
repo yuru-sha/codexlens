@@ -1,5 +1,7 @@
 # codexlens
 
+[English](README.md) | [日本語](README.ja.md)
+
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/yuru-sha/codexlens)
 
 Analyze Codex sessions and turn recurring friction into actionable
@@ -299,3 +301,7 @@ project.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## GitHub Release
+
+See docs/agents/release.md for the release note format and creation procedure. The shared body template is .github/release-notes-template.md, and the generated-note categories are managed in .github/release.yml.
