@@ -669,10 +669,6 @@ fn main() -> Result<()> {
                     "reporting period filters are supported by optimize --diff only; optimize --apply requires the unfiltered store"
                 );
             }
-            if interactive && !store.frozen {
-                let store_path = store.store_path()?;
-                refresh_reporting_store(&store, &store_path)?;
-            }
             let (data, freshness, selection) = load_reporting(&store)?;
             let scoped_data = data_for_scope(&data, &store.scope);
             let findings = analyze_default(&scoped_data)
@@ -1598,11 +1594,6 @@ fn bounded_path(path: &Path) -> String {
 }
 
 fn run_analyze(options: &StoreOptions) -> Result<()> {
-    validate_reporting_options(options)?;
-    if !options.frozen {
-        let store_path = options.store_path()?;
-        refresh_reporting_store(options, &store_path)?;
-    }
     run_finding_report(options, analyze_default, "analyze")
 }
 
@@ -1616,7 +1607,7 @@ fn refresh_reporting_store(options: &StoreOptions, store_path: &Path) -> Result<
     };
     let outcome = refresh_store(&refresh).with_context(|| {
         format!(
-            "analyze could not refresh derived store {}",
+            "report could not refresh derived store {}",
             bounded_display(store_path)
         )
     })?;
@@ -1896,10 +1887,6 @@ struct DoctorView {
 }
 
 fn run_doctor_report(options: &StoreOptions, limit: Option<usize>) -> Result<()> {
-    let store_path = options.store_path()?;
-    if !options.frozen && !store_path.exists() {
-        refresh_reporting_store(options, &store_path)?;
-    }
     let (data, freshness, selection) = load_reporting(options)?;
     let coverage = coverage_for_scope(&data, selection.as_ref(), &options.scope);
     let scoped_data = data_for_scope(&data, &options.scope);
@@ -2993,6 +2980,9 @@ fn load_reporting(
         .map_err(anyhow::Error::new)?;
     let selection_options = session_selection_options(options)?;
     let store_path = options.store_path()?;
+    if !options.frozen {
+        refresh_reporting_store(options, &store_path)?;
+    }
     let (data, freshness) = load_store(&store_path)?;
     let selected = select_report_data_with_options(&data, period.as_ref(), &selection_options);
     let Some(period) = period else {
@@ -3016,13 +3006,6 @@ fn load_reporting(
             source_data,
         }),
     ))
-}
-
-fn validate_reporting_options(options: &StoreOptions) -> Result<()> {
-    ReportingPeriod::from_bounds(options.since.as_deref(), options.until.as_deref())
-        .map_err(anyhow::Error::new)?;
-    session_selection_options(options)?;
-    Ok(())
 }
 
 fn report_auto_refresh(outcome: &RefreshOutcome, store: &Path) {

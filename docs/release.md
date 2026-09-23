@@ -27,16 +27,17 @@ cargo run -- --version
 cargo run -- --help
 ```
 
-For a local report, first create a derived store with the explicit `refresh`
-workflow described in the [README CLI surface](../README.md#cli-surface), then
-use the reporting commands against that store.
+For a local report, run a reporting command directly; it refreshes the selected
+derived store by default. Use `--frozen` to report from the existing store, or
+run `refresh` to ingest without rendering a report. See the [README CLI
+surface](../README.md#cli-surface).
 
 ## Current CLI boundaries
 
 - `refresh` is the explicit raw-input workflow and writes only the selected
   derived store; raw rollout/state and instruction inputs remain read-only.
-- Reporting commands read the derived store, never refresh implicitly, and
-  support `--frozen` and opt-in `--format json` output.
+- Reporting commands refresh the derived store by default, support `--frozen`
+  to read its existing contents, and offer opt-in `--format json` output.
 - `monitor` is an explicit local polling workflow; it updates the derived
   store and optional cursor file without modifying its observed source.
 - `optimize --diff` is review-only. `optimize --apply` is the only workflow

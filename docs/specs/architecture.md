@@ -16,11 +16,11 @@ scoped proposal for improving `AGENTS.md` or nearby project documentation.
 The product is an evidence tool, not a replacement for Codex, a hosted
 analytics service, or a general-purpose agent-log platform.
 
-The binary has an explicit refresh workflow for raw rollout/state inputs and a
-read-only reporting surface over the derived SQLite store. Reporting does not
-refresh implicitly, and the explicit `monitor` command is the local runtime
-for incremental rollout/state observation; it also does not modify raw
-sources. Only an explicitly confirmed `optimize --apply` may write its
+The binary refreshes raw rollout/state inputs before reports by default;
+`--frozen` selects the existing derived store without refreshing. The explicit
+`refresh` command ingests without reporting, and `monitor` is the local runtime
+for incremental rollout/state observation; neither modifies raw sources. Only
+an explicitly confirmed `optimize --apply` may write its
 validated instruction/documentation targets. The supported command surface and
 examples are documented in the [README](../../README.md).
 
@@ -93,16 +93,16 @@ this keeps one canonical stored session per physical rollout while retaining
 its rollout, tree-session, thread, and parent-thread identities. Direct
 state-only ingestion still persists state sessions when explicitly requested.
 
-The explicit `refresh` command discovers raw rollout/state inputs, captures
-instruction context, and delegates identity, incremental ingest, and
-per-source replacement transactions to the store. Reporting commands consume
-the existing derived store in read-only mode; they do not reopen raw
-rollout/state inputs or refresh the store. `--frozen` makes that store-only
-contract explicit. Analysis, `sessions`, and `doctor` reports make the
-recorded freshness state visible; read-only reports may select an explicit
-half-open timestamp period before lens aggregation, keeping the requested
-period, observed coverage, and recorded freshness separate. `optimize --diff`
-reports proposal and diff state in addition to period metadata when filtered.
+The `refresh` command discovers raw rollout/state inputs, captures instruction
+context, and delegates identity, incremental ingest, and per-source
+replacement transactions to the store. Reporting commands perform that refresh
+before reading the derived store unless `--frozen` is set; only frozen reports
+avoid reopening raw rollout/state inputs. Raw source files are never modified.
+Analysis, `sessions`, and `doctor` reports make the recorded freshness state
+visible; reports may select an explicit half-open timestamp period before lens
+aggregation, keeping the requested period, observed coverage, and recorded
+freshness separate. `optimize --diff` reports proposal and diff state in
+addition to period metadata when filtered.
 
 ## 5. Components
 

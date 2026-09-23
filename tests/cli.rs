@@ -4107,7 +4107,7 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
 
     assert!(readme.contains("## CLI surface"));
     assert!(readme.contains("explicit refresh workflow"));
-    assert!(readme.contains("Run `analyze` or `refresh`"));
+    assert!(readme.contains("Run `analyze` for all"));
     assert!(readme.contains("Phase 5 compressed rollout reader milestone"));
     assert!(readme.contains("Phase 5 safe optimize apply"));
     assert!(readme.contains("Phase 6"));
@@ -4166,7 +4166,8 @@ fn readme_documents_current_cli_surface_and_mvp_boundaries() {
         "local-only",
         "deterministic",
         "evidence-backed",
-        "does not modify the supplied store or target files",
+        "refreshes unless `--frozen`",
+        "does not modify target files",
         "temporary migrated copy",
         "`optimize --apply`",
         "compressed rollout readers",
@@ -4678,7 +4679,7 @@ fn unreadable_compressed_replacement_clears_rows_and_recovers() {
 }
 
 #[test]
-fn reporting_is_deterministic_bounded_and_does_not_refresh_or_write() {
+fn frozen_reporting_is_deterministic_bounded_and_does_not_refresh_or_write() {
     let store = fixture_store();
     let raw_source = store.with_extension("jsonl");
     let raw_payload = b"synthetic raw secret=do-not-report\n";
@@ -4747,7 +4748,7 @@ fn reporting_command_surface_stays_read_only_and_private() {
 }
 
 #[test]
-fn unfrozen_reporting_does_not_refresh_or_read_raw_inputs() {
+fn unfrozen_reporting_refreshes_from_raw_inputs() {
     let (home, source) = refresh_home();
     let store = temp_store_path("unfrozen-reporting");
     let refreshed = run_refresh(&home, &store);
@@ -4760,18 +4761,21 @@ fn unfrozen_reporting_does_not_refresh_or_read_raw_inputs() {
     fs::write(&source, b"synthetic raw input changed after analyze\n").unwrap();
     let source_after = fs::read(&source).unwrap();
 
-    let output = run_args_with_flags(
-        &["doctor"],
-        &["--codex-home", home.to_str().unwrap()],
-        &store,
-    );
+    let output = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["doctor", "--codex-home"])
+        .arg(&home)
+        .arg("--store")
+        .arg(&store)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("Refreshed store:"));
-    assert_file_unchanged(&store, &store_before, "unfrozen report store");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Refreshed store:"));
+    assert_ne!(fs::read(&store).unwrap(), store_before);
     assert_file_unchanged(&source, &source_after, "unfrozen report source");
 
     let _ = fs::remove_dir_all(home);

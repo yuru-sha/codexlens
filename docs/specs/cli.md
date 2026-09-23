@@ -41,12 +41,12 @@ codexlens query [SQL] [--store PATH] [--format table|markdown|json]  # compatibi
 codexlens optimize [options] [--print|--diff|--apply]
 ```
 
-`analyze` reads Codex inputs read-only and incrementally replaces changed
-derived rows. Reporting views consume the existing derived store and never
-refresh it; `doctor` creates and analyzes its default store on first use, while
-later runs read the stored snapshot. Run `analyze` or `refresh` explicitly to
-update an existing store.
-`--frozen` makes that store-only boundary explicit.
+Analysis, view, doctor, and optimize commands refresh the selected derived
+store before reporting unless `--frozen` is set. Refresh reads Codex inputs
+without modifying them and incrementally replaces changed derived rows.
+`--frozen` reads exactly the existing store without discovering raw inputs.
+Use `analyze` to refresh and report all findings, or `refresh` to update the
+store without rendering a report.
 `sql` and `query` are the only commands that never create or refresh a store;
 they open an existing store read-only. Refresh chatter goes to stderr. JSON
 stdout is one JSON document and contains no progress text.
@@ -58,6 +58,16 @@ mutable PRAGMA statements, and bounds output at 50 columns and 50 rows. Its JSON
 and column names are bounded, and blobs are represented by their byte count.
 `query` keeps the same read-only behavior and result shape as an explicit
 compatibility alias.
+
+## Required and optional arguments
+
+All report commands corresponding to cclens (`analyze`, the typed views,
+`doctor`, and `optimize`) run without command-specific value arguments. Their
+scope, format, store, source-home, time-window, and frozen options are optional
+and have defaults. `sql` and `query` also accept no positional SQL and read it
+from stdin. The CodexLens-only `monitor` command requires `--source PATH`; its
+store and polling options are optional. `optimize --apply` retains the existing
+explicit confirmation requirement (`--yes` for non-interactive use).
 
 ## View contracts
 
@@ -145,12 +155,13 @@ Bare `optimize` refreshes the store and launches an interactive `codex` session
 with its bounded findings in a private temporary file. The prompt asks Codex
 to investigate root causes and propose changes without editing files. `--frozen`
 uses the existing store; `--print` prints the briefing instead of launching.
-`optimize` is read-only until the user approves a concrete plan. It receives
-the same scoped findings as `doctor`, inspects the named configuration target,
+Proposal target files stay read-only until the user approves a concrete plan;
+unless `--frozen` is set, `optimize` refreshes the derived store before reading
+findings. It receives the same scoped findings as `doctor`, inspects the named configuration target,
 and emits a plan containing exact target files, before/after snippets, reason,
 evidence, and a verification step. Non-instruction targets without a retained
 baseline carry bounded review-only metadata instead of before/after snippets.
-No mutating write is allowed without explicit confirmation.
+No proposal-target write is allowed without explicit confirmation.
 The `--print` briefing routes the same opportunities shown by `doctor` into its
 prioritized findings, putting recurring work friction before configuration
 trimming. Review-only opportunities name the target and sections to inspect,
@@ -190,7 +201,7 @@ the user-facing analysis meaning:
 | Claude config and project instruction files | global/project `AGENTS.md`, `config.toml`, and discovered Codex surfaces | global/project ownership, bounded instruction evidence, and configuration actions remain separate |
 | transcript input root (`--projects`) | `--codex-home` and input discovery | both select the local raw input root; Codex additionally discovers rollout JSONL and `state_*.sqlite` inputs under the selected home |
 | scope filter (`--scope`) | `--scope global|project|project:PATH` | `project` means all known projects; `project:PATH` is normalized before matching; scope filters output, not ingestion |
-| cclens database/report store | `--store PATH` derived SQLite store | reporting reads the derived store without refreshing raw inputs; `refresh`/`analyze` are the explicit ingestion workflows |
+| cclens database/report store | `--store PATH` derived SQLite store | reports refresh by default; `--frozen` reads the stored snapshot, while `refresh` ingests without a report |
 | transcript-derived usage/cost | canonical tool/token records plus surface inventory and startup snapshots | totals are comparable categories, not byte-for-byte Claude measurements; missing attribution or cost remains unknown/partial |
 | cclens local doctor/optimize workflow | `doctor` and `optimize --print/--diff/--apply` | local-only, bounded evidence, reviewable targets, and explicit confirmation are preserved; `--apply` remains the only mutating path |
 

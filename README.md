@@ -16,10 +16,10 @@ Analyze Codex sessions and turn recurring friction into actionable
 > this is not a claim that product readiness is complete. An owner-authorized
 > real-history smoke run against an explicitly selected local source remains
 > the required readiness evidence.
-> Explicit `analyze`/`refresh` commands update the derived store; read views
-> consume that store without refreshing it. `--frozen` makes the store-only
-> boundary explicit, monitoring updates the derived store and an optional
-> cursor file, and apply writes only its validated write set.
+> Reports refresh the derived store unless `--frozen`; explicit `refresh`
+> ingests without reporting. Monitoring updates the derived store and an
+> optional cursor file, and `optimize --apply` writes only its validated target
+> set in addition to the normal store refresh.
 
 ## Goal
 
@@ -65,15 +65,15 @@ per-user derived SQLite store. Read views accept `--codex-home`, `-s,
 `--include-subagents`, `--since`, `--until`, `--format table|markdown|json`,
 and `--frozen`. The default store is
 `${XDG_STATE_HOME:-~/.local/state}/codexlens/codexlens.db`; `analyze` and
-`refresh` incrementally process the selected Codex home; `doctor` initializes a
-missing store on its first run, and bare `optimize` refreshes before opening an
-interactive Codex investigation. Other read views use the selected store exactly.
-Progress and freshness diagnostics go to stderr, and
+`refresh` incrementally processes the selected Codex home; analysis, report,
+doctor, and optimize commands refresh it automatically unless `--frozen` is
+set. Bare `optimize` opens an interactive Codex investigation. Progress and
+freshness diagnostics go to stderr, and
 JSON stdout is one versioned document. Read-only reports also accept
 reproducible period bounds; their output distinguishes the requested period,
-observed coverage, and store freshness. The explicit
-`optimize --apply` path is the write exception and may update only its
-validated instruction/documentation write set.
+observed coverage, and store freshness. Reporting updates only the derived
+store and never the raw inputs. `optimize --apply` may also update its
+validated instruction/documentation write set after confirmation.
 Legacy-store reporting may create a temporary migrated copy, which is removed
 afterward; `optimize --diff` also reads the recommended instruction files in
 order to render a diff.
@@ -82,26 +82,26 @@ order to render a diff.
 | --- | --- | --- | --- |
 | `refresh` | discovered Codex home, rollout/state inputs, and instruction files | build or update the derived store | writes only the selected derived store; raw inputs remain unchanged |
 | `analyze` | Codex home and derived store | all lens findings | refreshes the selected store unless `--frozen` |
-| `sessions` | derived store | bounded session metadata and coverage | reads the selected store; never refreshes |
-| `inventory` | derived store | configured surfaces, use, and startup estimates | reads the selected store; never refreshes |
-| `overhead` | derived store | always-on context cost and residual | reads the selected store; never refreshes |
-| `usage` | derived store | tools, Skills, models, prompts, subagents, and surface usage | reads the selected store; never refreshes |
-| `waste` | derived store | ranked remove/slim/re-scope opportunities | reads the selected store; never refreshes |
-| `failures` | derived store | recurring failures by normalized category and owner | reads the selected store; never refreshes |
-| `corrections` | derived store | correction-lens findings | reads the selected store; never refreshes |
-| `rework` | derived store | legacy rework findings | reads the selected store; never refreshes |
-| `stuck` | derived store | bounded edit/failure loops and affected paths | reads the selected store; never refreshes |
-| `prompts` | derived store | steer/correct/question/instruct patterns | reads the selected store; never refreshes |
-| `verification` | derived store | verification-lens findings | reads the selected store; never refreshes |
-| `knowledge` | derived store | knowledge-lens findings | reads the selected store; never refreshes |
-| `rediscovery` | derived store | alias for `knowledge` | reads the selected store; never refreshes |
-| `instructions` | derived store | instruction-lens findings | reads the selected store; never refreshes |
-| `doctor` | derived store | action-first health summary by scope | initializes the missing default store once; later runs read it |
+| `sessions` | Codex home and derived store | bounded session metadata and coverage | refreshes unless `--frozen` |
+| `inventory` | Codex home and derived store | configured surfaces, use, and startup estimates | refreshes unless `--frozen` |
+| `overhead` | Codex home and derived store | always-on context cost and residual | refreshes unless `--frozen` |
+| `usage` | Codex home and derived store | tools, Skills, models, prompts, subagents, and surface usage | refreshes unless `--frozen` |
+| `waste` | Codex home and derived store | ranked remove/slim/re-scope opportunities | refreshes unless `--frozen` |
+| `failures` | Codex home and derived store | recurring failures by normalized category and owner | refreshes unless `--frozen` |
+| `corrections` | Codex home and derived store | correction-lens findings | refreshes unless `--frozen` |
+| `rework` | Codex home and derived store | legacy rework findings | refreshes unless `--frozen` |
+| `stuck` | Codex home and derived store | bounded edit/failure loops and affected paths | refreshes unless `--frozen` |
+| `prompts` | Codex home and derived store | steer/correct/question/instruct patterns | refreshes unless `--frozen` |
+| `verification` | Codex home and derived store | verification-lens findings | refreshes unless `--frozen` |
+| `knowledge` | Codex home and derived store | knowledge-lens findings | refreshes unless `--frozen` |
+| `rediscovery` | Codex home and derived store | alias for `knowledge` | refreshes unless `--frozen` |
+| `instructions` | Codex home and derived store | instruction-lens findings | refreshes unless `--frozen` |
+| `doctor` | Codex home and derived store | action-first health summary by scope | refreshes unless `--frozen` |
 | `sql` | existing derived store and SQL/stdin | bounded read-only ad-hoc table, Markdown, or JSON rows | never refreshes or creates the store |
 | `query` | existing derived store and SQL/stdin | bounded ad-hoc table, Markdown, or JSON rows | opens the store read-only; never refreshes or creates it |
 | `optimize` | Codex home and derived store | interactive Codex root-cause investigation and proposed fixes | refreshes unless `--frozen`; asks Codex not to edit files |
-| `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | does not modify the supplied store or target files; legacy stores use a temporary migrated copy |
-| `optimize --apply --yes` | derived store and validated instruction/documentation targets | applies reviewed proposals and reports retained backups/recovery | modifies only the validated write set; never modifies the supplied store or rollout/state inputs |
+| `optimize --diff` | Codex home, derived store, and target instruction files | high-confidence proposal diffs and skipped reasons | refreshes unless `--frozen`; does not modify target files |
+| `optimize --apply --yes` | Codex home, derived store, and validated instruction/documentation targets | applies reviewed proposals and reports retained backups/recovery | refreshes unless `--frozen`; writes only the validated target set after confirmation |
 | `monitor` | one local rollout JSONL or state SQLite source | bounded incremental ingestion and cursor/status output | does not modify the source; writes the derived store and optional cursor file |
 
 `doctor` accepts the optional `--limit COUNT` to cap findings per scope.
@@ -120,12 +120,13 @@ It validates the complete write set, re-reads and re-hashes every file, keeps
 backups after success, and rolls back the whole batch on failure. `analyze`
 reports every legacy lens, while the focused analysis commands report one
 typed view through its own deterministic report format.
-Add `--format json` to read-only reporting commands for schema version 1;
+Add `--format json` to reporting commands for schema version 1;
 aliases emit their canonical command name. Every view uses a versioned envelope
 with top-level `scope`, `coverage`, and `freshness` metadata; its `data` object
 contains named, bounded fields. Missing or invalid stores return a bounded,
 actionable error. Older supported store schemas are migrated only in a
-temporary copy, leaving the supplied store unchanged.
+temporary copy. The selected store can still be updated by the normal refresh
+unless `--frozen`.
 
 Reporting periods use complete RFC3339 timestamps with `Z` or a numeric
 `+HH:MM`/`-HH:MM` offset and optional fractional seconds (up to 9 digits).
@@ -151,7 +152,7 @@ To build or update a store from raw inputs:
 $ cargo run -- refresh --codex-home "$CODEX_HOME" --store .codexlens.sqlite
 ```
 
-The adapter provides compressed rollout readers for plain and zstd-compressed rollout JSONL; reporting never reopens raw inputs. `monitor` is the explicit
+The adapter provides compressed rollout readers for plain and zstd-compressed rollout JSONL; reporting refreshes the derived store from raw inputs unless `--frozen` is set, then renders from the store. `monitor` is the explicit
 local monitoring exception: it polls one rollout or state source, reuses the
 existing adapter and canonical model, and appends or replaces only the derived
 store. When requested, it also writes the bounded cursor to `--cursor PATH` at
@@ -205,9 +206,10 @@ cargo run -- monitor --source tests/fixtures/rollout/monitoring.jsonl --kind rol
 cargo run -- doctor --format json --store .codexlens.sqlite --frozen
 ```
 
-Run `analyze` or `refresh` to update the selected derived store, then use read
-views to render it. `--frozen` makes the store-only boundary explicit: it does
-not discover raw inputs or write the store. `Activity` is the earliest and latest valid
+Reports update the selected derived store automatically. Run `analyze` for all
+findings or `refresh` to ingest without a report. `--frozen` makes the store-only
+boundary explicit: it does not discover raw inputs or write the store.
+`Activity` is the earliest and latest valid
 timestamp observed in the selected store; `Latest ingestion` is the separate
 time the store recorded an input. Empty, missing, invalid, and partial
 timestamp coverage is reported as such rather than filling activity dates
