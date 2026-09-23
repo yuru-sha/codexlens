@@ -1,0 +1,17 @@
+{"type":"user","timestamp":"2026-02-01T00:00:00.000Z","cwd":"/fixture/project-a","message":{"content":"Please inspect the synthetic project."}}
+{"type":"assistant","timestamp":"2026-02-01T00:00:01.000Z","message":{"id":"m-skill-a","model":"claude-opus-4-7","usage":{"input_tokens":100,"output_tokens":10},"content":[{"type":"tool_use","id":"skill-a","name":"Skill","input":{"skill":"heavy-skill"}}]}}
+{"type":"assistant","timestamp":"2026-02-01T00:00:02.000Z","message":{"id":"m-edit-0","model":"claude-opus-4-7","usage":{"input_tokens":100,"output_tokens":10},"content":[{"type":"tool_use","id":"edit-0","name":"Edit","input":{"file_path":"/fixture/project-a/src/lib.rs"}}]}}
+{"type":"user","timestamp":"2026-02-01T00:00:02.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"edit-0","content":"updated","is_error":false}]}}
+{"type":"assistant","timestamp":"2026-02-01T00:00:03.000Z","message":{"id":"m-edit-1","model":"claude-opus-4-7","usage":{"input_tokens":100,"output_tokens":10},"content":[{"type":"tool_use","id":"edit-1","name":"Edit","input":{"file_path":"/fixture/project-a/src/lib.rs"}}]}}
+{"type":"user","timestamp":"2026-02-01T00:00:03.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"edit-1","content":"updated","is_error":false}]}}
+{"type":"assistant","timestamp":"2026-02-01T00:00:04.000Z","message":{"id":"m-edit-2","model":"claude-opus-4-7","usage":{"input_tokens":100,"output_tokens":10},"content":[{"type":"tool_use","id":"edit-2","name":"Edit","input":{"file_path":"/fixture/project-a/src/lib.rs"}}]}}
+{"type":"user","timestamp":"2026-02-01T00:00:04.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"edit-2","content":"updated","is_error":false}]}}
+{"type":"assistant","timestamp":"2026-02-01T00:00:05.000Z","message":{"id":"m-edit-3","model":"claude-opus-4-7","usage":{"input_tokens":100,"output_tokens":10},"content":[{"type":"tool_use","id":"edit-3","name":"Edit","input":{"file_path":"/fixture/project-a/src/lib.rs"}}]}}
+{"type":"user","timestamp":"2026-02-01T00:00:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"edit-3","content":"updated","is_error":false}]}}
+{"type":"user","timestamp":"2026-02-01T00:00:10.000Z","cwd":"/fixture/project-a","message":{"content":"go ahead"}}
+{"type":"user","timestamp":"2026-02-01T00:00:11.000Z","cwd":"/fixture/project-a","message":{"content":"No, instead check the failure."}}
+{"type":"user","timestamp":"2026-02-01T00:00:12.000Z","cwd":"/fixture/project-a","message":{"content":"How should I proceed?"}}
+{"type":"assistant","timestamp":"2026-02-01T00:00:13.000Z","message":{"id":"m-project-fail-0","model":"claude-opus-4-7","usage":{"input_tokens":100,"output_tokens":10},"content":[{"type":"tool_use","id":"project-fail-0","name":"Bash","input":{"command":"cargo test"}}]}}
+{"type":"user","timestamp":"2026-02-01T00:00:13.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"project-fail-0","content":"test result: FAILED. 0 passed; 1 failed","is_error":true}]}}
+{"type":"assistant","timestamp":"2026-02-01T00:00:16.000Z","message":{"id":"m-global-fail-a-0","model":"claude-opus-4-7","usage":{"input_tokens":100,"output_tokens":10},"content":[{"type":"tool_use","id":"global-fail-a-0","name":"Bash","input":{"command":"missing-tool test"}}]}}
+{"type":"user","timestamp":"2026-02-01T00:00:16.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"global-fail-a-0","content":"command not found","is_error":true}]}}

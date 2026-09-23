@@ -2028,6 +2028,14 @@ fn overhead_marks_unknown_residual_source_in_human_and_json() {
 #[test]
 fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
     let store = command_contract_store();
+    let cclens_reference: Value = serde_json::from_str(include_str!(
+        "fixtures/analysis/cclens-command-contract/reference-output.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        cclens_reference["oracle"],
+        "cclens@3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70"
+    );
     let privacy_marker = "contract-private-value";
     let mut headings = Vec::new();
     let assert_evidence = |row: &Value| {
@@ -2125,6 +2133,40 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
             .expect("contract rows array");
         assert!(!rows.is_empty(), "{command} lost its typed rows");
         assert!(!document["data"]["groups"].is_array());
+        if command == "usage" {
+            let reference_skill = cclens_reference["reports"]["usage"]["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|skill| skill["skill"] == "heavy-skill")
+                .expect("cclens source fixture invokes heavy-skill");
+            assert_eq!(reference_skill["invocations"], 1);
+            assert!(rows.iter().any(|row| {
+                row["kind"] == "skill"
+                    && row["name"] == reference_skill["skill"]
+                    && row["occurrences"].as_u64().unwrap_or_default() >= 1
+            }));
+        }
+        if command == "prompts" {
+            for behavior in cclens_reference["reports"]["prompts"]["behaviors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["count"].as_u64().unwrap_or_default() > 0)
+            {
+                assert!(rows.iter().any(|row| row["class"] == behavior["behavior"]));
+                let codex_count = rows
+                    .iter()
+                    .filter(|row| row["class"] == behavior["behavior"])
+                    .map(|row| row["occurrences"].as_u64().unwrap_or_default())
+                    .sum::<u64>();
+                assert_eq!(
+                    codex_count,
+                    behavior["count"].as_u64().unwrap(),
+                    "prompt class count differs from cclens fixture"
+                );
+            }
+        }
         for row in rows {
             let evidence_row = if command == "failures" || command == "stuck" {
                 &row["opportunity"]
@@ -2148,6 +2190,10 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
     let analyze_machine = run_args(&["analyze", "--format", "json"], &store);
     assert!(!String::from_utf8_lossy(&analyze_machine.stdout).contains(privacy_marker));
     let analyze = parse_json_report(&analyze_machine, "analyze");
+    assert_eq!(
+        analyze["data"]["session_count"],
+        cclens_reference["reports"]["analyze"]["sessions"]
+    );
     let groups = analyze["data"]["groups"].as_array().unwrap();
     assert!(!groups.is_empty());
     assert_eq!(groups[0]["scope"]["kind"], "global");
@@ -2209,6 +2255,18 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
         "inventory",
     );
     let inventory_rows = inventory["data"]["rows"].as_array().unwrap();
+    for surface in cclens_reference["reports"]["inventory"]["surfaces"]
+        .as_array()
+        .unwrap()
+    {
+        assert!(inventory_rows.iter().any(|row| {
+            row["name"] == surface["id"]
+                && row["kind"] == surface["kind"]
+                && ((surface["status"] == "unused" && row["usage_state"] == "unused")
+                    || (surface["uses"].as_u64().unwrap_or_default() > 0
+                        && row["observed_uses"].as_u64().unwrap_or_default() > 0))
+        }));
+    }
     assert!(inventory_rows.iter().any(|row| {
         row["name"] == "unused-skill"
             && row["usage_state"] == "unused"
@@ -2232,9 +2290,29 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
     assert_eq!(overhead_rows[0]["scope"]["kind"], "global");
     assert_eq!(overhead_rows[1]["project"], "/fixture/project-a");
     assert_eq!(overhead_rows[2]["project"], "/fixture/project-b");
+    for reference_project in cclens_reference["reports"]["overhead"]["per_project"]
+        .as_array()
+        .unwrap()
+    {
+        assert!(overhead_rows.iter().any(|row| {
+            row["project"]
+                .as_str()
+                .is_some_and(|path| path.ends_with(reference_project["project"].as_str().unwrap()))
+        }));
+    }
 
     let waste = parse_json_report(&run_args(&["waste", "--format", "json"], &store), "waste");
     let opportunities = waste["data"]["opportunities"].as_array().unwrap();
+    assert!(
+        cclens_reference["reports"]["waste"]["wedges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|wedge| wedge["wedge"] == "UNUSED")
+            .all(|wedge| opportunities
+                .iter()
+                .any(|row| { row["id"] == format!("surface:{}", wedge["id"].as_str().unwrap()) }))
+    );
     assert_eq!(opportunities[0]["id"], "stuck:src/lib.rs|loop");
     assert!(opportunities.iter().any(|opportunity| {
         opportunity["id"] == "surface:unused-skill"
@@ -2256,6 +2334,32 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
         "failures",
     );
     let failure_rows = failures["data"]["rows"].as_array().unwrap();
+    let cclens_failure_categories = cclens_reference["reports"]["failures"]["failures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["category"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(cclens_failure_categories.contains(&"command-not-found"));
+    assert!(cclens_failure_categories.contains(&"test-failure"));
+    for (reference_category, codex_category) in [
+        ("command-not-found", "command_not_found"),
+        ("test-failure", "exit_code_1"),
+    ] {
+        assert!(
+            failure_rows
+                .iter()
+                .any(|row| row["category"] == codex_category)
+        );
+        assert!(failure_rows.iter().any(|row| {
+            row["category"] == codex_category
+                && row["opportunity"]["occurrences"]
+                    .as_u64()
+                    .unwrap_or_default()
+                    >= 2
+        }));
+        assert!(cclens_failure_categories.contains(&reference_category));
+    }
     assert_eq!(failure_rows[0]["category"], "exit_code_1");
     assert_eq!(failure_rows[1]["category"], "command_not_found");
     assert!(failure_rows.iter().any(|row| {
@@ -2267,17 +2371,48 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
 
     let stuck = parse_json_report(&run_args(&["stuck", "--format", "json"], &store), "stuck");
     let stuck_rows = stuck["data"]["rows"].as_array().unwrap();
+    let cclens_episode = cclens_reference["reports"]["stuck"]["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|episode| episode["file"] == "lib.rs")
+        .expect("cclens source fixture has a four-edit loop");
+    assert_eq!(cclens_episode["edits"], 4);
     assert!(stuck_rows.iter().any(|row| {
         row["path"] == "src/lib.rs"
-            && row["sequence"]
-                .as_array()
-                .is_some_and(|sequence| sequence.len() >= 4)
+            && row["sequence"].as_array().is_some_and(|sequence| {
+                sequence.len() >= cclens_episode["edits"].as_u64().unwrap() as usize
+            })
     }));
 
     let doctor_machine = run_args(&["doctor", "--format", "json"], &store);
     assert!(!String::from_utf8_lossy(&doctor_machine.stdout).contains(privacy_marker));
     let doctor = parse_json_report(&doctor_machine, "doctor");
     let top_fixes = doctor["data"]["top_fixes"].as_array().unwrap();
+    assert!(
+        cclens_reference["reports"]["doctor"]["global"]["friction_global"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["label"] == "command-not-found")
+    );
+    assert!(top_fixes.iter().any(|opportunity| {
+        opportunity["id"]
+            .as_str()
+            .is_some_and(|id| id.contains("command_not_found"))
+    }));
+    for surface in cclens_reference["reports"]["doctor"]["global"]["unused"]
+        .as_array()
+        .unwrap()
+    {
+        assert!(
+            doctor["data"]["config_pruning"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["name"] == surface["id"])
+        );
+    }
     assert!(!top_fixes.is_empty());
     assert!(
         top_fixes
@@ -2320,6 +2455,17 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
     assert!(optimize_machine.status.success());
     assert!(!String::from_utf8_lossy(&optimize_machine.stdout).contains(privacy_marker));
     let optimize = parse_json_report(&optimize_machine, "optimize");
+    let cclens_optimize_signals = &cclens_reference["reports"]["optimize"]["signals"];
+    let optimize_findings = serde_json::to_string(&optimize["data"]["findings"]).unwrap();
+    if cclens_optimize_signals["command-not-found"] == true {
+        assert!(optimize_findings.contains("command_not_found"));
+    }
+    if cclens_optimize_signals["test-failure"] == true {
+        assert!(optimize_findings.contains("exit_code_1"));
+    }
+    if cclens_optimize_signals["stuck-file"] == true {
+        assert!(optimize_findings.contains("stuck:src/lib.rs|loop"));
+    }
     for finding in optimize["data"]["findings"].as_array().unwrap() {
         for field in ["target", "action", "evidence"] {
             assert!(!finding[field].is_null(), "missing optimize field {field}");
@@ -2328,6 +2474,13 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
     }
     let configuration_waste = optimize["data"]["configuration_waste"].as_array().unwrap();
     assert!(!configuration_waste.is_empty());
+    if cclens_optimize_signals["unused-skill"] == true {
+        assert!(
+            configuration_waste
+                .iter()
+                .any(|row| row["id"] == "surface:unused-skill")
+        );
+    }
     for opportunity in configuration_waste {
         assert_opportunity(opportunity);
     }
@@ -2384,6 +2537,10 @@ fn command_contract_fixture_preserves_scopes_targets_and_evidence() {
         let document = parse_json_report(&output, command);
         assert_eq!(document["data"]["columns"][0], "sessions");
         assert!(document["data"]["rows"].is_array());
+        assert_eq!(
+            document["data"]["rows"][0][0],
+            cclens_reference["reports"]["sql"]["sessions"]
+        );
         assert!(document["freshness"].is_null());
         assert!(document["coverage"].is_null());
     }

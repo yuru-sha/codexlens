@@ -14,7 +14,7 @@ use crate::model::{
 use super::{
     AnalysisOptions, EvidenceRef, EvidenceRole, Finding, FindingConfidence, FindingScope,
     FindingSeverity, FindingType, analyze_failures, analyze_rework, bounded_excerpt, evidence_for,
-    majority_project, majority_scope, normalize_fact, push_evidence, redact_sensitive,
+    majority_project, majority_scope, push_evidence, redact_sensitive,
 };
 
 pub const MAX_VIEW_EVIDENCE: usize = 3;
@@ -1553,35 +1553,66 @@ fn canonical_tool_name(name: &str) -> String {
 }
 
 fn classify_prompt(content: &str) -> PromptClass {
-    let normalized = normalize_fact(&redact_sensitive(content));
-    if content.trim_end().ends_with('?') || question_prefix(&normalized) {
-        return PromptClass::Question;
+    let text = redact_sensitive(content);
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if [
+        "go ahead",
+        "go",
+        "yes",
+        "yes please",
+        "y",
+        "ok",
+        "okay",
+        "sure",
+        "next",
+        "continue",
+        "proceed",
+        "続けて",
+        "続け",
+        "進めて",
+        "完遂して",
+        "完遂してね",
+        "どうぞ",
+        "うん",
+        "はい",
+        "これで",
+        "お願い",
+        "おねがい",
+        "やって",
+    ]
+    .contains(&lower.as_str())
+        || (trimmed.chars().count() <= 4 && !trimmed.is_empty() && !lower.ends_with(['?', '？']))
+    {
+        return PromptClass::Steer;
     }
-    if normalized.starts_with("please use ")
-        || (normalized.starts_with("use ") && normalized.ends_with(" instead"))
-        || normalized.starts_with("do not ")
-        || normalized.starts_with("don't ")
-        || normalized.starts_with("never ")
+    if ["いや", "ちが", "違", "そうじゃ", "じゃなくて"]
+        .iter()
+        .any(|marker| trimmed.starts_with(marker))
+        || [
+            "じゃなくて",
+            "やり直",
+            "戻して",
+            "間違",
+            "そんなこと",
+            "違うよ",
+            "ではない",
+            "instead",
+            "revert",
+            "undo",
+            "that's wrong",
+            "rollback",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+        || ["no,", "no ", "not ", "actually,", "wait,"]
+            .iter()
+            .any(|marker| lower.starts_with(marker))
     {
         return PromptClass::Correct;
     }
-    if [
-        "this project uses ",
-        "this repo uses ",
-        "this repository uses ",
-        "the project uses ",
-        "this project requires ",
-        "the project requires ",
-        "remember that ",
-        "note that ",
-        "prefer ",
-        "keep ",
-        "avoid ",
-    ]
-    .iter()
-    .any(|marker| normalized.starts_with(marker))
-    {
-        return PromptClass::Steer;
+    if trimmed.ends_with(['?', '？']) || question_prefix(&lower) {
+        return PromptClass::Question;
     }
     PromptClass::Instruct
 }
@@ -1595,10 +1626,8 @@ fn question_prefix(text: &str) -> bool {
 
 fn prompt_verdict(class: PromptClass) -> &'static str {
     match class {
-        PromptClass::Steer => "Repeated steering is a candidate for scoped project guidance",
-        PromptClass::Correct => {
-            "Repeated corrections indicate a rule or prerequisite is not being applied"
-        }
+        PromptClass::Steer => "Frequent short approvals may indicate room for more autonomy",
+        PromptClass::Correct => "Frequent corrections may indicate unclear upfront instructions",
         PromptClass::Question => {
             "Repeated questions indicate a discoverability gap, not configuration waste by themselves"
         }

@@ -1,0 +1,189 @@
+{
+  "fixture": "tests/fixtures/analysis/cclens-command-contract",
+  "oracle": "cclens@3df5f76eb14a53c4cb03d975fd4dbd4eb2f7cc70",
+  "reports": {
+    "analyze": {
+      "permission_denials": 0,
+      "sessions": 3,
+      "skill_invocations": 1,
+      "subagent_tokens": 0,
+      "subagents": 0,
+      "surfaces": 2
+    },
+    "doctor": {
+      "global": {
+        "friction_global": [
+          {
+            "by_tool": [
+              [
+                "Bash",
+                2
+              ]
+            ],
+            "count": 2,
+            "examples": [
+              "command not found",
+              "command not found"
+            ],
+            "label": "command-not-found",
+            "projects": 2
+          }
+        ],
+        "hotspots": [
+          [
+            "lib.rs",
+            4
+          ]
+        ],
+        "unused": [
+          {
+            "id": "unused-skill",
+            "kind": "skill",
+            "on_demand_tokens": 18,
+            "startup_tokens": 7
+          }
+        ]
+      },
+      "projects": [
+        {
+          "project": "project-a",
+          "thrash": [
+            {
+              "edits": 4,
+              "file": "lib.rs",
+              "span_secs": 3
+            }
+          ]
+        }
+      ]
+    },
+    "failures": {
+      "failures": [
+        {
+          "category": "test-failure",
+          "count": 2,
+          "project": null,
+          "spread_projects": null,
+          "suggestion": "flaky or hard tests; worth stabilising the worst"
+        },
+        {
+          "category": "command-not-found",
+          "count": 2,
+          "project": null,
+          "spread_projects": null,
+          "suggestion": "a missing tool; install it or note its absence"
+        }
+      ],
+      "total": 4
+    },
+    "inventory": {
+      "surfaces": [
+        {
+          "id": "heavy-skill",
+          "kind": "skill",
+          "scope": "global",
+          "status": "",
+          "uses": 1
+        },
+        {
+          "id": "unused-skill",
+          "kind": "skill",
+          "scope": "global",
+          "status": "unused",
+          "uses": 0
+        }
+      ]
+    },
+    "optimize": {
+      "signals": {
+        "command-not-found": true,
+        "stuck-file": true,
+        "test-failure": true,
+        "unused-skill": true
+      }
+    },
+    "overhead": {
+      "config_tokens": 13,
+      "floor": 100,
+      "per_project": [
+        {
+          "floor": 100,
+          "project": "project-b",
+          "sessions": 1
+        },
+        {
+          "floor": 100,
+          "project": "project-a",
+          "sessions": 2
+        }
+      ],
+      "residual": 87
+    },
+    "prompts": {
+      "behaviors": [
+        {
+          "behavior": "instruct",
+          "count": 3,
+          "share_pct": 50
+        },
+        {
+          "behavior": "steer",
+          "count": 1,
+          "share_pct": 17
+        },
+        {
+          "behavior": "question",
+          "count": 1,
+          "share_pct": 17
+        },
+        {
+          "behavior": "correct",
+          "count": 1,
+          "share_pct": 17
+        }
+      ],
+      "total": 6
+    },
+    "sql": {
+      "sessions": 3
+    },
+    "stuck": {
+      "episodes": [
+        {
+          "edits": 4,
+          "file": "lib.rs",
+          "project": "project-a",
+          "session_id": "project-a",
+          "span_secs": 3
+        }
+      ]
+    },
+    "usage": {
+      "skills": [
+        {
+          "ctx_growth": 0,
+          "duration_sec": 4.0,
+          "invocations": 1,
+          "out_tokens": 50,
+          "skill": "heavy-skill"
+        }
+      ],
+      "tokens": {
+        "main_out": 50,
+        "sub_agents": 0,
+        "sub_tokens": 0
+      }
+    },
+    "waste": {
+      "wedges": [
+        {
+          "id": "unused-skill",
+          "kind": "skill",
+          "scope": "global",
+          "uses": 0,
+          "wedge": "UNUSED"
+        }
+      ]
+    }
+  }
+}
