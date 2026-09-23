@@ -38,12 +38,14 @@ codexlens analyze [options]
 codexlens <view> [options]
 codexlens sql [SQL] [--store PATH] [--format table|markdown|json]
 codexlens query [SQL] [--store PATH] [--format table|markdown|json]  # compatibility alias
-codexlens optimize [options] [--print]
+codexlens optimize [options] [--print|--diff|--apply]
 ```
 
 `analyze` reads Codex inputs read-only and incrementally replaces changed
 derived rows. Reporting views consume the existing derived store and never
-refresh it; run `analyze` or `refresh` explicitly before reporting new input.
+refresh it; `doctor` creates and analyzes its default store on first use, while
+later runs read the stored snapshot. Run `analyze` or `refresh` explicitly to
+update an existing store.
 `--frozen` makes that store-only boundary explicit.
 `sql` and `query` are the only commands that never create or refresh a store;
 they open an existing store read-only. Refresh chatter goes to stderr. JSON
@@ -139,14 +141,16 @@ create findings from unknown evidence.
 
 ## `optimize`
 
+Bare `optimize` refreshes the store and launches an interactive `codex` session
+with its bounded findings in a private temporary file. The prompt asks Codex
+to investigate root causes and propose changes without editing files. `--frozen`
+uses the existing store; `--print` prints the briefing instead of launching.
 `optimize` is read-only until the user approves a concrete plan. It receives
 the same scoped findings as `doctor`, inspects the named configuration target,
 and emits a plan containing exact target files, before/after snippets, reason,
 evidence, and a verification step. Non-instruction targets without a retained
 baseline carry bounded review-only metadata instead of before/after snippets.
-`--print` prints the briefing; otherwise
-the implementation may launch the configured Codex CLI only through a private
-temporary file. No mutating write is allowed without explicit confirmation.
+No mutating write is allowed without explicit confirmation.
 The `--print` briefing routes the same opportunities shown by `doctor` into its
 prioritized findings, putting recurring work friction before configuration
 trimming. Review-only opportunities name the target and sections to inspect,

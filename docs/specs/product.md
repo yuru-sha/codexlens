@@ -52,8 +52,9 @@ The MVP mirrors the cclens view model with Codex adapters:
 | `optimize` | investigate selected findings and propose concrete config/docs fixes |
 
 Explicit `analyze` and `refresh` commands update the derived store
-incrementally. Read commands consume the existing store exactly and never
-refresh it; `--frozen` makes that store-only boundary explicit. `--scope global` and
+incrementally. `doctor` creates and analyzes its store on first use; subsequent
+reports consume the stored snapshot. `optimize` refreshes and opens an interactive
+Codex investigation unless `--frozen` or `--print` is selected. `--scope global` and
 `--scope project:<path>` are supported on applicable views. Human output is
 screen-sized; JSON/Markdown are detailed machine/paste formats.
 

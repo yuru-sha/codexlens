@@ -1135,7 +1135,7 @@ fn cli_help_documents_command_semantics_and_read_only_boundaries() {
         "Report steering, correction, question, and instruction patterns",
         "Show bounded, action-first health fixes by scope",
         "Run a bounded read-only SQL query",
-        "Print/diff a reviewable optimization plan or apply it explicitly",
+        "Investigate findings with Codex, print/diff a plan, or apply it explicitly",
     ] {
         assert!(
             stdout.contains(description),
@@ -1554,6 +1554,118 @@ fn optimize_print_keeps_a_bounded_plan_when_every_proposal_is_skipped() {
     let _ = fs::remove_file(store);
     let _ = fs::remove_file(target);
     let _ = fs::remove_dir(project_root);
+}
+
+#[test]
+fn doctor_initializes_a_missing_store_from_the_selected_codex_home() {
+    let store = temp_store_path("doctor-first-run");
+    let home = std::env::temp_dir().join(format!(
+        "codexlens-doctor-home-{}-{}",
+        std::process::id(),
+        NEXT_TEMP_STORE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(home.join("sessions")).unwrap();
+    fs::write(
+        home.join("sessions/synthetic.jsonl"),
+        include_str!("fixtures/rollout/coverage-timestamp-fallback.jsonl"),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["doctor", "--codex-home"])
+        .arg(&home)
+        .arg("--store")
+        .arg(&store)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(store.is_file());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Refreshed store:"));
+    let _ = fs::remove_dir_all(home);
+    let _ = fs::remove_file(store);
+}
+
+#[cfg(unix)]
+#[test]
+fn optimize_launches_codex_with_private_review_only_briefing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let store = fixture_store();
+    let temp = std::env::temp_dir();
+    let nonce = NEXT_TEMP_STORE.fetch_add(1, Ordering::Relaxed);
+    let home = temp.join(format!(
+        "codexlens-optimize-home-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(home.join("sessions")).unwrap();
+    fs::write(
+        home.join("sessions/synthetic.jsonl"),
+        include_str!("fixtures/rollout/coverage-timestamp-fallback.jsonl"),
+    )
+    .unwrap();
+    let bin = temp.join(format!(
+        "codexlens-fake-codex-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("codex");
+    let prompt_file = temp.join(format!("codexlens-prompt-{}-{nonce}", std::process::id()));
+    let briefing_file = temp.join(format!(
+        "codexlens-captured-briefing-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::write(&script, format!(
+        "#!/bin/sh\nprintf '%s' \"$1\" > '{}'\npath=$(printf '%s\\n' \"$1\" | sed -n 's/^Read the CodexLens findings in \\(.*\\)\\. Investigate.*/\\1/p')\ntest -n \"$path\" && cat \"$path\" > '{}'\n",
+        prompt_file.display(), briefing_file.display()
+    )).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_codexlens"))
+        .args(["optimize", "--codex-home"])
+        .arg(&home)
+        .arg("--store")
+        .arg(&store)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Refreshed store:"));
+    let prompt = fs::read_to_string(&prompt_file).unwrap();
+    assert!(prompt.contains("Investigate each root cause"));
+    assert!(prompt.contains("Do not edit files or apply changes"));
+    let briefing = fs::read_to_string(&briefing_file).unwrap();
+    assert!(briefing.contains("OPTIMIZATION BRIEFING"));
+    let path = prompt
+        .split("findings in ")
+        .nth(1)
+        .unwrap()
+        .split(". Investigate")
+        .next()
+        .unwrap();
+    assert!(
+        !Path::new(path).exists(),
+        "temporary briefing should be removed"
+    );
+    let _ = fs::remove_file(prompt_file);
+    let _ = fs::remove_file(briefing_file);
+    let _ = fs::remove_dir_all(bin);
+    let _ = fs::remove_dir_all(home);
+    let _ = fs::remove_file(store);
 }
 
 #[test]

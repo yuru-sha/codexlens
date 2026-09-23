@@ -65,8 +65,10 @@ per-user derived SQLite store. Read views accept `--codex-home`, `-s,
 `--include-subagents`, `--since`, `--until`, `--format table|markdown|json`,
 and `--frozen`. The default store is
 `${XDG_STATE_HOME:-~/.local/state}/codexlens/codexlens.db`; `analyze` and
-`refresh` incrementally process the selected Codex home, while read views use
-the selected store exactly. Progress and freshness diagnostics go to stderr, and
+`refresh` incrementally process the selected Codex home; `doctor` initializes a
+missing store on its first run, and bare `optimize` refreshes before opening an
+interactive Codex investigation. Other read views use the selected store exactly.
+Progress and freshness diagnostics go to stderr, and
 JSON stdout is one versioned document. Read-only reports also accept
 reproducible period bounds; their output distinguishes the requested period,
 observed coverage, and store freshness. The explicit
@@ -94,9 +96,10 @@ order to render a diff.
 | `knowledge` | derived store | knowledge-lens findings | reads the selected store; never refreshes |
 | `rediscovery` | derived store | alias for `knowledge` | reads the selected store; never refreshes |
 | `instructions` | derived store | instruction-lens findings | reads the selected store; never refreshes |
-| `doctor` | derived store | action-first health summary by scope | reads the selected store; never refreshes |
+| `doctor` | derived store | action-first health summary by scope | initializes the missing default store once; later runs read it |
 | `sql` | existing derived store and SQL/stdin | bounded read-only ad-hoc table, Markdown, or JSON rows | never refreshes or creates the store |
 | `query` | existing derived store and SQL/stdin | bounded ad-hoc table, Markdown, or JSON rows | opens the store read-only; never refreshes or creates it |
+| `optimize` | Codex home and derived store | interactive Codex root-cause investigation and proposed fixes | refreshes unless `--frozen`; asks Codex not to edit files |
 | `optimize --diff` | derived store and target instruction files | high-confidence proposal diffs and skipped reasons | does not modify the supplied store or target files; legacy stores use a temporary migrated copy |
 | `optimize --apply --yes` | derived store and validated instruction/documentation targets | applies reviewed proposals and reports retained backups/recovery | modifies only the validated write set; never modifies the supplied store or rollout/state inputs |
 | `monitor` | one local rollout JSONL or state SQLite source | bounded incremental ingestion and cursor/status output | does not modify the source; writes the derived store and optional cursor file |
@@ -109,9 +112,9 @@ and never echoes the SQL in errors. JSON uses
 `sql` envelope. `query` is retained as an explicit compatibility alias with
 the same contract.
 
-`optimize` requires exactly one of `--diff`, `--print`, or `--apply`.
-`--diff` and `--print` are advisory and read-only; `--print` emits the
-briefing without requiring a diff flag. `--apply` requires explicit
+Bare `optimize` starts Codex with a private-file briefing; use `--print` to
+inspect the briefing without launching Codex. `--diff` and `--print` are
+advisory and read-only. `--apply` requires explicit
 confirmation; non-interactive use must add `--yes` after reviewing the diff.
 It validates the complete write set, re-reads and re-hashes every file, keeps
 backups after success, and rolls back the whole batch on failure. `analyze`
