@@ -60,7 +60,7 @@ extensions are kept explicit:
   the implemented JSON command shapes and canonical aliases.
 - `optimize_apply_requires_explicit_confirmation` checks the implemented write
   boundary; rejected confirmation stays bounded and the store stays unchanged.
-- `reporting_is_deterministic_bounded_and_does_not_refresh_or_write` checks
+- `frozen_reporting_is_deterministic_bounded_and_does_not_refresh_or_write` checks
   repeated human-readable output, bounded/redacted evidence, and unchanged
   derived/raw files.
 - `reporting_commands_render_local_store_data` and
@@ -141,7 +141,7 @@ applies the existing identity and incremental-ingest rules, and commits all
 replacements atomically. A failed source read or transaction leaves the
 previous successful derived state available.
 
-Reporting remains a separate operation over the derived store. The explicit
+Reports refresh the selected derived store by default. The explicit
 `--frozen` reporting mode means "use exactly this store": it must not discover
 or reopen raw inputs, refresh the store, or silently claim that the store is
 current. Missing or invalid stores remain bounded errors; recorded freshness
@@ -149,10 +149,10 @@ is shown in the report.
 
 Issue #58 implements `refresh` with `--store`, `--codex-home`/`--home`,
 `--include-archived`, and `--config` input options. All supported reporting
-commands accept `--frozen`; both frozen and default reporting read only the
-selected derived store, and recorded freshness is reported without claiming
-that the store is current. The explicit refresh path is the only workflow that
-discovers or ingests raw inputs; reporting does not refresh implicitly.
+commands accept `--frozen`; default reporting refreshes the selected store
+first, while frozen reporting reads only that store. Recorded freshness is
+reported without claiming that a frozen store is current. `refresh` ingests
+without rendering a report.
 
 ### Compatibility tests
 
@@ -164,8 +164,9 @@ discovers or ingests raw inputs; reporting does not refresh implicitly.
   freshness record intact.
 - `--frozen` produces the same report for the same store regardless of raw
   source changes and never reads or modifies those raw sources.
-- Reporting without `--frozen` does not gain an implicit refresh as a side
-  effect; the explicit refresh path is the only writer of derived state.
+- Reporting without `--frozen` refreshes the selected derived store before
+  evaluating the requested period. `--frozen` never reads or modifies raw
+  sources.
 
 ### Privacy tests
 
@@ -359,11 +360,11 @@ parser schema version, a bounded `message`, `selected_sessions`,
 retain their canonical kind. The list is bounded; `limitations_omitted` makes
 truncation explicit.
 
-The report covers exactly the selected derived store. It does not claim to
-cover all historical activity or currently available raw inputs. `refresh` is
-the only operation that discovers or ingests raw inputs; reporting never
-refreshes implicitly, and archived sessions are included only when refresh is
-run with `--include-archived`.
+The report covers the selected derived store after the default refresh, or its
+exact frozen contents when `--frozen` is set. It does not claim to cover all
+historical activity or currently available raw inputs. `refresh` ingests
+without reporting; normal reports refresh implicitly, and archived sessions
+are included only when `--include-archived` is selected.
 
 `session_count` is the number of distinct session IDs observed across the
 canonical session-bearing data. `record_count` is the number of canonical
@@ -734,12 +735,12 @@ Implementation status: implemented by Issue #83.
 
 ### Scope
 
-The read-only reporting commands `analyze`, `sessions`, `failures`,
+The reporting commands `analyze`, `sessions`, `failures`,
 `corrections`, `rework`/`stuck`, `verification`, `knowledge`/`rediscovery`,
 `instructions`, `doctor`, and `optimize --diff` accept `--since` and `--until`.
-Selection applies to the loaded derived store before lens aggregation,
-ranking, proposal generation, or rendering. It never refreshes the store or
-reopens raw rollout/state inputs. `monitor` keeps its own cursor/ingestion
+Selection applies to the derived store before lens aggregation, ranking,
+proposal generation, or rendering. Unless `--frozen`, the command refreshes
+the store first; `monitor` keeps its own cursor/ingestion
 boundary, and `optimize --apply` rejects period selectors because its validated
 write set must not become implicit.
 

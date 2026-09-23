@@ -41,9 +41,9 @@ project documentation.
 - Flow: adapter → canonical records → SQLite store → lenses → findings →
   `doctor`/`optimize`.
 - Unknown valid rollout records are retained with source provenance.
-- Raw rollout/state inputs remain unchanged. `refresh` and `monitor` update
-  the derived store; `monitor` may also write its selected cursor file.
-  Reporting leaves the supplied store unchanged. `optimize --diff` produces
+- Raw rollout/state inputs remain unchanged. Reports refresh the selected
+  derived store unless `--frozen`; `refresh` updates it without reporting, and
+  `monitor` may also write its selected cursor. `optimize --diff` produces
   review-only proposals; explicitly confirmed `optimize --apply` may update
   only its validated instruction/documentation write set.
 - No network service or LLM is required by the MVP.

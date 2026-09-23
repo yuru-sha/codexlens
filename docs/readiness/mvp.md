@@ -43,11 +43,12 @@ bounded local monitoring.
 - The CLI's user-facing surface includes explicit refresh, bounded local
   monitoring, canonical-data lenses, derived-store reports, review-only
   proposal diffs, and the explicitly confirmed validated apply workflow.
-  Reporting never refreshes implicitly, and raw input sources remain read-only.
+  Reports refresh unless `--frozen` is selected, and raw input sources remain
+  read-only.
 - Finding and report ordering is deterministic; evidence retains source paths
   and line numbers where available, and reports bound/redact human-facing
   excerpts.
-- Reporting and apply read the derived store without reopening raw rollout/state
+- Frozen reporting reads the derived store without reopening raw rollout/state
   input. `optimize --diff` never writes target instruction files, while
   `optimize --apply` writes only its validated write set and retains backups.
 - No blocking issue remains for the historical MVP reporting path. The

@@ -51,9 +51,11 @@ The MVP mirrors the cclens view model with Codex adapters:
 | `query` | compatibility alias for `sql` |
 | `optimize` | investigate selected findings and propose concrete config/docs fixes |
 
-Explicit `analyze` and `refresh` commands update the derived store
-incrementally. Read commands consume the existing store exactly and never
-refresh it; `--frozen` makes that store-only boundary explicit. `--scope global` and
+Reports refresh the derived store incrementally by default; `--frozen` reads the
+existing snapshot. `analyze` refreshes and reports every canonical finding,
+while `refresh` updates the store without a report. `optimize` opens an
+interactive Codex investigation unless `--frozen` or `--print` is selected.
+`--scope global` and
 `--scope project:<path>` are supported on applicable views. Human output is
 screen-sized; JSON/Markdown are detailed machine/paste formats.
 
@@ -123,7 +125,7 @@ doctor output must not print hundreds of findings or full prompt/tool output.
 ## 7. Acceptance criteria
 
 - A first `codexlens analyze` refreshes the selected inputs, after which
-  `codexlens doctor` reports from the derived store without implicit refresh.
+  `codexlens doctor` refreshes the derived store unless `--frozen` is selected.
 - The default store is per-user and does not depend on the repository where
   the command is run.
 - Global and project scopes are distinct.

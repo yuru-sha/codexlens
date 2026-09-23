@@ -2,6 +2,8 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, IsTerminal, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -163,7 +165,7 @@ enum Command {
         #[command(flatten)]
         options: QueryOptions,
     },
-    #[command(about = "Print/diff a reviewable optimization plan or apply it explicitly")]
+    #[command(about = "Investigate findings with Codex, print/diff a plan, or apply it explicitly")]
     Optimize {
         #[command(flatten)]
         store: StoreOptions,
@@ -661,9 +663,7 @@ fn main() -> Result<()> {
             yes,
             print,
         } => {
-            if !diff && !apply && !print {
-                bail!("optimize requires --diff, --print, or --apply");
-            }
+            let interactive = !diff && !apply && !print;
             if apply && (store.since.is_some() || store.until.is_some()) {
                 bail!(
                     "reporting period filters are supported by optimize --diff only; optimize --apply requires the unfiltered store"
@@ -694,7 +694,18 @@ fn main() -> Result<()> {
             opportunities.sort_by_key(optimize_opportunity_kind);
             let proposal_plan =
                 proposals_for_findings_and_waste(&scoped_data, &findings, &opportunities);
-            if print {
+            if interactive {
+                run_optimize_interactive(
+                    &scoped_data,
+                    &findings,
+                    &opportunities,
+                    &waste,
+                    &proposal_plan,
+                    &freshness,
+                    &store,
+                    selection.as_ref(),
+                )
+            } else if print {
                 run_optimize_print(
                     &scoped_data,
                     &findings,
@@ -1583,11 +1594,6 @@ fn bounded_path(path: &Path) -> String {
 }
 
 fn run_analyze(options: &StoreOptions) -> Result<()> {
-    validate_reporting_options(options)?;
-    if !options.frozen {
-        let store_path = options.store_path()?;
-        refresh_reporting_store(options, &store_path)?;
-    }
     run_finding_report(options, analyze_default, "analyze")
 }
 
@@ -1601,7 +1607,7 @@ fn refresh_reporting_store(options: &StoreOptions, store_path: &Path) -> Result<
     };
     let outcome = refresh_store(&refresh).with_context(|| {
         format!(
-            "analyze could not refresh derived store {}",
+            "report could not refresh derived store {}",
             bounded_display(store_path)
         )
     })?;
@@ -2974,6 +2980,9 @@ fn load_reporting(
         .map_err(anyhow::Error::new)?;
     let selection_options = session_selection_options(options)?;
     let store_path = options.store_path()?;
+    if !options.frozen {
+        refresh_reporting_store(options, &store_path)?;
+    }
     let (data, freshness) = load_store(&store_path)?;
     let selected = select_report_data_with_options(&data, period.as_ref(), &selection_options);
     let Some(period) = period else {
@@ -2997,13 +3006,6 @@ fn load_reporting(
             source_data,
         }),
     ))
-}
-
-fn validate_reporting_options(options: &StoreOptions) -> Result<()> {
-    ReportingPeriod::from_bounds(options.since.as_deref(), options.until.as_deref())
-        .map_err(anyhow::Error::new)?;
-    session_selection_options(options)?;
-    Ok(())
 }
 
 fn report_auto_refresh(outcome: &RefreshOutcome, store: &Path) {
@@ -3196,6 +3198,64 @@ fn run_optimize_print(
         },
         || render_optimize_json_omitted_details(findings, opportunities, &batch, &matches),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_optimize_interactive(
+    data: &CanonicalData,
+    findings: &[Finding],
+    opportunities: &[ViewOpportunity],
+    waste: &WasteReport,
+    proposal_plan: &codexlens::advisor::ProposalPlan,
+    freshness: &StoreFreshness,
+    options: &StoreOptions,
+    selection: Option<&ReportingSelection>,
+) -> Result<()> {
+    let coverage = coverage_for_scope(data, selection, &options.scope);
+    let period = selection.map(|selection| period_for_scope(selection, &options.scope));
+    let batch = presentation_batch(&proposal_batch(proposal_plan))?;
+    let matches = optimize_proposal_matches(data, findings, opportunities, &batch);
+    let briefing = render_optimize_briefing_human(
+        data,
+        findings,
+        opportunities,
+        waste,
+        &batch,
+        &matches,
+        freshness,
+        &coverage,
+        options,
+        period.as_ref(),
+    );
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "codexlens-briefing-{}-{nonce}.md",
+        std::process::id()
+    ));
+    let mut create = OpenOptions::new();
+    create.write(true).create_new(true);
+    #[cfg(unix)]
+    create.mode(0o600);
+    let mut file = create
+        .open(&path)
+        .context("create private optimize briefing")?;
+    file.write_all(briefing.as_bytes())
+        .context("write optimize briefing")?;
+    drop(file);
+    let prompt = format!(
+        "Read the CodexLens findings in {}. Investigate each root cause in the selected scope, then propose concrete configuration or documentation fixes for my review. Do not edit files or apply changes. Preserve unknowns and cite the evidence for each recommendation.",
+        path.display()
+    );
+    let result = std::process::Command::new("codex").arg(prompt).status();
+    let _ = fs::remove_file(&path);
+    let status = result.context("launch `codex` — is the Codex CLI installed and on PATH?")?;
+    if !status.success() {
+        bail!("codex exited with {status}");
+    }
+    Ok(())
 }
 
 fn presentation_batch(batch: &DiffBatch) -> Result<DiffBatch> {
@@ -4100,6 +4160,12 @@ mod tests {
             Cli::try_parse_from(args).unwrap();
         }
         Cli::try_parse_from(["codexlens", "doctor", "--frozen"]).unwrap();
+        assert!(matches!(
+            Cli::try_parse_from(["codexlens", "optimize"])
+                .unwrap()
+                .command,
+            Command::Optimize { .. }
+        ));
     }
 
     #[test]
