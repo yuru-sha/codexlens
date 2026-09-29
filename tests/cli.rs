@@ -1130,6 +1130,60 @@ fn query_renders_table_markdown_and_json_from_an_existing_store() {
         json!(["compile_options"])
     );
 
+    for pragma in [
+        "application_id",
+        "compile_options",
+        "data_version",
+        "encoding",
+        "foreign_keys",
+        "freelist_count",
+        "page_count",
+        "page_size",
+        "recursive_triggers",
+        "schema_version",
+        "user_version",
+    ] {
+        let sql = format!("PRAGMA {pragma}");
+        let output = run_query(&[&sql, "--format", "json"], &store, None);
+        let document = parse_json_report(&output, "query");
+        assert_eq!(document["data"]["columns"], json!([pragma]), "{sql}");
+    }
+
+    for pragma in [
+        "application_id",
+        "compile_options",
+        "data_version",
+        "encoding",
+        "foreign_keys",
+        "freelist_count",
+        "page_count",
+        "page_size",
+        "recursive_triggers",
+        "schema_version",
+        "user_version",
+    ] {
+        for sql in [format!("PRAGMA {pragma}=1"), format!("PRAGMA {pragma}(1)")] {
+            let rejected = run_query(&[&sql], &store, None);
+            assert!(!rejected.status.success(), "{sql} unexpectedly succeeded");
+        }
+    }
+
+    let table_info = run_query(
+        &["PRAGMA table_info(sessions)", "--format", "json"],
+        &store,
+        None,
+    );
+    let table_info_document = parse_json_report(&table_info, "query");
+    assert!(
+        table_info_document["data"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row[1] == "session_id"))
+    );
+
+    let equals_literal = run_query(&["SELECT 'a=b' AS value"], &store, None);
+    assert!(equals_literal.status.success());
+    assert!(String::from_utf8_lossy(&equals_literal.stdout).contains("a=b"));
+
     let markdown = run_query(&["SELECT 1 AS value", "--format", "markdown"], &store, None);
     assert!(
         markdown.status.success(),
@@ -1243,6 +1297,12 @@ fn query_rejects_writes_and_bounds_rows_without_creating_a_store() {
         "PRAGMA query_only = OFF",
         "PRAGMA query_only(OFF)",
         "PRAGMA user_version = 42",
+        "PRAGMA user_version(42)",
+        "PRAGMA table_info = sessions",
+        "PRAGMA incremental_vacuum",
+        "PRAGMA optimize",
+        "PRAGMA shrink_memory",
+        "PRAGMA wal_checkpoint",
         "ATTACH ':memory:' AS external_store",
         "DETACH external_store",
         "SELECT LOAD_EXTENSION('synthetic-extension')",

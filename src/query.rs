@@ -76,7 +76,7 @@ fn execute_query(connection: &rusqlite::Connection, sql: &str) -> Result<QueryRe
             anyhow::anyhow!("query must contain one valid SQL statement")
         }
     })?;
-    if !statement.readonly() || is_mutating_pragma(sql) {
+    if !statement.readonly() || is_pragma_assignment(sql) {
         bail!("query must be a single read-only SQL statement");
     }
 
@@ -267,43 +267,24 @@ const READ_ONLY_PRAGMA_ARGUMENTS: &[&str] = &[
     "table_xinfo",
 ];
 
-const MUTATING_PRAGMA_WITHOUT_ARGUMENTS: &[&str] = &[
-    "incremental_vacuum",
-    "optimize",
-    "shrink_memory",
-    "wal_checkpoint",
-];
-
-fn is_mutating_pragma(sql: &str) -> bool {
+fn is_pragma_assignment(sql: &str) -> bool {
     let Some(mut rest) = after_sql_keyword(sql, "pragma") else {
         return false;
     };
     rest = skip_sql_space_and_comments(rest);
-    let Some((mut after_name, mut name)) = take_sql_identifier(rest) else {
+    let Some((mut after_name, _)) = take_sql_identifier(rest) else {
         return true;
     };
     after_name = skip_sql_space_and_comments(after_name);
     if let Some(after_schema) = after_name.strip_prefix('.') {
-        let Some((qualified_rest, qualified_name)) =
+        let Some((qualified_rest, _)) =
             take_sql_identifier(skip_sql_space_and_comments(after_schema))
         else {
             return true;
         };
         after_name = qualified_rest;
-        name = qualified_name;
     }
-    after_name = skip_sql_space_and_comments(after_name);
-    if after_name.starts_with('=') {
-        return true;
-    }
-    if after_name.starts_with('(') {
-        return !READ_ONLY_PRAGMA_ARGUMENTS
-            .iter()
-            .any(|candidate| name.eq_ignore_ascii_case(candidate));
-    }
-    MUTATING_PRAGMA_WITHOUT_ARGUMENTS
-        .iter()
-        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    skip_sql_space_and_comments(after_name).starts_with('=')
 }
 
 fn after_sql_keyword<'a>(sql: &'a str, keyword: &str) -> Option<&'a str> {
