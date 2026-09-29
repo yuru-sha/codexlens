@@ -45,20 +45,48 @@ struct KnownScope {
 struct KnownFreshness {
     state: String,
     source_count: usize,
+    #[serde(deserialize_with = "deserialize_nullable_string")]
     latest_ingested_at: Option<String>,
+}
+
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
 }
 
 #[derive(Debug, Deserialize)]
 struct KnownCoverage {
     scope: String,
     status: String,
+    #[serde(deserialize_with = "deserialize_nullable_string")]
     activity_start: Option<String>,
+    #[serde(deserialize_with = "deserialize_nullable_string")]
     activity_end: Option<String>,
     valid_activity_timestamps: usize,
     missing_activity_timestamps: usize,
     invalid_activity_timestamps: usize,
     session_count: usize,
     record_count: usize,
+}
+#[derive(Debug, Deserialize)]
+struct KnownSessionsCoverage {
+    session_count: usize,
+    included_session_count: usize,
+    record_count: usize,
+    archived_included: bool,
+    subagents_included: bool,
+    status: String,
+    #[serde(deserialize_with = "deserialize_nullable_string")]
+    activity_start: Option<String>,
+    #[serde(deserialize_with = "deserialize_nullable_string")]
+    activity_end: Option<String>,
+    valid_activity_timestamps: usize,
+    missing_activity_timestamps: usize,
+    invalid_activity_timestamps: usize,
+    limitations: Vec<serde_json::Value>,
+    limitations_omitted: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,21 +153,29 @@ struct KnownFindingDocument {
 #[derive(Debug, Deserialize)]
 struct KnownSession {
     id: String,
+    #[serde(deserialize_with = "deserialize_nullable_string")]
     created_at: Option<String>,
+    #[serde(deserialize_with = "deserialize_nullable_string")]
     updated_at: Option<String>,
+    #[serde(deserialize_with = "deserialize_nullable_string")]
     cwd: Option<String>,
+    #[serde(deserialize_with = "deserialize_nullable_string")]
     project: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct KnownSessionsData {
     rows: Vec<KnownSession>,
+    omitted_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
 struct KnownSessionsDocument {
     schema_version: u32,
     command: String,
+    scope: KnownScope,
+    coverage: KnownSessionsCoverage,
+    freshness: KnownFreshness,
     data: KnownSessionsData,
 }
 
@@ -6340,12 +6376,50 @@ fn json_schema_readers_cover_sessions_and_optimize_shapes() {
         "sessions",
     );
     sessions_document["future_optional"] = json!(true);
+    sessions_document["scope"]["future_optional"] = json!("ignored");
+    sessions_document["coverage"]["future_optional"] = json!("ignored");
+    sessions_document["freshness"]["future_optional"] = json!("ignored");
     sessions_document["data"]["future_optional"] = json!("ignored");
     sessions_document["data"]["rows"][0]["future_optional"] = json!(false);
     let sessions: KnownSessionsDocument = serde_json::from_value(sessions_document).unwrap();
     assert_eq!(sessions.schema_version, 1);
     assert_eq!(sessions.command, "sessions");
+    assert_eq!(sessions.scope.kind, "all");
+    assert!(matches!(
+        sessions.coverage.status.as_str(),
+        "empty" | "observed" | "partial"
+    ));
+    assert!(sessions.coverage.session_count > 0);
+    assert_eq!(
+        sessions.coverage.included_session_count,
+        sessions.data.rows.len()
+    );
+    assert!(sessions.coverage.record_count > 0);
+    assert_eq!(sessions.freshness.state, "recorded");
+    assert!(sessions.freshness.source_count > 0);
+    assert_eq!(sessions.data.omitted_count, 0);
+    let _ = (
+        sessions.coverage.archived_included,
+        sessions.coverage.subagents_included,
+        &sessions.coverage.activity_start,
+        &sessions.coverage.activity_end,
+        sessions.coverage.valid_activity_timestamps,
+        sessions.coverage.missing_activity_timestamps,
+        sessions.coverage.invalid_activity_timestamps,
+        &sessions.coverage.limitations,
+        sessions.coverage.limitations_omitted,
+        &sessions.freshness.latest_ingested_at,
+    );
     assert!(!sessions.data.rows.is_empty());
+    assert!(
+        sessions.data.rows.iter().any(|session| {
+            session.created_at.is_none()
+                || session.updated_at.is_none()
+                || session.cwd.is_none()
+                || session.project.is_none()
+        }),
+        "fixture should exercise nullable session fields"
+    );
     for session in &sessions.data.rows {
         let _ = (
             &session.id,
