@@ -195,7 +195,9 @@ The default human-readable format remains unchanged. JSON output is one
 document on stdout; diagnostics and operational errors stay on stderr and are
 not mixed into the document.
 
-The top-level JSON contract is versioned and uses stable snake-case fields:
+The following abbreviated envelope shows the versioned JSON shape; it omits
+command-specific fields. The CLI specification defines each command's full
+envelope, including its scope, coverage, and freshness metadata.
 
 ```json
 {
@@ -205,7 +207,7 @@ The top-level JSON contract is versioned and uses stable snake-case fields:
 }
 ```
 
-`data` has one of these command-specific shapes:
+Command-specific CLI JSON fields follow these shapes:
 
 - Finding commands (`analyze`, `corrections`, `rework`, `verification`,
   `knowledge`, `rediscovery`, `instructions`, and `doctor`)
@@ -217,10 +219,12 @@ The top-level JSON contract is versioned and uses stable snake-case fields:
   `summary`, `evidence`, `occurrences`, `distinct_sessions`,
   `affected_paths`, `observed_commands`, `sequence`, `suggested_action`,
   `limitations`, and `verification_status`, plus `heuristic`.
-- `sessions` uses `{freshness, sessions, omitted_count}` with optional additive
-  `coverage`, where `omitted_count` is the number of selected rows beyond the
-  default 50-row bound and each session is
-  `{id, created_at, updated_at, cwd, project}`.
+- `sessions` uses the standard versioned CLI envelope with top-level
+  `{schema_version, command, scope, coverage, freshness}` and `data` containing
+  `{rows, omitted_count}`. `omitted_count` is the number of selected rows beyond
+  the default 50-row bound. Each row is
+  `{id: string, created_at: string | null, updated_at: string | null,
+  cwd: string | null, project: string | null}`.
 - Core product views (`inventory`, `overhead`, `usage`, `waste`, `failures`,
   `stuck`, and `prompts`) use `{measure, rows|opportunities, omitted_count}`;
   `usage` also includes typed `coverage`. Their rows retain the scope,
@@ -296,15 +300,16 @@ Each `groups` element is `{scope, findings}` with both fields required. Each
 finding element has all of the listed `Finding` fields required; only
 `verification_status` is nullable. Its `evidence`, `affected_paths`,
 `observed_commands`, `sequence`, and `limitations` fields are arrays of the
-types named by their fields, and each array is present even when empty. Each
-`sessions` element has required `id: string`, `created_at: string | null`,
-`updated_at: string | null`, `cwd: string | null`, and `project: string | null`.
+types named by their fields, and each array is present even when empty.
+Each session row has the required `Session` fields defined below.
 `heuristic` and `diff` are required strings. The wrapper's `rendered` and
 `skipped` arrays are present even when empty.
 
-The `sessions` data object is
-`{freshness: Freshness, optional coverage: Coverage, sessions: Session[],
-omitted_count: non-negative integer}`;
+The `sessions` CLI envelope has required top-level `scope: {kind: all | global |
+project, value?: string}`, `coverage: SessionsCoverage`, and `freshness: Freshness`; its
+`data` object has `rows: Session[]` and `omitted_count: non-negative integer`.
+It renders at most 50 rows by default, with omitted selected rows counted by
+`omitted_count`.
 `Session` is `{id: string, created_at: string | null, updated_at: string | null,
 cwd: string | null, project: string | null}`. A `RenderedDiff` is
 `{proposal: Proposal, diff: string}`. A `Proposal` has required
@@ -325,15 +330,41 @@ comparable with the human proposal summary.
 
 ### Reporting coverage metadata
 
-Issue #82 adds the same additive `coverage` object to `sessions` and finding
-reports (the shared finding renderer also exposes it for focused lens
-commands). The JSON schema remains version `1`: existing required fields,
-freshness fields, command names, and aliases keep their meaning, while
-`coverage` is an optional object that current producers always emit. Existing
-readers must continue ignoring unknown optional fields; a future change to the
-meaning or type of an existing field still requires a new schema version.
+Issue #82 adds coverage metadata to `sessions` and finding reports. Their CLI
+shapes differ: `sessions` has a required top-level `SessionsCoverage` object,
+while finding-report commands have an additive `Coverage` object in `data`.
+The JSON schema remains version `1`; existing required fields, freshness
+fields, command names, and aliases keep their meaning. Current CLI producers
+emit both coverage objects. Readers must continue ignoring unknown optional
+fields; changing an existing field's meaning or type still requires a new
+schema version.
 
-`Coverage` is:
+`SessionsCoverage` is:
+
+```text
+{
+  "session_count": non-negative integer,
+  "included_session_count": non-negative integer,
+  "record_count": non-negative integer,
+  "archived_included": boolean,
+  "subagents_included": boolean,
+  "status": "empty | observed | partial",
+  "activity_start": "timestamp | null",
+  "activity_end": "timestamp | null",
+  "valid_activity_timestamps": non-negative integer,
+  "missing_activity_timestamps": non-negative integer,
+  "invalid_activity_timestamps": non-negative integer,
+  "limitations": [CoverageLimitation],
+  "limitations_omitted": non-negative integer
+}
+```
+
+An explicit reporting period also adds `requested_start: string | null`,
+`requested_end: string | null`, non-negative integer `included_records`,
+`excluded_records`, `unknown_timestamp_records`, and
+`unknown_timestamp_events`, plus `period_status: empty | complete | partial`.
+
+`Coverage` is the finding-report coverage object:
 
 ```text
 {
@@ -390,9 +421,11 @@ are `null` when none exist. The latest recorded ingestion time remains only in
 `freshness.latest_ingested_at`; it is never substituted for an unknown activity
 time. `empty` means there are no canonical sessions, records, or timestamp
 observations; `partial` means at least one timestamp observation is missing or
-invalid; otherwise the status is `observed`. The `sessions` list uses the same
-session-ID set as `session_count`; an ID inferred from canonical records or
-other session-bearing rows has `null` metadata when no session row exists.
+invalid; otherwise the status is `observed`. The full selected session-ID set
+matches `session_count`; CLI `data.rows` shows at most 50 selected sessions and
+`data.omitted_count` counts any remainder. An ID inferred from canonical
+records or other session-bearing rows has `null` metadata when no session row
+exists.
 
 For `optimize --diff`, `action` is `add | modify | remove | move_to_docs |
 split_scope`; all fields are required, including nullable fields, as defined
