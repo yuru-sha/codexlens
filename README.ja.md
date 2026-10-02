@@ -271,8 +271,8 @@ Phase 6 はリリース準備フェーズです。リリースチェックリス
 ローカル開発には `rust-toolchain.toml` で指定したツールチェーンを使用します。
 `sh scripts/verify.sh` でローカル・CI 共通ゲートを実行できます。このゲートでは
 プライバシーとステージ済み内容も検査します。権限や完了条件については
-[環境構築手順](docs/agents/environment.md) と
-[開発ワークフロー](docs/agents/workflow.md) を参照してください。Rust の各チェックは
+[環境構築手順](docs/development/environment.md) と
+[開発ワークフロー](docs/development/workflow.md) を参照してください。Rust の各チェックは
 次のとおりです。
 
 ```bash
@@ -306,6 +306,9 @@ Windows で保証する範囲はホスト runner 上のビルド・テストで�
 
 MIT。詳細は [LICENSE](LICENSE) を参照してください。
 
-## GitHub Release
 
-See docs/agents/release.md for the release note format and creation procedure. The shared body template is .github/release-notes-template.md, and the generated-note categories are managed in .github/release.yml.
+## GitHub運用
+
+Issue Form と既定の Pull Request テンプレートは `yuru-sha/.github` の共通設定を利用します。Release Notes のカテゴリは `.github/release.yml` で管理し、`orca:*` を含む共通ラベルは `yuru-sha/project-template` から同期します。
+
+`CHANGELOG.md` はプロジェクトの変更履歴として意図的にリポジトリ直下へ残します。
