@@ -269,8 +269,8 @@ Requirements: Rust 1.85 or newer.
 
 Local development is pinned by `rust-toolchain.toml`. Run the shared local/CI
 gate with `sh scripts/verify.sh`; it also checks privacy and staged content.
-See [environment setup](docs/agents/environment.md) and the
-[delivery workflow](docs/agents/workflow.md) for permissions, review, and
+See [environment setup](docs/development/environment.md) and the
+[delivery workflow](docs/development/workflow.md) for permissions, review, and
 completion criteria. The underlying Rust checks are:
 
 ```bash
@@ -307,6 +307,9 @@ project.
 
 MIT. See [LICENSE](LICENSE).
 
-## GitHub Release
 
-See docs/agents/release.md for the release note format and creation procedure. The shared body template is .github/release-notes-template.md, and the generated-note categories are managed in .github/release.yml.
+## GitHub workflow
+
+Shared Issue Forms and the default Pull Request template are inherited from `yuru-sha/.github`. Release-note categories are configured in `.github/release.yml`, and shared labels (including `orca:*`) are synchronized from `yuru-sha/project-template`.
+
+`CHANGELOG.md` intentionally remains at repository root as the project changelog.
