@@ -66,9 +66,8 @@ verification gate. Existing Orca/terminal notification hooks are not test gates.
 
 ## Effective sandbox
 
-`.codex/config.toml` requests `workspace-write`, `on-request`, and disabled shell
-network access. These are project defaults for trusted projects, not mandatory
-policy. CLI flags and launcher overrides have higher precedence; editing this
+A local `.codex/config.toml`, when present, may request `workspace-write`, `on-request`, and disabled shell
+network access. This file is machine-local and is not repository-managed policy. CLI flags and launcher overrides have higher precedence; editing this
 file cannot change an already-running session. Standard workspace-write may
 also permit temporary/cache locations and does not confine all file reads.
 
