@@ -1,18 +1,33 @@
+# Cargo build output
 /target/
+
+# Local analysis stores and databases
 *.db
 *.db-*
 .codexlens/
 .codexlens.sqlite
 .codexlens.sqlite-*
+
+# Local environment and secrets
 .env
 .env.*
 !.env.example
+
+# Python helper cache
 __pycache__/
 
-# Machine-local agent links; keep only project-owned skills versioned.
+# OS / editor / temporary files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+tmp/
+temp/
+
+# Machine-local agent configuration
 .agents/agent-capabilities/
 .codex/agents/
-.agents/skills/*
-!.agents/skills/codexlens-delivery/
-!.agents/skills/codexlens-delivery/**
 .codex/config.toml
