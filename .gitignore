@@ -1,6 +1,9 @@
 # Cargo build output
 /target/
 
+# Local skill evidence output
+artifacts/
+
 # Local analysis stores and databases
 *.db
 *.db-*
