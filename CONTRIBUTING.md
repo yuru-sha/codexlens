@@ -15,6 +15,10 @@ Thank you for contributing.
 Use the repository's canonical commands. Keep changes focused and avoid introducing new dependencies, abstractions, or automation without a demonstrated need.
 
 Add or update tests when behavior changes. Update documentation when interfaces, workflows, configuration, or user-visible behavior changes.
+Code explains **How** an implementation works; tests specify **What** behavior
+is expected. Comments explain **Why not**: non-obvious constraints, rejected
+alternatives, trade-offs, or intent that the code cannot show. Avoid comments
+that merely restate code behavior.
 
 ## Pull requests
 
@@ -60,3 +64,5 @@ Use these types as the default vocabulary:
 Use a scope when it adds useful context, for example `fix(forecast): handle missing observations`.
 
 Mark a breaking change with `!` after the type or scope, or with a `BREAKING CHANGE:` footer.
+Commit messages explain **Why** the change was needed; describe the motivation,
+not only the implementation.
