@@ -51,6 +51,10 @@ Use `sh scripts/verify.sh` as the shared local/CI gate. `sh scripts/verify.sh pl
 
 
 ## Code Conventions & Common Patterns
+Code explains **How** an implementation works; tests specify **What** behavior
+is expected. Comments explain **Why not**: non-obvious constraints, rejected
+alternatives, trade-offs, or intent that the code cannot show. Avoid comments
+that merely restate code behavior.
 
 - Follow the adapter → canonical model → store → analysis layering; do not expose raw upstream field names to lenses or storage code.
 - Keep analysis and outputs deterministic; never rely on SQLite row order or hash-map iteration for report order.

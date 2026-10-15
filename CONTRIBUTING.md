@@ -15,10 +15,6 @@ Thank you for contributing.
 Use the repository's canonical commands. Keep changes focused and avoid introducing new dependencies, abstractions, or automation without a demonstrated need.
 
 Add or update tests when behavior changes. Update documentation when interfaces, workflows, configuration, or user-visible behavior changes.
-Code explains **How** an implementation works; tests specify **What** behavior
-is expected. Comments explain **Why not**: non-obvious constraints, rejected
-alternatives, trade-offs, or intent that the code cannot show. Avoid comments
-that merely restate code behavior.
 
 ## Pull requests
 
