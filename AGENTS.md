@@ -49,17 +49,6 @@ sh scripts/verify.sh
 
 Use `sh scripts/verify.sh` as the shared local/CI gate. `sh scripts/verify.sh platform` omits formatting and Clippy but still runs privacy checks, build, and tests. The project targets Rust 1.85 MSRV and pins a local toolchain in `rust-toolchain.toml`; environment/setup details are in `docs/development/environment.md`.
 
-## Code and comment guidance
-
-Use each artifact to communicate a different kind of intent:
-
-- Code should explain **How** the behavior is implemented.
-- Test code should explain **What** behavior is expected.
-- Commit messages should explain **Why** the change was made.
-- Code comments should explain **Why not**: document non-obvious constraints, rejected alternatives, trade-offs, or reasons the seemingly simpler approach is incorrect.
-
-Do not use comments to restate what the code already makes clear.
-
 ## Code Conventions & Common Patterns
 
 - Follow the adapter → canonical model → store → analysis layering; do not expose raw upstream field names to lenses or storage code.
@@ -68,6 +57,13 @@ Do not use comments to restate what the code already makes clear.
 - Use domain types and diagnostics in lower-level modules; use `anyhow::Result` at orchestration boundaries. Propagate errors with `?`; reject invalid CLI combinations explicitly.
 - Prefer existing dependencies and standard-library solutions. Keep changes focused and preserve read-only input boundaries.
 - Public repository artifacts and CLI messages are English by default.
+
+## Code, Tests, Commits, and Comments
+
+- Code should make how the behavior is implemented clear.
+- Tests should make what behavior is expected clear.
+- Commit messages should explain why the change is needed.
+- Comments should explain why not an apparently reasonable alternative was chosen, including relevant constraints or non-obvious intent. Do not use comments to paraphrase the code's behavior.
 
 ## Important Files
 
