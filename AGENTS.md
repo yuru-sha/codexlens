@@ -1,61 +1,53 @@
-# AGENTS.md
+# Repository Guidelines
 
-## Project
+## Project Overview
 
-`codexlens` is a Rust CLI that reads local Codex history and turns repeated
-friction into evidence-backed suggestions for `AGENTS.md` and related
-project documentation.
+`codexlens` is a local-only Rust CLI that analyzes Codex session history and produces deterministic, evidence-backed suggestions for project instructions and documentation. It does not require a network service or LLM. Raw Codex inputs and source repositories remain read-only except for explicitly confirmed `optimize --apply` changes to validated instruction/documentation targets.
 
-- The project is MIT licensed.
-- MVP processing is local-only, rule-based, and read-only with respect to
-  Codex input files and source repositories.
-- `cclens` and `codex-session-insights` are design and format references only.
-  Do not copy their code.
+Public repository and GitHub artifacts are English by default. Do not copy code from cclens or codex-session-insights; they are design and format references only.
 
-## Artifact language
+## Contribution Workflow
 
-- Keep repository and GitHub artifacts in English by default: README and other
-  docs, CHANGELOG, code comments, CLI messages, issues, pull requests, review
-  comments, and releases.
-- Keep the conversation with the user in the user's preferred language; this
-  does not change the language of public project artifacts.
-- Use another language in an artifact only when the user explicitly requests
-  it or when quoting user-provided text. Before publishing, check that newly
-  generated text matches the surrounding artifact language.
+- Do not edit, commit, or push directly to `main`; use a feature branch and pull request. Direct work on `main` requires explicit user authorization.
+- Follow `CONTRIBUTING.md`'s Conventional Commit format when a commit is authorized. Do not create commits unless explicitly requested.
+- GitHub Issues are the canonical work tracker. Do not create tickets just to begin work.
+- Never commit real rollout files, prompts, tool output, tokens, credentials, private repository paths, personal identifiers, or local analysis databases. Keep fixtures synthetic and bounded.
 
-## Before changing code
+## Architecture & Data Flow
 
-1. Read `docs/development/workflow.md` for implementation or remediation tasks;
-   use its topic map to select the relevant specification under `docs/specs/`.
-2. Keep upstream Codex format details inside an adapter; do not leak raw
-   field names into analysis or storage code.
-3. Add or update a deterministic synthetic fixture and a focused test for
-   non-trivial behavior.
-4. Keep the change within the issue scope. Update the specification when a
-   decision changes.
+Keep upstream Codex formats inside the adapter boundary:
 
-## Architecture invariants
+`discovery and adapters → canonical records → derived SQLite store → analysis lenses → findings and reports`
 
-- Inputs: `state_*.sqlite`, rollout JSONL, `AGENTS.md` files, and
-  `config.toml`.
-- Flow: adapter → canonical records → SQLite store → lenses → findings →
-  `doctor`/`optimize`.
-- Unknown valid rollout records are retained with source provenance.
-- Raw rollout/state inputs remain unchanged. Reports refresh the selected
-  derived store unless `--frozen`; `refresh` updates it without reporting, and
-  `monitor` may also write its selected cursor. `optimize --diff` produces
-  review-only proposals; explicitly confirmed `optimize --apply` may update
-  only its validated instruction/documentation write set.
-- No network service or LLM is required by the MVP.
+- Adapters discover and parse rollout JSONL and state SQLite, preserve unknown valid rollout records with source provenance, and normalize upstream details into `src/model.rs` types.
+- `src/store.rs` persists canonical facts; lenses operate on stored canonical data and do not reopen raw inputs.
+- Analysis is deterministic and evidence-backed. Keep evidence and report/query output bounded and redact sensitive content.
+- `src/main.rs` coordinates CLI workflows and rendering; `src/advisor/` builds reviewable proposals and applies only the validated write set after explicit confirmation.
+- Keep reporting refresh behavior, `--frozen`, monitor cursor writes, and apply boundaries consistent with the relevant specifications.
 
-## Development
+## Key Directories
 
-Run `sh scripts/verify.sh`, the shared local/CI gate. Setup and individual
-commands are in `docs/development/environment.md`; CI also verifies Rust 1.85.0.
+- `src/`: CLI, adapters, canonical model, SQLite store, analysis, advisor, configuration, and monitoring.
+- `src/analysis/`, `src/advisor/`: focused analysis lenses and proposal/report workflows.
+- `tests/`: Rust integration tests; `tests/fixtures/` contains synthetic input data.
+- `scripts/`: shared verification, privacy checks, and bounded smoke/pilot utilities.
+- `docs/specs/`: product and implementation contracts; `docs/development/`: setup and delivery workflow.
 
-Prefer the standard library and existing dependencies. Do not add a
-dependency, abstraction, or output format without a concrete issue or
-measured need.
+## Development Commands
+
+Rust is the primary runtime; Python 3.9+ standard library supports repository verification scripts. Install Rust through rustup and the platform C toolchain required by bundled SQLite/zstd.
+
+
+```sh
+cargo run -- --help
+cargo build --all-features
+cargo test --all-features
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+sh scripts/verify.sh
+```
+
+Use `sh scripts/verify.sh` as the shared local/CI gate. `sh scripts/verify.sh platform` omits formatting and Clippy but still runs privacy checks, build, and tests. The project targets Rust 1.85 MSRV and pins a local toolchain in `rust-toolchain.toml`; environment/setup details are in `docs/development/environment.md`.
 
 ## Code and comment guidance
 
@@ -68,32 +60,33 @@ Use each artifact to communicate a different kind of intent:
 
 Do not use comments to restate what the code already makes clear.
 
-## Branch And Pull Request Workflow
+## Code Conventions & Common Patterns
 
-- Do not edit, commit, or push directly to `main`. Make changes on a feature branch and merge them through a pull request.
-- Direct work on `main` is allowed only when the user explicitly authorizes it.
+- Follow the adapter → canonical model → store → analysis layering; do not expose raw upstream field names to lenses or storage code.
+- Keep analysis and outputs deterministic; never rely on SQLite row order or hash-map iteration for report order.
+- Bound input line sizes, retained text, evidence, and query/report output. Represent recoverable malformed or incomplete input as diagnostics where the module already provides that pattern.
+- Use domain types and diagnostics in lower-level modules; use `anyhow::Result` at orchestration boundaries. Propagate errors with `?`; reject invalid CLI combinations explicitly.
+- Prefer existing dependencies and standard-library solutions. Keep changes focused and preserve read-only input boundaries.
+- Public repository artifacts and CLI messages are English by default.
 
-## GitHub workflow
+## Important Files
 
-- GitHub Issues are the canonical work tracker.
-- Shared Bug / Feature / Question forms and the default Pull Request template are inherited from `yuru-sha/.github`.
-- Shared non-default labels, including `orca:*`, are synchronized from `yuru-sha/project-template`.
-- Use `orca:*` labels only for ORCA execution state; do not treat them as release categories.
-- `CHANGELOG.md` intentionally remains at repository root as a standard changelog convention.
+- `src/main.rs`: CLI definitions, dispatch, and user-facing workflow orchestration.
+- `src/lib.rs`: core module exports.
+- `src/model.rs`, `src/normalize.rs`, `src/rollout.rs`, `src/state.rs`: canonical records and input adaptation.
+- `src/store.rs`, `src/analysis.rs`, `src/advisor/`: persistence, findings, and optimization proposals.
+- `Cargo.toml`, `rust-toolchain.toml`: package, dependencies, and toolchain.
+- `docs/development/workflow.md`: contract-to-code map and implementation/verification procedure.
+- `scripts/verify.sh`: shared verification gate.
 
-## Commit Messages
+## Runtime/Tooling Preferences
 
-- Follow the commit-message policy in `CONTRIBUTING.md`.
+Use Cargo and the repository-pinned Rust toolchain; there is no JavaScript runtime or package manager requirement. Rust commands in the verification gate use `--locked` (formatting is the exception). The verification scripts use `python3` by default and honor `PYTHON`. Do not add dependencies, abstractions, or output formats without a concrete need.
 
-- Do not create commits unless the user explicitly requests it.
+## Testing & QA
 
-## Fixtures and privacy
-
-- Tests use only synthetic data under `tests/fixtures/`.
-- Tests for content that must not be committed to fixtures may construct a
-  bounded synthetic value in memory; keep the surrounding fixture data under
-  `tests/fixtures/` when practical.
-- Never commit real rollout files, prompts, tool output, tokens, credentials,
-  private repository paths, or personal identifiers.
-- Issue and PR examples must be synthetic and bounded.
-- Local SQLite stores are analysis artifacts, not repository fixtures.
+- Rust tests use Cargo’s built-in test framework: unit tests live alongside modules; CLI and monitor integration tests are in `tests/cli.rs` and `tests/monitor.rs`.
+- Add focused tests and deterministic synthetic fixtures for non-trivial behavior. Fixtures must be fictional; never copy or sanitize real rollout files into the repository. Use temporary directories/stores and bounded in-memory synthetic content where appropriate.
+- Python privacy and smoke-runner tests are included in `scripts/verify.sh`.
+- Run a focused test for the changed path, then `sh scripts/verify.sh`. Check the relevant contract under `docs/specs/` and keep that specification current when a decision changes.
+- Read `docs/development/workflow.md` first for implementation/remediation tasks; its topic map identifies the relevant specification, implementation files, and checks.
