@@ -49,7 +49,6 @@ sh scripts/verify.sh
 
 Use `sh scripts/verify.sh` as the shared local/CI gate. `sh scripts/verify.sh platform` omits formatting and Clippy but still runs privacy checks, build, and tests. The project targets Rust 1.85 MSRV and pins a local toolchain in `rust-toolchain.toml`; environment/setup details are in `docs/development/environment.md`.
 
-
 ## Code Conventions & Common Patterns
 
 - Follow the adapter → canonical model → store → analysis layering; do not expose raw upstream field names to lenses or storage code.
