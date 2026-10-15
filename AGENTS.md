@@ -51,10 +51,6 @@ Use `sh scripts/verify.sh` as the shared local/CI gate. `sh scripts/verify.sh pl
 
 
 ## Code Conventions & Common Patterns
-Code explains **How** an implementation works; tests specify **What** behavior
-is expected. Comments explain **Why not**: non-obvious constraints, rejected
-alternatives, trade-offs, or intent that the code cannot show. Avoid comments
-that merely restate code behavior.
 
 - Follow the adapter → canonical model → store → analysis layering; do not expose raw upstream field names to lenses or storage code.
 - Keep analysis and outputs deterministic; never rely on SQLite row order or hash-map iteration for report order.
@@ -62,6 +58,13 @@ that merely restate code behavior.
 - Use domain types and diagnostics in lower-level modules; use `anyhow::Result` at orchestration boundaries. Propagate errors with `?`; reject invalid CLI combinations explicitly.
 - Prefer existing dependencies and standard-library solutions. Keep changes focused and preserve read-only input boundaries.
 - Public repository artifacts and CLI messages are English by default.
+
+## Code, Tests, Commits, and Comments
+
+- Code should make how the behavior is implemented clear.
+- Tests should make what behavior is expected clear.
+- Commit messages should explain why the change is needed.
+- Comments should explain why not an apparently reasonable alternative was chosen, including relevant constraints or non-obvious intent. Do not use comments to paraphrase the code's behavior.
 
 ## Important Files
 
